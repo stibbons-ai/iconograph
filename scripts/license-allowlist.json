@@ -1,0 +1,8 @@
+[
+  {
+    "name": "spdx-exceptions",
+    "version": "2.5.0",
+    "license": "CC-BY-3.0",
+    "reason": "SPDX exception identifier data used by the development-only SPDX parser. Installed README attributes copyright 2010-2015 Linux Foundation and contributors under CC-BY-3.0; attribution and licence link are preserved in THIRD_PARTY_NOTICES. This is an exact data-package exception, not general approval of Creative Commons software licences."
+  }
+]

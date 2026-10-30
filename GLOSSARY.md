@@ -1,0 +1,112 @@
+# Iconograph
+
+Iconograph produces identity-preserving professional headshots of one person by iteratively generating, scoring and re-prompting image models.
+
+## Inputs
+
+**Subject**:
+The one real person a Run depicts.
+_Avoid_: User, model, person
+
+**Reference Photo**:
+A photo of the Subject supplied as input; a Run takes 1 to 8 of them.
+
+**Identity Anchor**:
+The Subject's reference face identity, derived from all accepted Reference Photos, against which every Candidate's likeness is measured.
+_Avoid_: Reference embedding, centroid
+
+**Target Look**:
+The desired appearance of the headshot, expressed as fixed facets (pose, background, lighting and colour, hairstyle, clothing, framing); frozen for the lifetime of a Run.
+_Avoid_: Style, spec, target spec
+
+## Run structure
+
+**Run**:
+One attempt to produce a headshot of a Subject in a Target Look, ending with a Pick.
+_Avoid_: Job, session, project
+
+**Image Model**:
+One specific image-generation model (not a vendor) that a Lane drives.
+_Avoid_: Provider, generator, backend
+
+**Lane**:
+The part of a Run that optimizes Prompts for a single Image Model, with its own Prompt history; Lanes of a Run compete only at the Pick.
+_Avoid_: Track, branch, provider run
+
+**Iteration**:
+One generate–score–rewrite cycle within a Lane.
+_Avoid_: Round, step, epoch
+
+**Prompt**:
+The text sent to an Image Model in an Iteration; it may rephrase the Target Look but never change it.
+_Avoid_: Instruction
+
+**Candidate**:
+One attempt by an Image Model, within an Iteration, to produce a headshot; it ends with exactly one Candidate Outcome.
+_Avoid_: Output, result, sample
+
+**Candidate Outcome**:
+How a Candidate ended: **Refused** (the Image Model declined), **Failed** (errored after retries), **Gated** (no face, or below the Identity Gate) or **Scored** (judged against the Rubric).
+_Avoid_: Status, state
+
+**Pick**:
+The operator's final choice of Candidate(s) that concludes a Run.
+_Avoid_: Selection, winner
+
+## Scoring and steering
+
+**Identity Gate**:
+The minimum Likeness, fixed per face model, below which a Candidate is Gated without further judgement.
+_Avoid_: Threshold, face check
+
+**Identity Ceiling**:
+How alike the Subject's own Reference Photos are to each other; the point at which Likeness counts as perfect.
+_Avoid_: Max similarity, target similarity
+
+**Likeness**:
+A Candidate's identity match to the Identity Anchor as measured by a face-recognition model.
+_Avoid_: ArcFace score, similarity, identity score
+
+**Resemblance**:
+The Judge's assessment of whether a Candidate is unmistakably the Subject; scored separately from Likeness.
+_Avoid_: Judge identity, LLM identity
+
+**Disputed**:
+A Candidate whose Likeness and Resemblance disagree strongly.
+
+**Likeness Unconfirmed**:
+A finalist whose Likeness passes the loop's face model but not the held-out face model.
+
+**Rubric**:
+The versioned set of weighted criteria and anchored levels by which the Judge scores a Candidate.
+_Avoid_: Scorecard, criteria
+
+**Judge**:
+The vision model that scores a Candidate against the Reference Photos and Target Look using the Rubric.
+_Avoid_: Critic, evaluator, reviewer
+
+**Playoff**:
+The pairwise comparison among each Lane's best Candidates, judged in both orders, that ranks the finalists before the Pick.
+_Avoid_: Tournament, final round
+
+**Optimizer**:
+The language model that writes a Lane's next Prompt from the scores, issues and Steering of earlier Iterations.
+_Avoid_: Rewriter, prompt engineer
+
+**Steering**:
+Operator input given while a Run is in progress (star, veto, score override, note) that the Optimizer considers at the next Iteration.
+_Avoid_: Feedback, override
+
+**Budget**:
+The hard spending limit in USD for a single Run.
+_Avoid_: Quota, cap
+
+## Evaluation
+
+**Arm**:
+One strategy compared by the eval harness at equal Budget, e.g. the Optimizer loop versus resampling the starting Prompt.
+_Avoid_: Variant, baseline run
+
+**Judge Calibration**:
+Measuring how well the Judge's ranking of Candidates agrees with the operator's Steering labels.
+_Avoid_: Judge eval, alignment

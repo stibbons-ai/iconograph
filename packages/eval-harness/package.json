@@ -1,0 +1,15 @@
+{
+  "name": "@iconograph/eval-harness",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "scripts": {
+    "eval": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun src/cli.ts"
+  },
+  "dependencies": {
+    "@iconograph/domain": "workspace:*",
+    "@iconograph/server": "workspace:*",
+    "effect": "4.1.1"
+  }
+}

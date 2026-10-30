@@ -1,0 +1,45 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "categories": {
+    "correctness": "error"
+  },
+  "rules": {
+    "no-restricted-imports": [
+      "error",
+      {
+        "patterns": [
+          {
+            "regex": "(^|[/\\\\])@mastra[/\\\\][^/\\\\]+([/\\\\][^/\\\\]+)*[/\\\\]ee([/\\\\]|$)",
+            "message": "Mastra enterprise (ee) modules are not permitted; use Apache-2.0 community APIs."
+          },
+          {
+            "regex": "(^|[/\\\\])ee([/\\\\]|$)",
+            "message": "Enterprise ee entrypoints, including relative and deep imports, are prohibited."
+          }
+        ]
+      }
+    ]
+  },
+  "overrides": [
+    {
+      "files": ["packages/domain/**/*.ts"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "regex": "(^|[/\\\\])ee([/\\\\]|$)",
+                "message": "Enterprise ee entrypoints are prohibited."
+              },
+              {
+                "regex": "^(@mastra/|@libsql/|libsql($|/)|node:|@iconograph/(adapters|server|eval-harness)($|/))",
+                "message": "The domain package is pure Effect schemas, not infrastructure."
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

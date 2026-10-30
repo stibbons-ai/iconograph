@@ -1,0 +1,30 @@
+{
+  "name": "iconograph",
+  "private": true,
+  "version": "0.0.0",
+  "license": "MIT",
+  "type": "module",
+  "packageManager": "bun@1.4.2",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "run": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun packages/server/src/cli.ts",
+    "eval": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun packages/eval-harness/src/cli.ts",
+    "test": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun test",
+    "format": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 oxfmt --write package.json tsconfig.json .oxfmtrc.json .oxlintrc.json packages scripts .github README.md",
+    "format:check": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 oxfmt --check package.json tsconfig.json .oxfmtrc.json .oxlintrc.json packages scripts .github README.md",
+    "lint": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 oxlint --deny-warnings .",
+    "typecheck": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 tsc --noEmit",
+    "licenses": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun scripts/check-licenses.ts",
+    "check": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun run format:check && MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun run lint && MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun run typecheck && MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun run licenses && MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.4",
+    "@types/spdx-expression-parse": "4.0.0",
+    "oxfmt": "0.75.0",
+    "oxlint": "1.90.0",
+    "spdx-expression-parse": "5.0.0",
+    "typescript": "7.0.2"
+  }
+}
