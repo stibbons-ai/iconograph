@@ -1,0 +1,4 @@
+# yaml-language-server: $schema=https://devenv.sh/devenv.schema.json
+inputs:
+  nixpkgs:
+    url: github:cachix/devenv-nixpkgs/760b85220489f69855e6df78a6d1dad5873f8bf6

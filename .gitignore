@@ -9,3 +9,11 @@ dist/
 *.db-shm
 *.db-wal
 .DS_Store
+.devenv*
+.direnv/
+devenv.local.nix
+devenv.local.yaml
+
+# MemPalace per-project files (issue #185)
+mempalace.yaml
+entities.json

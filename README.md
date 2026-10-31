@@ -6,13 +6,31 @@ this milestone.
 
 ## Requirements and installation
 
-Use **Bun 1.4.2** (the `packageManager` pin). All direct dependencies are exact-pinned and `bun.lock`
-records the transitive graph. Mastra's published Node engine requirement is `>=22.13.0` if using Node
-for other tooling; this workspace runs its TypeScript directly with Bun.
+Install **Nix**, **devenv**, and **direnv** with its shell hook enabled. From the repository root,
+authorize the committed `.envrc`:
 
 ```sh
-MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun install --frozen-lockfile
+direnv allow
 ```
+
+Alternatively, enter the same environment explicitly with `devenv shell` (without direnv).
+The development shell supplies **Bun 1.4.2** (matching the `packageManager` pin) and **Git**,
+and exports `MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1` for tools and their child processes.
+No separate Node installation is required: this workspace runs its TypeScript directly with Bun.
+The committed `bunfig.toml` sets `[run] bun = true` so package-script executables use Bun even
+when their shebang requests Node; keep workspace script execution Bun-only.
+
+A task runs `bun install --frozen-lockfile` before shell entry. All direct dependencies are
+exact-pinned and `bun.lock` records the transitive graph. A failed install task does **not**
+guarantee that devenv refuses to open the shell: inspect the task output and resolve any install
+failure before running workspace commands. To retry manually inside the shell:
+
+```sh
+bun install --frozen-lockfile
+```
+
+The shell setup intentionally does not reuse the reference project's Astro, Playwright/browser
+downloads, application-server hooks, or Nixpacks configuration.
 
 The initial install encountered a workstation-global 259,200-second minimum release age: the npm
 registry's current `@mastra/core@1.80.0`, `@mastra/libsql@1.27.1` and `effect@4.1.1` were too recent
@@ -24,8 +42,12 @@ one-command exception rather than weakening shared configuration.
 
 ## Commands
 
-Every package script sets `MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1`; CI sets both for all steps.
-Apply those variables as well when invoking Bun or Mastra directly instead of through scripts.
+The development shell supplies both telemetry opt-out variables to tooling through environment
+inheritance. Root `run`, `eval`, and `test` scripts, and package runtime entrypoints, retain explicit
+`MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1` prefixes so they remain safe outside the shell.
+Formatting, linting, typechecking, and licence auditing use plain commands; `check` composes the
+scripts and finishes with `bun run test`. Outside the shell, set both variables when invoking Bun
+or Mastra directly instead of the runtime/evaluation/test scripts.
 
 ```sh
 # Validate, execute, and persist one Run in a local SQLite-compatible file.
@@ -47,7 +69,7 @@ bun run format:check
 bun run lint
 bun run typecheck
 bun run licenses
-bun run check         # format check → lint → typecheck → licences → bun test
+bun run check         # format check → lint → typecheck → licences → bun run test
 ```
 
 The database's parent directory must already exist. The default Run database is `./iconograph.db`;
@@ -56,10 +78,12 @@ evaluation harness uses an isolated temporary database and removes it afterwards
 JSON on stdout; failures are JSON on stderr and exit nonzero. The tracer returns the message and
 its JavaScript string length (**UTF-16 code units**, not Unicode graphemes).
 
-CI uses a frozen install, explicitly runs `bun test`, and runs the complete `bun run check` on Linux
-and macOS. Native optional dependencies are therefore audited on both hosts. Formatting commands
-name the files/directories authored for this milestone rather than formatting unrelated existing
-domain/ADR drafts. Add future adopted documentation deliberately to that target list.
+CI is independent of Nix, devenv, and direnv: it installs Bun directly and explicitly sets
+`MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1` for all steps. It uses a frozen install, explicitly
+runs `bun test`, and runs the complete `bun run check` on Linux and macOS. Native optional
+dependencies are therefore audited on both hosts. Formatting commands name the files/directories
+authored for this milestone rather than formatting unrelated existing domain/ADR drafts. Add
+future adopted documentation deliberately to that target list.
 
 ## Architecture and schema authority
 
@@ -93,10 +117,12 @@ OS, or workspace configuration.
 
 ## Telemetry and licensing policy
 
-No application telemetry is intentionally enabled. Mastra telemetry is disabled in all scripts and
-CI with `MASTRA_TELEMETRY_DISABLED=1`, and `DO_NOT_TRACK=1` is always set alongside it. Transitive
-telemetry libraries can still be present in the dependency graph; their presence is not evidence of
-a telemetry request. This milestone does not make provider/model requests.
+No application telemetry is intentionally enabled. The development shell and CI explicitly set
+`MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1`; standalone runtime, evaluation, and test scripts
+retain both flags as well. Tooling inherits the shell or CI environment rather than repeating the
+flags in every script. Transitive telemetry libraries can still be present in the dependency graph;
+their presence is not evidence of a telemetry request. This milestone does not make provider/model
+requests.
 
 `bun run licenses` reads actual installed package manifests across the full runtime **and**
 development graph, including nested installs, scopes, symlinks, and Bun's isolated `.bun` store.
