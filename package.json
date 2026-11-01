@@ -12,6 +12,8 @@
     "run": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun packages/server/src/cli.ts",
     "eval": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun packages/eval-harness/src/cli.ts",
     "models:fetch": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun packages/adapters/src/models-cli.ts",
+    "prices": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun packages/adapters/src/prices-cli.ts",
+    "prices:snapshot": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun scripts/update-price-snapshot.ts",
     "test": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun test",
     "format": "oxfmt --write package.json tsconfig.json .oxfmtrc.json .oxlintrc.json packages scripts .github docs/adr README.md",
     "format:check": "oxfmt --check package.json tsconfig.json .oxfmtrc.json .oxlintrc.json packages scripts .github docs/adr README.md",
@@ -23,6 +25,7 @@
     "check": "bun run format:check && bun run lint && bun run typecheck && bun run licenses && bun run adrs:check && bun run test"
   },
   "catalog": {
+    "@libsql/client": "0.18.0",
     "@mastra/core": "1.80.0",
     "@mastra/libsql": "1.27.1",
     "@types/bun": "1.4.4",

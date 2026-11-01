@@ -18,6 +18,8 @@
       "name": "@iconograph/adapters",
       "version": "0.0.0",
       "dependencies": {
+        "@iconograph/domain": "workspace:*",
+        "@libsql/client": "catalog:",
         "@mastra/core": "catalog:",
         "@mastra/libsql": "catalog:",
         "effect": "catalog:",
@@ -51,6 +53,7 @@
     },
   },
   "catalog": {
+    "@libsql/client": "0.18.0",
     "@mastra/core": "1.80.0",
     "@mastra/libsql": "1.27.1",
     "@types/bun": "1.4.4",

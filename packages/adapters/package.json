@@ -5,6 +5,8 @@
   "type": "module",
   "exports": "./src/index.ts",
   "dependencies": {
+    "@iconograph/domain": "workspace:*",
+    "@libsql/client": "catalog:",
     "@mastra/core": "catalog:",
     "@mastra/libsql": "catalog:",
     "effect": "catalog:"

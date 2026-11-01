@@ -115,6 +115,50 @@ locked files (same names) into `<data dir>/models` by any means; they are verifi
 **A checksum mismatch** is a hard error naming the model, path, expected and actual hash, and the
 file is never used. A corrupt present file is left in place: delete it and rerun `models:fetch`.
 
+### Model prices
+
+The Budget needs a price for every model a Run uses, so prices are looked up, never hard-coded,
+in this order:
+
+1. **Manual override**, set per model with the command below.
+2. **LiteLLM's public price data**
+   ([`model_prices_and_context_window.json`](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json)
+   on `main`), cached with its fetch time in `<data dir>/prices.db`. The `prices` command refreshes
+   it when 24 h old (or dated in the future); the price source's `ensureFresh` is meant to run at
+   server boot and daily. A failed refresh keeps serving the old cache with its age, marked `stale`
+   once it is 24 h old or dated in the future. An unrelated entry whose price fields are malformed
+   is dropped (that model is unpriced) and listed in `refresh.rejected`. A malformed entry for a
+   default model, a response that isn't JSON, or one that prices no model fails the refresh and
+   leaves the cache untouched.
+3. **Bundled snapshot**,
+   [`packages/adapters/litellm-prices.snapshot.json`](packages/adapters/litellm-prices.snapshot.json),
+   used only offline before the first successful fetch. It never fills gaps in a fetched cache.
+   `bun run prices:snapshot` regenerates it from LiteLLM's latest commit, recording that commit.
+
+A model with no price is refused with an `Unpriced` error, so a Run can't start unpriced. Default
+models map to LiteLLM keys explicitly (Gemini uses LiteLLM's Gemini API entry,
+`gemini/gemini-nano-banana-2.1`); any other model id is looked up as an LLM under its own id, and
+is unpriced if its entry carries image prices. Image prices: Gemini per image, per image token and
+per text/thinking output token, with the 2K price derived from the 1680 image tokens
+[Google lists](https://ai.google.dev/gemini-api/docs/pricing#gemini-nano-banana-2.1) for a 2K image;
+OpenAI image models per input and output image token; LLMs per input and output token. Only
+standard rates are read; cache, batch and long-context tiers are ignored. Vendors may discount
+cached input automatically, so prices are upper bounds; batch calls and contexts over 200k tokens
+are assumed unused.
+
+```sh
+bun run prices claude-sonnet-5-5           # price, source (override|litellm|snapshot) and age as JSON
+bun run prices claude-sonnet-5-5 --refresh # fetch LiteLLM's data now; a failure is an error
+bun run prices local-judge --set-override '{"input_cost_per_token":0,"output_cost_per_token":0}'
+bun run prices local-judge --clear-override
+```
+
+Overrides use LiteLLM's field names in USD and must include every field the model's pricing mode
+needs. All forms accept `--data-dir PATH` (or `ICONOGRAPH_DATA_DIR`). An implicit refresh that
+fails to fetch or validate is reported in the output's `refresh.error` and the lookup still answers
+from the old cache or the snapshot; if the lookup then fails, its error report includes that
+`refresh`.
+
 ### ADR validation and commits
 
 [`docs/adr/README.md`](docs/adr/README.md) defines the required frontmatter and reusable template.
@@ -166,7 +210,8 @@ No application telemetry is intentionally enabled. The development shell and CI 
 retain both flags as well. Tooling inherits the shell or CI environment rather than repeating the
 flags in every script. Transitive telemetry libraries can still be present in the dependency graph;
 their presence is not evidence of a telemetry request. This milestone does not make provider/model
-requests.
+requests; its only outbound requests fetch locked model weights and LiteLLM's price file. The
+maintainer-run `bun run prices:snapshot` also queries `api.github.com` for LiteLLM's latest commit.
 
 `bun run licenses` reads actual installed package manifests across the full runtime **and**
 development graph, including nested installs, scopes, symlinks, and Bun's isolated `.bun` store.
