@@ -20,13 +20,19 @@ No separate Node installation is required: this workspace runs its TypeScript di
 The committed `bunfig.toml` sets `[run] bun = true` so package-script executables use Bun even
 when their shebang requests Node; keep workspace script execution Bun-only.
 
-A task runs `bun install --frozen-lockfile` before shell entry. All direct dependencies are
-exact-pinned and `bun.lock` records the transitive graph. A failed install task does **not**
-guarantee that devenv refuses to open the shell: inspect the task output and resolve any install
-failure before running workspace commands. To retry manually inside the shell:
+Before shell entry, tasks run `bun install --frozen-lockfile`, then `bun run hooks:install`.
+Direct dependency constraints live in the root catalog; `bun.lock` records resolved versions.
+Hook setup activates the committed `.githooks/pre-commit` via repository-local
+`core.hooksPath=.githooks`; it does not change global Git configuration. It is safe to rerun,
+but refuses a conflicting hooks path or existing executable nonsample files in the default hooks directory rather
+than replacing or bypassing your hooks. Integrate those hooks manually before retrying.
+A failed setup task does **not** guarantee that devenv refuses to open the shell: inspect task
+output and resolve installation or hook failures before running workspace commands.
+To set up or retry manually (also required when working outside devenv):
 
 ```sh
 bun install --frozen-lockfile
+bun run hooks:install
 ```
 
 The shell setup intentionally does not reuse the reference project's Astro, Playwright/browser
@@ -45,9 +51,9 @@ one-command exception rather than weakening shared configuration.
 The development shell supplies both telemetry opt-out variables to tooling through environment
 inheritance. Root `run`, `eval`, and `test` scripts, and package runtime entrypoints, retain explicit
 `MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1` prefixes so they remain safe outside the shell.
-Formatting, linting, typechecking, and licence auditing use plain commands; `check` composes the
-scripts and finishes with `bun run test`. Outside the shell, set both variables when invoking Bun
-or Mastra directly instead of the runtime/evaluation/test scripts.
+Formatting, linting, typechecking, licence auditing, and ADR validation use plain commands;
+`check` composes the scripts and finishes with `bun run test`. Outside the shell, set both variables
+when invoking Bun or Mastra directly instead of the runtime/evaluation/test scripts.
 
 ```sh
 # Validate, execute, and persist one Run in a local SQLite-compatible file.
@@ -69,7 +75,9 @@ bun run format:check
 bun run lint
 bun run typecheck
 bun run licenses
-bun run check         # format check → lint → typecheck → licences → bun run test
+bun run adrs:check    # validate every ADR in the worktree
+bun run hooks:install
+bun run check         # format → lint → typecheck → licences → ADRs → tests
 ```
 
 The database's parent directory must already exist. The default Run database is `./iconograph.db`;
@@ -81,9 +89,22 @@ its JavaScript string length (**UTF-16 code units**, not Unicode graphemes).
 CI is independent of Nix, devenv, and direnv: it installs Bun directly and explicitly sets
 `MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1` for all steps. It uses a frozen install, explicitly
 runs `bun test`, and runs the complete `bun run check` on Linux and macOS. Native optional
-dependencies are therefore audited on both hosts. Formatting commands name the files/directories
-authored for this milestone rather than formatting unrelated existing domain/ADR drafts. Add
-future adopted documentation deliberately to that target list.
+dependencies are therefore audited on both hosts. Formatting commands include the adopted
+`docs/adr` collection, including its template README, but exclude unrelated domain drafts.
+
+### ADR validation and commits
+
+[`docs/adr/README.md`](docs/adr/README.md) defines the required frontmatter and reusable template.
+The pre-commit hook validates added, copied, modified, or renamed ADRs from the **Git index**,
+not your unstaged edits. Stage a corrected ADR before retrying a rejected commit; conversely,
+an invalid unstaged edit does not block a valid staged version. Deleted ADRs and the template
+README are exempt, and references resolve against the staged ADR inventory. The hook runs
+from the repository root even when you commit from a subdirectory.
+
+`bun run adrs:check` validates the entire working-tree collection, and root `bun run check`
+runs it in CI regardless of local hook installation. Ordinary local hooks can be bypassed
+(for example, `git commit --no-verify`); they are an early feedback mechanism, not a security
+boundary or a replacement for the full CI check.
 
 ## Architecture and schema authority
 
@@ -105,7 +126,7 @@ The installed pins are `effect@4.1.1`, `@mastra/core@1.80.0`, and `@mastra/libsq
 historical Mastra API or an Effect 3 compatibility layer). In Effect 4.1.1,
 `Schema.toStandardSchemaV1` and `Schema.toStandardJSONSchemaV1` return wrappers/clones; they do not
 mutate the source schema. The adapter composes both capabilities and caches one composed wrapper
-per schema. Existing draft ADR text describing mutation is not an accurate description of this
+per schema. Historical ADR text describing mutation is not an accurate description of this
 installed release and is intentionally not edited as part of the workspace cutover.
 
 Standalone Oxlint/Oxfmt are the M0 tools, not a claim that Vite+ is incompatible with Bun. An isolated

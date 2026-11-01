@@ -1,3 +1,9 @@
+---
+title: "Two face models: one the loop optimizes against, one held out"
+status: accepted
+date: 2026-10-30
+---
+
 # Two face models: one the loop optimizes against, one held out
 
 Likeness inside the loop is measured with SFace; finalists are additionally scored with FaceNet (Inception-ResNet-v1 trained on VGGFace2, MIT code, weights MIT by inheritance), which the Optimizer never sees. An optimization loop drifts toward whatever its scorer rewards, so a second model with a different architecture, training set and loss is the cheapest check that a high Likeness is real identity rather than scorer overfitting; disagreement marks a finalist "Likeness Unconfirmed".

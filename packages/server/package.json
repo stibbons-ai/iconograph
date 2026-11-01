@@ -10,7 +10,7 @@
   "dependencies": {
     "@iconograph/domain": "workspace:*",
     "@iconograph/adapters": "workspace:*",
-    "@mastra/core": "1.80.0",
-    "effect": "4.1.1"
+    "@mastra/core": "catalog:",
+    "effect": "catalog:"
   }
 }

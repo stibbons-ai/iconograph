@@ -10,6 +10,6 @@
   "dependencies": {
     "@iconograph/domain": "workspace:*",
     "@iconograph/server": "workspace:*",
-    "effect": "4.1.1"
+    "effect": "catalog:"
   }
 }

@@ -5,28 +5,29 @@
     "": {
       "name": "iconograph",
       "devDependencies": {
-        "@types/bun": "1.4.4",
-        "@types/spdx-expression-parse": "4.0.0",
-        "oxfmt": "0.75.0",
-        "oxlint": "1.90.0",
-        "spdx-expression-parse": "5.0.0",
-        "typescript": "7.0.2",
+        "@types/bun": "catalog:",
+        "@types/spdx-expression-parse": "catalog:",
+        "oxfmt": "catalog:",
+        "oxlint": "catalog:",
+        "spdx-expression-parse": "catalog:",
+        "typescript": "catalog:",
+        "yaml": "catalog:",
       },
     },
     "packages/adapters": {
       "name": "@iconograph/adapters",
       "version": "0.0.0",
       "dependencies": {
-        "@mastra/core": "1.80.0",
-        "@mastra/libsql": "1.27.1",
-        "effect": "4.1.1",
+        "@mastra/core": "catalog:",
+        "@mastra/libsql": "catalog:",
+        "effect": "catalog:",
       },
     },
     "packages/domain": {
       "name": "@iconograph/domain",
       "version": "0.0.0",
       "dependencies": {
-        "effect": "4.1.1",
+        "effect": "catalog:",
       },
     },
     "packages/eval-harness": {
@@ -35,7 +36,7 @@
       "dependencies": {
         "@iconograph/domain": "workspace:*",
         "@iconograph/server": "workspace:*",
-        "effect": "4.1.1",
+        "effect": "catalog:",
       },
     },
     "packages/server": {
@@ -44,10 +45,22 @@
       "dependencies": {
         "@iconograph/adapters": "workspace:*",
         "@iconograph/domain": "workspace:*",
-        "@mastra/core": "1.80.0",
-        "effect": "4.1.1",
+        "@mastra/core": "catalog:",
+        "effect": "catalog:",
       },
     },
+  },
+  "catalog": {
+    "@mastra/core": "1.80.0",
+    "@mastra/libsql": "1.27.1",
+    "@types/bun": "1.4.4",
+    "@types/spdx-expression-parse": "4.0.0",
+    "effect": "^4",
+    "oxfmt": "0.75.0",
+    "oxlint": "1.90.0",
+    "spdx-expression-parse": "5.0.0",
+    "typescript": "7.0.2",
+    "yaml": "2.9.1",
   },
   "packages": {
     "@a2a-js/sdk-v0_3": ["@a2a-js/sdk@0.3.14", "", { "dependencies": { "uuid": "^11.1.0" }, "peerDependencies": { "@bufbuild/protobuf": "^2.10.2", "@grpc/grpc-js": "^1.11.0", "express": "^4.21.2 || ^5.1.0" }, "optionalPeers": ["@bufbuild/protobuf", "@grpc/grpc-js", "express"] }, "sha512-F6Ew1AtPzCLhTn8h9yiqTe7DiDf6XVrSnq9V1YqSl9eWqPm6anMveTiKdCSb/76cW0YiJc24rNaUrVezFFHbqQ=="],

@@ -1,3 +1,9 @@
+---
+title: "Ship a Bun JS bundle with only the native addons as node_modules, not a compiled binary"
+status: accepted
+date: 2026-10-30
+---
+
 # Ship a Bun JS bundle with only the native addons as node_modules, not a compiled binary
 
 The server is built with `bun build --target bun`, marking the native addons (`onnxruntime-node`, `sharp`, `libsql`) external; the image is `distroless/cc-debian12` plus the `bun` binary, the bundle, and a production install of only those externals (generated from `bun.lock`, pruned to the target platform: ~55 MB instead of ~560 MB). `bun build --compile` with the same externals also works and is the same size and startup time, but needs `--compile-autoload-package-json` and a `NODE_PATH` workaround (oven-sh/bun#44053), so we chose the bundle.

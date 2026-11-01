@@ -5,8 +5,8 @@
   "type": "module",
   "exports": "./src/index.ts",
   "dependencies": {
-    "@mastra/core": "1.80.0",
-    "@mastra/libsql": "1.27.1",
-    "effect": "4.1.1"
+    "@mastra/core": "catalog:",
+    "@mastra/libsql": "catalog:",
+    "effect": "catalog:"
   }
 }

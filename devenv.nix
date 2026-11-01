@@ -15,4 +15,10 @@
     exec = "bun install --frozen-lockfile";
     before = [ "devenv:enterShell" ];
   };
+
+  tasks."iconograph:hooks" = {
+    exec = "bun run hooks:install";
+    after = [ "iconograph:install" ];
+    before = [ "devenv:enterShell" ];
+  };
 }

@@ -1,3 +1,9 @@
+---
+title: "Permissively licensed face models by default; InsightFace is opt-in"
+status: accepted
+date: 2026-10-30
+---
+
 # Permissively licensed face models by default; InsightFace is opt-in
 
 The default face backend is OpenCV's YuNet detector (MIT) and SFace recognizer (Apache-2.0), bundled with the app. InsightFace's `buffalo_l` weights, used by the original prototype, are licensed for non-commercial research only (the code is MIT, the weights are not), so they are an opt-in backend that the operator downloads themselves after a licence notice. A self-hoster using Iconograph commercially must never be put in breach of a licence without knowing it.
