@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { FaceBox } from "@iconograph/domain";
@@ -47,9 +47,32 @@ export async function corruptAllWeights(dataDirectory: string): Promise<void> {
   }
 }
 
-/** The verified local models folder, for a spawned CLI to link into its data volume. */
-export async function verifiedModelsDirectory(): Promise<string> {
+/**
+ * The verified local models folder, for a spawned CLI to link into its data
+ * volume. Only `ids` are verified, so SFace tests never need the FaceNet build.
+ */
+export async function verifiedModelsDirectory(ids: readonly string[]): Promise<string> {
   const directory = modelsDirectory(weightsDataDirectory);
-  await ensureModels({ lock: readModelLock(), directory, fetch: missingWeights });
+  await ensureModels({ lock: readModelLock(), directory, ids, fetch: missingWeights });
   return directory;
 }
+
+/** A fresh data volume (from `temporaryDirectory`) whose models folder links to the verified `ids`. */
+export async function dataVolume(
+  temporaryDirectory: () => Promise<string>,
+  ids: readonly string[],
+): Promise<string> {
+  const data = await temporaryDirectory();
+  await symlink(await verifiedModelsDirectory(ids), join(data, "models"));
+  return data;
+}
+
+/** Run a CLI module (`src/<name>`) as its own Bun process, with stdout and stderr piped. */
+export const spawnCli = (name: string, args: readonly string[]) =>
+  Bun.spawn(
+    [process.execPath, fileURLToPath(new URL(`../src/${name}`, import.meta.url)), ...args],
+    {
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );

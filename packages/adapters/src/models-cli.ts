@@ -3,7 +3,7 @@ import { modelsDirectory, resolveDataDirectory } from "./data-directory";
 import { errorLine } from "./errors";
 import { ensureModels, readModelLock, type ModelLock } from "./models";
 
-const help = `Fetch and verify every locked face-model weight file
+const help = `Fetch and verify every downloadable locked face-model weight file
 
 Usage:
   bun run models:fetch [--data-dir PATH]
@@ -15,6 +15,8 @@ Options:
 
 Prints JSON listing each model's id, path, sha256 and whether it was downloaded.
 Verified files are not downloaded again. A SHA-256 mismatch is an error.
+FaceNet is never downloaded (we choose not to redistribute it, ADR-0011): build
+it with the command in its lock entry (bun run models:export-facenet).
 Errors print JSON to stderr and exit nonzero.
 `;
 
@@ -41,7 +43,9 @@ export async function main(args: string[], dependencies: ModelsCliDependencies =
   }
   if (positionals.length > 0) throw new Error("Unexpected arguments; use --help for usage");
   const directory = modelsDirectory(resolveDataDirectory(values["data-dir"]));
-  const models = await ensureModels({ lock: dependencies.lock ?? readModelLock(), directory });
+  const lock = dependencies.lock ?? readModelLock();
+  const ids = lock.models.flatMap((model) => (model.url ? [model.id] : []));
+  const models = await ensureModels({ lock, directory, ids });
   stdout(`${JSON.stringify({ directory, models })}\n`);
 }
 
