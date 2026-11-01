@@ -15,3 +15,8 @@ export function resolveDataDirectory(
 export function modelsDirectory(dataDirectory: string): string {
   return join(dataDirectory, "models");
 }
+
+/** The LiteLLM price cache and manual price overrides, a LibSQL file in the data volume. */
+export function pricesDatabase(dataDirectory: string): string {
+  return join(dataDirectory, "prices.db");
+}
