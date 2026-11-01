@@ -17,3 +17,6 @@ devenv.local.yaml
 # MemPalace per-project files (issue #185)
 mempalace.yaml
 entities.json
+
+# Model weights are fetched into the data volume, never committed (ADR-0005)
+*.onnx
