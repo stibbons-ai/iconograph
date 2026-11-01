@@ -1,7 +1,9 @@
-import { open, mkdir, rename, rm } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { Schema } from "effect";
 import bundledLock from "../models.lock.json";
+import { errorMessage } from "./errors";
+import { writeFileAtomically } from "./files";
 
 /**
  * Licences reviewed for automatically fetched weights (ADR-0002). InsightFace's
@@ -99,7 +101,7 @@ export async function ensureModels(options: EnsureModelsOptions): Promise<Ensure
     }
     const present = await hashFile(path).catch((error: unknown) => {
       throw new ModelWeightError(
-        `Model ${model.id} at ${path} could not be read: ${message(error)}`,
+        `Model ${model.id} at ${path} could not be read: ${errorMessage(error)}`,
         {
           cause: error,
         },
@@ -120,8 +122,6 @@ export async function ensureModels(options: EnsureModelsOptions): Promise<Ensure
 /** A failure that already names the model and its path or URL. */
 class ModelWeightError extends Error {}
 
-const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
-
 /** SHA-256 of a file, or undefined when it does not exist. */
 async function hashFile(path: string): Promise<string | undefined> {
   const hasher = new Bun.CryptoHasher("sha256");
@@ -140,55 +140,50 @@ async function hashFile(path: string): Promise<string | undefined> {
  * a partial or unverified file.
  */
 async function download(model: ModelWeight, path: string, fetchModel: Fetch): Promise<void> {
-  const temp = `${path}.${crypto.randomUUID()}.partial`;
+  let size = 0;
   try {
-    // Open first so a local failure (EACCES, ENOSPC) never strands a response body.
-    const handle = await open(temp, "wx");
-    let size = 0;
-    try {
-      const response = await fetchModel(model.url);
-      if (!response.ok || !response.body) {
-        await response.body?.cancel().catch(() => undefined);
-        throw new ModelWeightError(
-          `Model ${model.id} download failed: HTTP ${response.status} from ${model.url}`,
-        );
-      }
-      for await (const chunk of response.body) {
-        size += chunk.byteLength;
-        if (size > model.size) {
+    await writeFileAtomically(
+      path,
+      async (handle) => {
+        const response = await fetchModel(model.url);
+        if (!response.ok || !response.body) {
+          await response.body?.cancel().catch(() => undefined);
           throw new ModelWeightError(
-            `Model ${model.id} download from ${model.url} exceeded the locked size of ${model.size} bytes`,
+            `Model ${model.id} download failed: HTTP ${response.status} from ${model.url}`,
           );
         }
-        await handle.write(chunk);
-      }
-      await handle.sync();
-    } catch (error) {
-      // The original failure wins over a close error on the way out.
-      await handle.close().catch(() => undefined);
-      throw error;
-    }
-    await handle.close();
-    if (size !== model.size) {
-      throw new ModelWeightError(
-        `Model ${model.id} download from ${model.url} ended after ${size} of ${model.size} bytes`,
-      );
-    }
-    // Hash what was stored, not what was received, so a short write cannot pass.
-    const actual = await hashFile(temp);
-    if (actual !== model.sha256) {
-      throw new ModelWeightError(
-        `Model ${model.id} download to ${path} failed SHA-256 verification: expected ${model.sha256}, actual ${actual ?? "missing file"}`,
-      );
-    }
-    await rename(temp, path);
+        for await (const chunk of response.body) {
+          size += chunk.byteLength;
+          if (size > model.size) {
+            throw new ModelWeightError(
+              `Model ${model.id} download from ${model.url} exceeded the locked size of ${model.size} bytes`,
+            );
+          }
+          await handle.write(chunk);
+        }
+      },
+      {
+        suffix: ".partial",
+        verify: async (temp) => {
+          if (size !== model.size) {
+            throw new ModelWeightError(
+              `Model ${model.id} download from ${model.url} ended after ${size} of ${model.size} bytes`,
+            );
+          }
+          // Hash what was stored, not what was received, so a short write cannot pass.
+          const actual = await hashFile(temp);
+          if (actual !== model.sha256) {
+            throw new ModelWeightError(
+              `Model ${model.id} download to ${path} failed SHA-256 verification: expected ${model.sha256}, actual ${actual ?? "missing file"}`,
+            );
+          }
+        },
+      },
+    );
   } catch (error) {
-    // A leftover .partial is never at the final path, so a cleanup failure must
-    // not replace the original error.
-    await rm(temp, { force: true }).catch(() => undefined);
     if (error instanceof ModelWeightError) throw error;
     throw new ModelWeightError(
-      `Model ${model.id} download from ${model.url} to ${path} failed: ${message(error)}`,
+      `Model ${model.id} download from ${model.url} to ${path} failed: ${errorMessage(error)}`,
       { cause: error },
     );
   }

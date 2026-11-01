@@ -13,4 +13,7 @@ export const RunOutput = Schema.Struct({
 
 export type RunInput = typeof RunInput.Type;
 export type RunOutput = typeof RunOutput.Type;
+
+export * from "./face";
+export * from "./identity";
 export * from "./prices";

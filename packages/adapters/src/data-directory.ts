@@ -20,3 +20,8 @@ export function modelsDirectory(dataDirectory: string): string {
 export function pricesDatabase(dataDirectory: string): string {
   return join(dataDirectory, "prices.db");
 }
+
+/** Content-addressed image files (Reference Photos) in the data volume. */
+export function imagesDirectory(dataDirectory: string): string {
+  return join(dataDirectory, "images");
+}

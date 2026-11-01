@@ -1,8 +1,8 @@
 # Iconograph
 
-A Bun workspace proving a persistent, model-free **Run** workflow before image-product work.
-There are no provider credentials, model calls, headshot processing, UI, or production deployment in
-this milestone.
+A Bun workspace proving a persistent, model-free **Run** workflow before image-product work, plus the
+local face pipeline that validates Reference Photos. There are no provider credentials, vendor model
+calls, UI, or production deployment in this milestone.
 
 ## Requirements and installation
 
@@ -87,8 +87,9 @@ JSON on stdout; failures are JSON on stderr and exit nonzero. The tracer returns
 its JavaScript string length (**UTF-16 code units**, not Unicode graphemes).
 
 CI is independent of Nix, devenv, and direnv: it installs Bun directly and explicitly sets
-`MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1` for all steps. It uses a frozen install, explicitly
-runs `bun test`, and runs the complete `bun run check` on Linux and macOS. Native optional
+`MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1` for all steps. It uses a frozen install, fetches the
+locked face-model weights (cached by the lock file's hash), explicitly runs `bun test`, and runs the
+complete `bun run check` on Linux and macOS. Native optional
 dependencies are therefore audited on both hosts. Formatting commands include the adopted
 `docs/adr` collection, including its template README, but exclude unrelated domain drafts.
 
@@ -159,6 +160,68 @@ fails to fetch or validate is reported in the output's `refresh.error` and the l
 from the old cache or the snapshot; if the lookup then fails, its error report includes that
 `refresh`.
 
+### Reference Photos
+
+`photos:validate` checks 1 to 8 Reference Photos of one Subject the way a Run's prepare step will,
+using the locked face models (fetched on first use, see Model weights above):
+
+```sh
+bun run photos:validate me-1.jpg me-2.heic me-3.png               # data dir as for models:fetch
+bun run photos:validate --face 2:1 me-1.jpg team-photo.jpg me-3.png # photo 2: use face 1
+```
+
+- **Formats:** JPEG, PNG and HEIC (AVIF and other formats are rejected). Every file is fully decoded,
+  not just sniffed. A truncated or unsupported file, one over 50 MiB, or an image over 50 megapixels
+  (checked from its header before decoding) is an error naming the photo, and so is corrupt JPEG or
+  PNG data (including JPEG "corrupt data" warnings). **HEIC corruption detection is best-effort:** a
+  damaged or truncated HEIC container is rejected, but the HEVC decoder (libde265) conceals errors
+  inside the image data and returns a damaged picture without any error, even with libheif's strict
+  mode; such a photo is judged on its damaged pixels. 50 MP admits 48 MP phone captures (recent
+  iPhones in HEIC); larger photos, such as some Android phones' 50–200 MP modes, must be downscaled
+  first. A JPEG or PNG at the cap decodes to about 150 MB of RGB; a HEIC peaks higher, at about
+  200 MB of RGBA in the decoder's WebAssembly heap (which never shrinks), a 200 MB copy and the
+  150 MB RGB. The same file given twice is an error, and so is a photo with a usable face whose
+  pixels repeat an earlier one: a duplicate would count twice. HEIC is decoded in software with
+  `libheif-js` (libheif + libde265, LGPL-3.0) before `sharp`, whose prebuilt libvips has no HEVC
+  decoder. HEVC is patent-encumbered in some countries; self-hosters who need certainty should check
+  whether decoding HEVC needs a licence where they are. EXIF orientation is applied before face
+  detection; transparency is flattened onto white.
+- **Report** (one JSON object on stdout; photos and faces are numbered from 1, faces highest score
+  first): per photo, `accepted` (with its face box and score, its similarity to the other accepted
+  photos, `null` when it is the only one, and the stored file), `rejected` with `no-face`,
+  `choice-required` with every detected face (box and score; rerun with `--face PHOTO:FACE`), or
+  `flagged` as `not-the-same-person` with its similarity. Then the Identity Anchor (the 128-d
+  normalised mean SFace embedding of the accepted photos), the Identity Ceiling (median pairwise
+  similarity of the accepted photos, or SFace's single-photo default) and warnings: fewer than 3
+  accepted photos, nothing accepted, or a Ceiling below the Gate (every photo passed against the
+  others, but they barely agree with each other; the Ceiling is reported as measured, not clamped).
+  Errors print JSON to stderr and exit nonzero, with `photo` when the error is about one photo
+  (including a face-model failure while processing it); a HEIC decoder that fails to load is
+  reported as such, not as a bad photo. Warnings from the run itself also go to stderr as JSON.
+- **"Not the same person"** is judged against the others: each photo's cosine similarity to the
+  Identity Anchor of the _other_ accepted photos, compared with the SFace Identity Gate (0.40,
+  ADR-0008). The lowest photo below the Gate is flagged and left out, and the rest are rechecked,
+  so one outlier can't drag genuine photos below the Gate or pull the anchor towards itself. A
+  flagged photo that reaches the Gate once later outliers are out is re-admitted (once). If only two
+  photos remain and they disagree, both are flagged; if that leaves nothing accepted, the most
+  similar flagged pair that reaches the Gate is re-admitted. Reported similarities are against the
+  final anchor of the _other_ accepted photos; when none is accepted, each flagged photo reports its
+  best similarity to any one other photo (always below the Gate, since no pair reached it).
+  Flagged photos are excluded from the anchor and ceiling; remove them, or replace them with better
+  photos of the Subject.
+- **Privacy:** photos never leave the machine. Accepted photos are re-encoded from decoded pixels
+  (JPEG, quality 95) into `<data dir>/images/<sha256>.jpg`, so no EXIF, GPS, XMP, IPTC or ICC
+  metadata from the upload is stored. Rejected, flagged and choice-required photos are not stored.
+
+Thresholds live in one per-model config (`sfaceConfig` in
+[`packages/adapters/src/face-embedder.ts`](packages/adapters/src/face-embedder.ts)); the Identity
+Gate and the single-photo Ceiling (0.60) are provisional until calibrated on real pairs in
+Milestone 0 (issue #1). The
+face tests use only licence-clear fixtures, listed in
+[`packages/adapters/test/fixtures/faces/README.md`](packages/adapters/test/fixtures/faces/README.md),
+and need the real weights: run `bun run models:fetch` first (CI caches them); missing weights fail
+the tests with that command rather than skipping them.
+
 ### ADR validation and commits
 
 [`docs/adr/README.md`](docs/adr/README.md) defines the required frontmatter and reusable template.
@@ -175,12 +238,12 @@ boundary or a replacement for the full CI check.
 
 ## Architecture and schema authority
 
-| Package                    | Responsibility                                               | Dependencies at the boundary                       |
-| -------------------------- | ------------------------------------------------------------ | -------------------------------------------------- |
-| `@iconograph/domain`       | Pure Run input/output Effect schemas                         | Effect only; no Mastra, storage, or infrastructure |
-| `@iconograph/adapters`     | The one Effect-to-Mastra schema helper; local LibSQL storage | Effect, Mastra core and LibSQL adapter             |
-| `@iconograph/server`       | Trivial Run workflow and persistent CLI                      | Domain and adapters; Mastra owns durable execution |
-| `@iconograph/eval-harness` | Runnable local evaluation fixtures                           | Domain and server; no provider credentials         |
+| Package                    | Responsibility                                                                                                                                  | Dependencies at the boundary                                                               |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `@iconograph/domain`       | Pure Run schemas; `FaceEmbedder` seam; Identity Anchor/Ceiling and photo verdicts; price precedence and `Unpriced`                              | Effect only; no Mastra, storage, or infrastructure                                         |
+| `@iconograph/adapters`     | Effect-to-Mastra schema helper; LibSQL storage; model weights; YuNet/SFace via ONNX; Reference Photo decoding and storage; LiteLLM price source | Effect, Mastra core and LibSQL adapter, libsql client, onnxruntime-node, sharp, libheif-js |
+| `@iconograph/server`       | Trivial Run workflow and persistent CLI                                                                                                         | Domain and adapters; Mastra owns durable execution                                         |
+| `@iconograph/eval-harness` | Runnable local evaluation fixtures                                                                                                              | Domain and server; no provider credentials                                                 |
 
 **Effect Schema is the single schema source.** Mastra is the single durable workflow engine; LibSQL
 stores its snapshots. Zod exists transitively in Mastra's dependency graph but is not an independent
@@ -217,7 +280,8 @@ maintainer-run `bun run prices:snapshot` also queries `api.github.com` for LiteL
 development graph, including nested installs, scopes, symlinks, and Bun's isolated `.bun` store.
 It also checks the committed lockfile so a missing host-compatible package cannot turn into a
 successful partial audit. Packages omitted because of another OS/CPU are audited offline using
-reviewed entries in `scripts/platform-license-metadata.json`. Each entry records the exact package
+reviewed entries in `scripts/platform-license-metadata.json`; so are packages that only such
+omitted packages depend on (for example `sharp`'s WebAssembly fallback). Each entry records the exact package
 name and version, full registry licence string, integrity from `bun.lock`, and exact public npm
 version URL. Missing, malformed or duplicate metadata and integrity mismatches fail closed.
 Installed packages are always audited from their actual manifests, not the metadata snapshot.
@@ -240,8 +304,12 @@ reviewed exception applies. `WITH` exceptions and `+` suffixes are not approved 
 Exceptions live in `scripts/license-allowlist.json` and require an exact package name, exact version,
 full licence string, and a substantive review reason. Wildcard/range versions, empty reasons and
 duplicate exceptions are rejected. Updating a dependency does not inherit an old exception. The
-current exception is `spdx-exceptions@2.5.0`'s CC-BY-3.0 SPDX identifier data, with attribution in
-[`THIRD_PARTY_NOTICES`](THIRD_PARTY_NOTICES). Do not add an exception merely to make CI pass: inspect
+current exceptions are `spdx-exceptions@2.5.0`'s CC-BY-3.0 SPDX identifier data; the prebuilt
+LGPL-3.0-or-later libvips binaries that `sharp` loads as unmodified, separately installed shared
+libraries (`@img/sharp-libvips-*`); `sharp`'s Windows and WebAssembly builds, which bundle libvips
+and are locked only as optional platform builds, never installed on the supported Linux and macOS
+hosts; and the LGPL-3.0 `libheif-js@1.23.5` WebAssembly HEIC decoder, loaded unmodified from its own package,
+with attribution in [`THIRD_PARTY_NOTICES`](THIRD_PARTY_NOTICES). Do not add an exception merely to make CI pass: inspect
 the installed licence text and upstream terms first, and retain required notices on redistribution.
 
 Mastra's package-level Apache-2.0 metadata explicitly excludes **every `ee/` directory**. Oxlint's

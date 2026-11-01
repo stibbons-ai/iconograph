@@ -4,5 +4,95 @@
     "version": "2.5.0",
     "license": "CC-BY-3.0",
     "reason": "SPDX exception identifier data used by the development-only SPDX parser. Installed README attributes copyright 2010-2015 Linux Foundation and contributors under CC-BY-3.0; attribution and licence link are preserved in THIRD_PARTY_NOTICES. This is an exact data-package exception, not general approval of Creative Commons software licences."
+  },
+  {
+    "name": "@img/sharp-libvips-darwin-arm64",
+    "version": "1.3.4",
+    "license": "LGPL-3.0-or-later",
+    "reason": "Prebuilt libvips for sharp (ADR-0003 chose sharp for decoding). Shipped as an unmodified, separately installed shared library that sharp's Apache-2.0 addon links dynamically, so the operator can replace it; the package's licence and notice files are preserved and attributed in THIRD_PARTY_NOTICES. Exact-version exception, not general approval of LGPL dependencies."
+  },
+  {
+    "name": "@img/sharp-libvips-darwin-x64",
+    "version": "1.3.4",
+    "license": "LGPL-3.0-or-later",
+    "reason": "Prebuilt libvips for sharp (ADR-0003 chose sharp for decoding). Shipped as an unmodified, separately installed shared library that sharp's Apache-2.0 addon links dynamically, so the operator can replace it; the package's licence and notice files are preserved and attributed in THIRD_PARTY_NOTICES. Exact-version exception, not general approval of LGPL dependencies."
+  },
+  {
+    "name": "@img/sharp-libvips-linux-arm64",
+    "version": "1.3.4",
+    "license": "LGPL-3.0-or-later",
+    "reason": "Prebuilt libvips for sharp (ADR-0003 chose sharp for decoding). Shipped as an unmodified, separately installed shared library that sharp's Apache-2.0 addon links dynamically, so the operator can replace it; the package's licence and notice files are preserved and attributed in THIRD_PARTY_NOTICES. Exact-version exception, not general approval of LGPL dependencies."
+  },
+  {
+    "name": "@img/sharp-libvips-linux-arm",
+    "version": "1.3.4",
+    "license": "LGPL-3.0-or-later",
+    "reason": "Prebuilt libvips for sharp (ADR-0003 chose sharp for decoding). Shipped as an unmodified, separately installed shared library that sharp's Apache-2.0 addon links dynamically, so the operator can replace it; the package's licence and notice files are preserved and attributed in THIRD_PARTY_NOTICES. Exact-version exception, not general approval of LGPL dependencies."
+  },
+  {
+    "name": "@img/sharp-libvips-linux-ppc64",
+    "version": "1.3.4",
+    "license": "LGPL-3.0-or-later",
+    "reason": "Prebuilt libvips for sharp (ADR-0003 chose sharp for decoding). Shipped as an unmodified, separately installed shared library that sharp's Apache-2.0 addon links dynamically, so the operator can replace it; the package's licence and notice files are preserved and attributed in THIRD_PARTY_NOTICES. Exact-version exception, not general approval of LGPL dependencies."
+  },
+  {
+    "name": "@img/sharp-libvips-linux-riscv64",
+    "version": "1.3.4",
+    "license": "LGPL-3.0-or-later",
+    "reason": "Prebuilt libvips for sharp (ADR-0003 chose sharp for decoding). Shipped as an unmodified, separately installed shared library that sharp's Apache-2.0 addon links dynamically, so the operator can replace it; the package's licence and notice files are preserved and attributed in THIRD_PARTY_NOTICES. Exact-version exception, not general approval of LGPL dependencies."
+  },
+  {
+    "name": "@img/sharp-libvips-linux-s390x",
+    "version": "1.3.4",
+    "license": "LGPL-3.0-or-later",
+    "reason": "Prebuilt libvips for sharp (ADR-0003 chose sharp for decoding). Shipped as an unmodified, separately installed shared library that sharp's Apache-2.0 addon links dynamically, so the operator can replace it; the package's licence and notice files are preserved and attributed in THIRD_PARTY_NOTICES. Exact-version exception, not general approval of LGPL dependencies."
+  },
+  {
+    "name": "@img/sharp-libvips-linux-x64",
+    "version": "1.3.4",
+    "license": "LGPL-3.0-or-later",
+    "reason": "Prebuilt libvips for sharp (ADR-0003 chose sharp for decoding). Shipped as an unmodified, separately installed shared library that sharp's Apache-2.0 addon links dynamically, so the operator can replace it; the package's licence and notice files are preserved and attributed in THIRD_PARTY_NOTICES. Exact-version exception, not general approval of LGPL dependencies."
+  },
+  {
+    "name": "@img/sharp-libvips-linuxmusl-arm64",
+    "version": "1.3.4",
+    "license": "LGPL-3.0-or-later",
+    "reason": "Prebuilt libvips for sharp (ADR-0003 chose sharp for decoding). Shipped as an unmodified, separately installed shared library that sharp's Apache-2.0 addon links dynamically, so the operator can replace it; the package's licence and notice files are preserved and attributed in THIRD_PARTY_NOTICES. Exact-version exception, not general approval of LGPL dependencies."
+  },
+  {
+    "name": "@img/sharp-libvips-linuxmusl-x64",
+    "version": "1.3.4",
+    "license": "LGPL-3.0-or-later",
+    "reason": "Prebuilt libvips for sharp (ADR-0003 chose sharp for decoding). Shipped as an unmodified, separately installed shared library that sharp's Apache-2.0 addon links dynamically, so the operator can replace it; the package's licence and notice files are preserved and attributed in THIRD_PARTY_NOTICES. Exact-version exception, not general approval of LGPL dependencies."
+  },
+  {
+    "name": "@img/sharp-wasm32",
+    "version": "0.35.5",
+    "license": "Apache-2.0 AND LGPL-3.0-or-later AND MIT",
+    "reason": "sharp's WebAssembly fallback: one .wasm module with libvips, glib, libexif and libheif (LGPL-3.0) compiled in, so they are not separately replaceable. Its lock entry has no os/cpu constraint, but its only dependents are @img/sharp-freebsd-wasm32 and @img/sharp-webcontainers-wasm32, which are platform-constrained, so it is never installed on the supported hosts: Linux with glibc (ADR-0003) and macOS, the CI runners in .github/workflows/ci.yml; the licence check classes it as omitted. If a deployment ever needs it, the LGPL relinking obligation must be reviewed first. Exact-version exception."
+  },
+  {
+    "name": "@img/sharp-win32-arm64",
+    "version": "0.35.5",
+    "license": "Apache-2.0 AND LGPL-3.0-or-later",
+    "reason": "sharp's Windows build: the Apache-2.0 addon plus prebuilt libvips-42.dll (LGPL-3.0-or-later) in the same package, loaded dynamically and replaceable, unmodified, with licence and notice files preserved. Locked only as an optional, Windows-constrained platform build; never installed on the supported hosts: Linux with glibc (ADR-0003) and macOS, the CI runners in .github/workflows/ci.yml. Exact-version exception."
+  },
+  {
+    "name": "@img/sharp-win32-ia32",
+    "version": "0.35.5",
+    "license": "Apache-2.0 AND LGPL-3.0-or-later",
+    "reason": "sharp's Windows build: the Apache-2.0 addon plus prebuilt libvips-42.dll (LGPL-3.0-or-later) in the same package, loaded dynamically and replaceable, unmodified, with licence and notice files preserved. Locked only as an optional, Windows-constrained platform build; never installed on the supported hosts: Linux with glibc (ADR-0003) and macOS, the CI runners in .github/workflows/ci.yml. Exact-version exception."
+  },
+  {
+    "name": "@img/sharp-win32-x64",
+    "version": "0.35.5",
+    "license": "Apache-2.0 AND LGPL-3.0-or-later",
+    "reason": "sharp's Windows build: the Apache-2.0 addon plus prebuilt libvips-42.dll (LGPL-3.0-or-later) in the same package, loaded dynamically and replaceable, unmodified, with licence and notice files preserved. Locked only as an optional, Windows-constrained platform build; never installed on the supported hosts: Linux with glibc (ADR-0003) and macOS, the CI runners in .github/workflows/ci.yml. Exact-version exception."
+  },
+  {
+    "name": "libheif-js",
+    "version": "1.23.5",
+    "license": "LGPL-3.0",
+    "reason": "Software HEIC decoder (libheif + libde265 compiled to WebAssembly) required because sharp's prebuilt libvips has no HEVC decoder; approved by the maintainer for #5. The unmodified .wasm is loaded at runtime from its own node_modules package, so the operator can replace it; licence and notices are preserved and attributed in THIRD_PARTY_NOTICES. It must stay external (not inlined) if the server is ever bundled. Exact-version exception, not general approval of LGPL dependencies."
   }
 ]

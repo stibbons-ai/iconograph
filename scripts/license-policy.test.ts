@@ -141,6 +141,127 @@ describe("installed graph coverage", () => {
     });
     expect(() => missingLockedPackages({ ...lock, lockfileVersion: 99 }, [])).toThrow();
   });
+
+  test("omits a package only foreign-platform packages depend on, but not one a host package or workspace needs", () => {
+    const lock: BunLock = {
+      lockfileVersion: 2,
+      workspaces: { "": { name: "root", dependencies: { "shared-runtime": "1.0.0" } } },
+      packages: {
+        foreign: [
+          "foreign@1.0.0",
+          "",
+          { os: "freebsd", dependencies: { fallback: "1.0.0", "shared-runtime": "1.0.0" } },
+        ],
+        fallback: ["fallback@1.0.0", "", { dependencies: { "fallback-runtime": "1.0.0" } }],
+        "fallback-runtime": ["fallback-runtime@1.0.0"],
+        native: ["native@1.0.0", "", { os: "linux", dependencies: { "host-helper": "1.0.0" } }],
+        "host-helper": ["host-helper@1.0.0"],
+        "shared-runtime": ["shared-runtime@1.0.0"],
+      },
+    };
+    expect(missingLockedPackages(lock, [], "linux", "x64")).toEqual({
+      missing: ["native@1.0.0", "host-helper@1.0.0", "shared-runtime@1.0.0"],
+      omitted: ["foreign@1.0.0", "fallback@1.0.0", "fallback-runtime@1.0.0"],
+    });
+  });
+
+  test.each([
+    {
+      edge: "a root devDependency",
+      workspaces: { "": { name: "root", devDependencies: { tool: "1.0.0" } } },
+      packages: { tool: ["tool@1.0.0"] },
+      missing: ["tool@1.0.0"],
+    },
+    {
+      edge: "an npm alias a host package depends on",
+      workspaces: { "": { name: "root", dependencies: { "my-alias": "npm:real@1.0.0" } } },
+      packages: { "my-alias": ["real@1.0.0"] },
+      missing: ["real@1.0.0"],
+    },
+    {
+      edge: "a scoped npm alias",
+      workspaces: { "": { name: "root", dependencies: { alias: "npm:@scope/real@~1.0.0" } } },
+      packages: { alias: ["@scope/real@1.0.0"] },
+      missing: ["@scope/real@1.0.0"],
+    },
+    {
+      edge: "another version of a name the host needs",
+      workspaces: { "": { name: "root", dependencies: { lib: "2.0.0" } } },
+      packages: { lib: ["lib@2.0.0"], "foreign/lib": ["lib@1.0.0"] },
+      missing: ["lib@2.0.0", "lib@1.0.0"],
+    },
+    {
+      edge: "a catalog alias (the specifier is just `catalog:`)",
+      workspaces: { "": { name: "root", dependencies: { "bar-alias": "catalog:" } } },
+      packages: { "bar-alias": ["bar@1.0.0"] },
+      missing: ["bar@1.0.0"],
+    },
+    {
+      edge: "a top-level override alias",
+      workspaces: { "": { name: "root", dependencies: { foo: "1.0.0" } } },
+      packages: { foo: ["bar@1.0.0"] },
+      missing: ["bar@1.0.0"],
+    },
+    {
+      edge: "a scoped alias installed under a nested key (`host/@scope/alias`)",
+      workspaces: { "": { name: "root", dependencies: { host: "1.0.0" } } },
+      packages: {
+        host: ["host@1.0.0", "", { dependencies: { "@scope/alias": "catalog:" } }],
+        "host/@scope/alias": ["bar@1.0.0"],
+      },
+      missing: ["host@1.0.0", "bar@1.0.0"],
+    },
+    {
+      edge: "one identity under two keys, one of them a host alias",
+      workspaces: { "": { name: "root", dependencies: { "bar-alias": "catalog:" } } },
+      packages: { "bar-alias": ["bar@1.0.0"], "foreign/bar": ["bar@1.0.0"] },
+      missing: ["bar@1.0.0"],
+    },
+  ] as const)(
+    "keeps $edge missing when a foreign-platform package also depends on it",
+    ({ workspaces, packages, missing }) => {
+      const lock = {
+        lockfileVersion: 2,
+        workspaces,
+        packages: {
+          foreign: [
+            "foreign@1.0.0",
+            "",
+            {
+              os: "freebsd",
+              dependencies: {
+                tool: "1.0.0",
+                real: "1.0.0",
+                "@scope/real": "1.0.0",
+                lib: "1.0.0",
+                bar: "1.0.0",
+              },
+            },
+          ],
+          ...packages,
+        },
+      } as unknown as BunLock;
+      expect(missingLockedPackages(lock, [], "linux", "x64")).toEqual({
+        missing: [...missing],
+        omitted: ["foreign@1.0.0"],
+      });
+    },
+  );
+
+  test("a dependency cycle with no host dependent stays missing", () => {
+    const lock: BunLock = {
+      lockfileVersion: 2,
+      workspaces: {},
+      packages: {
+        a: ["a@1.0.0", "", { dependencies: { b: "1.0.0" } }],
+        b: ["b@1.0.0", "", { dependencies: { a: "1.0.0" } }],
+      },
+    };
+    expect(missingLockedPackages(lock, [], "linux", "x64")).toEqual({
+      missing: ["a@1.0.0", "b@1.0.0"],
+      omitted: [],
+    });
+  });
 });
 
 describe("offline platform licence coverage", () => {

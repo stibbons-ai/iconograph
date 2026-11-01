@@ -29,6 +29,14 @@ jobs:
         run: bun install --frozen-lockfile
       - name: Validate ADR frontmatter
         run: bun run adrs:check
+      # Face tests need the real locked weights; they fail with the fix command when absent.
+      - name: Cache verified face-model weights
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .data/models
+          key: face-models-${{ hashFiles('packages/adapters/models.lock.json') }}
+      - name: Fetch and verify face-model weights
+        run: bun run models:fetch
       - name: Run tests
         run: bun test
       - name: Run formatting, lint, typecheck, licence policy and tests
