@@ -27,6 +27,8 @@ jobs:
           bun-version: "1.4.2"
       - name: Install locked runtime and development dependencies
         run: bun install --frozen-lockfile
+      - name: Validate ADR frontmatter
+        run: bun run adrs:check
       - name: Run tests
         run: bun test
       - name: Run formatting, lint, typecheck, licence policy and tests
