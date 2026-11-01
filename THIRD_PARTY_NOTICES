@@ -79,7 +79,7 @@ sharp 0.35.5, @img/sharp-<platform> 0.35.5 — Apache-2.0.
   permissive libraries (resvg instead of librsvg; no cairo, pango or fribidi)
   compiled in, not separately replaceable. Its README lists them.
   Neither is installed on the supported hosts (Linux with glibc per ADR-0003,
-  and macOS; CI runs ubuntu-24.04 and macos-14): the win32 builds are
+  and macOS, as on the CI runners in .github/workflows/ci.yml): the win32 builds are
   Windows-only optional packages, and wasm32 is pulled in only by the
   FreeBSD and WebContainers sharp builds.
 libheif-js 1.23.5 — LGPL-3.0 (reviewed exact exception in

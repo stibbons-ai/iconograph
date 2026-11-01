@@ -69,25 +69,25 @@
     "name": "@img/sharp-wasm32",
     "version": "0.35.5",
     "license": "Apache-2.0 AND LGPL-3.0-or-later AND MIT",
-    "reason": "sharp's WebAssembly fallback: one .wasm module with libvips, glib, libexif and libheif (LGPL-3.0) compiled in, so they are not separately replaceable. Its lock entry has no os/cpu constraint, but its only dependents are @img/sharp-freebsd-wasm32 and @img/sharp-webcontainers-wasm32, which are platform-constrained, so it is never installed on the supported hosts: Linux with glibc (ADR-0003) and macOS, the ubuntu-24.04 and macos-14 runners in .github/workflows/ci.yml; the licence check classes it as omitted. If a deployment ever needs it, the LGPL relinking obligation must be reviewed first. Exact-version exception."
+    "reason": "sharp's WebAssembly fallback: one .wasm module with libvips, glib, libexif and libheif (LGPL-3.0) compiled in, so they are not separately replaceable. Its lock entry has no os/cpu constraint, but its only dependents are @img/sharp-freebsd-wasm32 and @img/sharp-webcontainers-wasm32, which are platform-constrained, so it is never installed on the supported hosts: Linux with glibc (ADR-0003) and macOS, the CI runners in .github/workflows/ci.yml; the licence check classes it as omitted. If a deployment ever needs it, the LGPL relinking obligation must be reviewed first. Exact-version exception."
   },
   {
     "name": "@img/sharp-win32-arm64",
     "version": "0.35.5",
     "license": "Apache-2.0 AND LGPL-3.0-or-later",
-    "reason": "sharp's Windows build: the Apache-2.0 addon plus prebuilt libvips-42.dll (LGPL-3.0-or-later) in the same package, loaded dynamically and replaceable, unmodified, with licence and notice files preserved. Locked only as an optional, Windows-constrained platform build; never installed on the supported hosts: Linux with glibc (ADR-0003) and macOS, the ubuntu-24.04 and macos-14 runners in .github/workflows/ci.yml. Exact-version exception."
+    "reason": "sharp's Windows build: the Apache-2.0 addon plus prebuilt libvips-42.dll (LGPL-3.0-or-later) in the same package, loaded dynamically and replaceable, unmodified, with licence and notice files preserved. Locked only as an optional, Windows-constrained platform build; never installed on the supported hosts: Linux with glibc (ADR-0003) and macOS, the CI runners in .github/workflows/ci.yml. Exact-version exception."
   },
   {
     "name": "@img/sharp-win32-ia32",
     "version": "0.35.5",
     "license": "Apache-2.0 AND LGPL-3.0-or-later",
-    "reason": "sharp's Windows build: the Apache-2.0 addon plus prebuilt libvips-42.dll (LGPL-3.0-or-later) in the same package, loaded dynamically and replaceable, unmodified, with licence and notice files preserved. Locked only as an optional, Windows-constrained platform build; never installed on the supported hosts: Linux with glibc (ADR-0003) and macOS, the ubuntu-24.04 and macos-14 runners in .github/workflows/ci.yml. Exact-version exception."
+    "reason": "sharp's Windows build: the Apache-2.0 addon plus prebuilt libvips-42.dll (LGPL-3.0-or-later) in the same package, loaded dynamically and replaceable, unmodified, with licence and notice files preserved. Locked only as an optional, Windows-constrained platform build; never installed on the supported hosts: Linux with glibc (ADR-0003) and macOS, the CI runners in .github/workflows/ci.yml. Exact-version exception."
   },
   {
     "name": "@img/sharp-win32-x64",
     "version": "0.35.5",
     "license": "Apache-2.0 AND LGPL-3.0-or-later",
-    "reason": "sharp's Windows build: the Apache-2.0 addon plus prebuilt libvips-42.dll (LGPL-3.0-or-later) in the same package, loaded dynamically and replaceable, unmodified, with licence and notice files preserved. Locked only as an optional, Windows-constrained platform build; never installed on the supported hosts: Linux with glibc (ADR-0003) and macOS, the ubuntu-24.04 and macos-14 runners in .github/workflows/ci.yml. Exact-version exception."
+    "reason": "sharp's Windows build: the Apache-2.0 addon plus prebuilt libvips-42.dll (LGPL-3.0-or-later) in the same package, loaded dynamically and replaceable, unmodified, with licence and notice files preserved. Locked only as an optional, Windows-constrained platform build; never installed on the supported hosts: Linux with glibc (ADR-0003) and macOS, the CI runners in .github/workflows/ci.yml. Exact-version exception."
   },
   {
     "name": "libheif-js",
