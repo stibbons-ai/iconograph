@@ -149,9 +149,10 @@ describe("photos:validate as a process", () => {
     const notAnImage = fileURLToPath(new URL("../package.json", import.meta.url));
     const unreadable = spawn(["--data-dir", await dataVolume(), notAnImage]);
     expect(await unreadable.exited).toBe(1);
-    expect(JSON.parse(await new Response(unreadable.stderr).text())).toMatchObject({
-      photo: notAnImage,
-    });
+    // Compare the raw text first so a stray line (e.g. a native library's log) shows in the diff.
+    const stderr = await new Response(unreadable.stderr).text();
+    expect(stderr).toMatch(/^\{.*\}\n?$/);
+    expect(JSON.parse(stderr)).toMatchObject({ photo: notAnImage });
   });
 
   test("exits nonzero with a JSON error when a weight file is corrupt", async () => {
