@@ -1,0 +1,9 @@
+---
+title: "Image Models use our own interface with native-SDK adapters, not the AI SDK"
+status: accepted
+date: 2026-10-30
+---
+
+# Image Models use our own interface with native-SDK adapters, not the AI SDK
+
+Each Image Model is an adapter behind our own `ImageModel` Effect service (generate from Prompt + Reference Photos, report usage and cost, declare capabilities such as max references, max character references, `n`, sizes, quality). Adapters call the vendor's native API (Gemini Interactions API, OpenAI `images.edit`; later ComfyUI, BFL, Seedream). The AI SDK's `generateImage` supports reference-image editing, but drops Gemini `image_size`, `n` and quality controls and OpenAI's newer quality levels, and hides `store=false`; those knobs matter for identity fidelity, cost and privacy.

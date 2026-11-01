@@ -1,0 +1,105 @@
+Iconograph third-party notices
+=============================
+
+This source workspace is MIT licensed; dependencies retain their own licences.
+Versions below were read from the installed packages and their package.json
+licence metadata for the committed Bun lockfile. This list highlights notable
+components, not a replacement for the full installed-graph licence audit or the
+licence/notice files shipped inside each dependency. Retain those files when
+redistributing dependencies, binaries or bundles.
+
+Runtime
+-------
+@mastra/core 1.80.0 — Apache-2.0 outside enterprise ee/ directories.
+@mastra/libsql 1.27.1 — Apache-2.0.
+  Upstream: https://github.com/mastra-ai/mastra
+  Mastra core LICENSE.md: Copyright (c) 2025 Kepler Software, Inc.
+  Licensed under the Apache License, Version 2.0 (the "License"); you may not
+  use this file except in compliance with the License. You may obtain a copy at
+  https://www.apache.org/licenses/LICENSE-2.0 . Unless required by applicable
+  law or agreed to in writing, software distributed under the License is
+  distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+  KIND, either express or implied. See the License for the specific language
+  governing permissions and limitations under the License.
+  IMPORTANT: core's installed LICENSE.md explicitly excludes all ee/ content
+  (including auth/ee and agent-builder/ee) from Apache-2.0. Importing that content
+  is prohibited by this project's lint policy; package-level Apache metadata
+  does not grant rights to enterprise content.
+
+effect 4.1.1 — MIT.
+  Upstream: https://github.com/Effect-TS/effect
+  Copyright (c) 2023 Effectful Technologies Inc.
+
+@libsql/client 0.18.0, @libsql/core 0.18.0 — MIT.
+  Upstream: https://github.com/tursodatabase/libsql-client-ts
+@libsql/hrana-client 0.10.0 — MIT.
+  Upstream: https://github.com/libsql/hrana-client-ts
+libsql 0.5.29 — MIT (native SQLite-compatible local database binding).
+  Upstream: https://github.com/tursodatabase/libsql-js
+  Copyright (c) 2017 Joshua Wise; Copyright (c) 2023 Pekka Enberg.
+  Platform-specific native packages are installed according to the host OS/CPU;
+  consult their shipped licences as well when redistributing native artifacts.
+
+zod 4.6.7 — MIT; transitive Mastra dependency only, not domain schema authority.
+posthog-node 5.61.1, @posthog/core 1.62.0,
+@posthog/types 1.419.0 — MIT; transitive telemetry dependencies.
+  Project scripts and CI disable Mastra telemetry and set DO_NOT_TRACK.
+@isaacs/ttlcache 2.1.5, lru-cache 11.5.3 — BlueOak-1.0.0.
+json-schema 0.4.0 — (AFL-2.1 OR BSD-3-Clause); project selects BSD-3-Clause.
+
+Development tooling and SPDX data
+--------------------------------
+oxlint 1.90.0, oxfmt 0.75.0 — MIT.
+  Upstream: https://github.com/oxc-project/oxc
+  Matching host-platform native bindings ship with their own licence files.
+typescript 7.0.2 — Apache-2.0.
+  Upstream: https://github.com/microsoft/TypeScript
+@types/bun 1.4.4, bun-types 1.4.4 — MIT.
+yaml 2.9.1 — ISC; strict YAML frontmatter parser for ADR validation.
+  Upstream: https://github.com/eemeli/yaml
+  Copyright Eemeli Aro <eemeli@gmail.com>
+  Permission to use, copy, modify, and/or distribute this software for any
+  purpose with or without fee is hereby granted, provided that the above
+  copyright notice and this permission notice appear in all copies.
+  THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+  WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+  MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+  ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+  WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+  ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+  OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+spdx-expression-parse 5.0.0 — MIT.
+  Upstream: https://github.com/jslicense/spdx-expression-parse.js
+spdx-license-ids 3.0.24 — CC0-1.0.
+  Upstream: https://github.com/jslicense/spdx-license-ids
+spdx-exceptions 2.5.0 — CC-BY-3.0 (reviewed exact development-data exception).
+  Upstream: https://github.com/kemitchell/spdx-exceptions.json
+  SPDX specification: https://spdx.org
+  Copyright © 2010-2015 Linux Foundation and its Contributors. Licensed under
+  the Creative Commons Attribution License 3.0 Unported:
+  https://creativecommons.org/licenses/by/3.0/ . All other rights are expressly
+  reserved. "SPDX" is a federally registered United States trademark of The
+  Linux Foundation Corporation. This dependency copies SPDX exception
+  identifiers mechanically; Iconograph makes no modifications to that data.
+  Attribution derives from the installed package's README.md. No endorsement
+  by the Linux Foundation or the SPDX working groups is implied.
+
+MIT terms for the Effect and LibSQL attributions above
+----------------------------------------------------
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notices and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

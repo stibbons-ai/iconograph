@@ -1,0 +1,12 @@
+{
+  "name": "@iconograph/adapters",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@mastra/core": "catalog:",
+    "@mastra/libsql": "catalog:",
+    "effect": "catalog:"
+  }
+}

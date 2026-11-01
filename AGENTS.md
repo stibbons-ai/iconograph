@@ -11,3 +11,5 @@ Default canonical labels: needs-triage, needs-info, ready-for-agent, ready-for-h
 ### Domain docs
 
 Single-context: root `GLOSSARY.md` + `docs/adr/`. See `docs/agents/domain.md`.
+
+Third-party versions: root `catalog`; manifests use `catalog:`.
