@@ -92,6 +92,29 @@ runs `bun test`, and runs the complete `bun run check` on Linux and macOS. Nativ
 dependencies are therefore audited on both hosts. Formatting commands include the adopted
 `docs/adr` collection, including its template README, but exclude unrelated domain drafts.
 
+### Model weights
+
+The default face backend (YuNet detector, MIT; SFace recognizer, Apache-2.0) needs ONNX weights
+that are never committed or baked into an image. They live in the data volume's models folder,
+`<data dir>/models`, where the data dir is `ICONOGRAPH_DATA_DIR` (default `./.data`, gitignored).
+[`packages/adapters/models.lock.json`](packages/adapters/models.lock.json) pins each file to an
+immutable Hugging Face revision URL, SHA-256, size, and licence. InsightFace weights (`buffalo_l`,
+non-commercial) are never fetched automatically: the lock admits only MIT or Apache-2.0 entries,
+rejects known InsightFace pack and file names (`buffalo`, `antelope`, `scrfd`, `w600k`, …), and a
+test pins the shipped lock to exactly YuNet and SFace.
+
+```sh
+bun run models:fetch                      # fetch and verify every locked model now
+bun run models:fetch --data-dir /srv/data # or ICONOGRAPH_DATA_DIR=/srv/data
+```
+
+Weights are otherwise downloaded on first use. Missing files stream into a temp file beside the
+destination, are hashed, and are renamed into place only after the SHA-256 matches; present files
+are re-hashed on every use and never downloaded again once verified. **Offline machines**: copy the
+locked files (same names) into `<data dir>/models` by any means; they are verified like downloads.
+**A checksum mismatch** is a hard error naming the model, path, expected and actual hash, and the
+file is never used. A corrupt present file is left in place: delete it and rerun `models:fetch`.
+
 ### ADR validation and commits
 
 [`docs/adr/README.md`](docs/adr/README.md) defines the required frontmatter and reusable template.

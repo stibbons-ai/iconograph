@@ -11,6 +11,7 @@
   "scripts": {
     "run": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun packages/server/src/cli.ts",
     "eval": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun packages/eval-harness/src/cli.ts",
+    "models:fetch": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun packages/adapters/src/models-cli.ts",
     "test": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun test",
     "format": "oxfmt --write package.json tsconfig.json .oxfmtrc.json .oxlintrc.json packages scripts .github docs/adr README.md",
     "format:check": "oxfmt --check package.json tsconfig.json .oxfmtrc.json .oxlintrc.json packages scripts .github docs/adr README.md",
