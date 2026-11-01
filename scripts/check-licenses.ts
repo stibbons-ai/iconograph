@@ -4,15 +4,24 @@ import { fileURLToPath } from "node:url";
 import { licenseViolation, validateAllowlist } from "./license-policy.ts";
 import type { LicenseException, PackageLicense } from "./license-policy.ts";
 
-interface PlatformConstraints {
+type Dependencies = Record<string, string>;
+
+interface DependencyMetadata {
+  dependencies?: Dependencies;
+  devDependencies?: Dependencies;
+  optionalDependencies?: Dependencies;
+  peerDependencies?: Dependencies;
+}
+
+interface LockMetadata extends DependencyMetadata {
   os?: string | string[];
   cpu?: string | string[];
 }
 
 export interface BunLock {
   lockfileVersion: number;
-  workspaces: Record<string, { name: string }>;
-  packages: Record<string, [string, string?, PlatformConstraints?, ...unknown[]]>;
+  workspaces: Record<string, { name: string } & DependencyMetadata>;
+  packages: Record<string, [string, string?, LockMetadata?, ...unknown[]]>;
 }
 
 export interface InstalledPackage extends PackageLicense {
@@ -32,6 +41,48 @@ function excluded(constraint: string | string[] | undefined, actual: string): bo
   return values.includes(`!${actual}`) || (positive.length > 0 && !positive.includes(actual));
 }
 
+/**
+ * Package names a lock entry or workspace depends on, of every dependency kind.
+ * An npm alias (`"alias": "npm:real@1.0.0"`) yields both names, since the lock
+ * entry it points to carries the real name.
+ */
+function dependencyNames(metadata: DependencyMetadata | undefined): string[] {
+  return [
+    metadata?.dependencies,
+    metadata?.devDependencies,
+    metadata?.optionalDependencies,
+    metadata?.peerDependencies,
+  ].flatMap((dependencies) =>
+    Object.entries(dependencies ?? {}).flatMap(([name, specifier]) => {
+      const alias = /^npm:((?:@[^/@]+\/)?[^@]+)/.exec(specifier);
+      return alias ? [name, alias[1]!] : [name];
+    }),
+  );
+}
+
+/** The dependency name a lock key installs, e.g. `parent/@scope/name` → `@scope/name`. */
+function keyName(key: string): string {
+  const segments = key.split("/");
+  const scope = segments.at(-2);
+  return scope?.startsWith("@") ? `${scope}/${segments.at(-1)}` : segments.at(-1)!;
+}
+
+/**
+ * Split uninstalled lock entries into `missing` (this host should have them) and
+ * `omitted` (foreign platform). An entry is omitted when its own os/cpu excludes
+ * this host, or when it has dependents and every one of them is omitted, e.g.
+ * sharp's WebAssembly fallback that only foreign-platform packages pull in.
+ *
+ * An entry's dependents are everything that depends, by any dependency kind
+ * (including workspace devDependencies), on its real package name or on the name
+ * its lock key installs it under. The key name covers aliases the specifier
+ * doesn't show (`catalog:`, top-level overrides). Names ignore versions, so
+ * dependents of another version count too. That keeps an entry missing when a
+ * host package needs any version, but it can also make an entry with no
+ * dependents of its own omitted because only foreign-platform packages use
+ * another version. Omitted entries still need reviewed licence metadata whose
+ * integrity matches the lock.
+ */
 export function missingLockedPackages(
   lock: BunLock,
   installed: readonly PackageLicense[],
@@ -41,18 +92,51 @@ export function missingLockedPackages(
   if (lock.lockfileVersion !== 2)
     throw new Error("Unsupported Bun lockfile version; review scanner");
   const present = new Set(installed.map((pkg) => `${pkg.name}@${pkg.version}`));
-  const missing: string[] = [];
-  const omitted: string[] = [];
-  for (const [identity, , constraints] of Object.values(lock.packages)) {
-    if (identity.includes("@workspace:")) continue;
-    if (present.has(identity)) continue;
-    if (excluded(constraints?.os, platform) || excluded(constraints?.cpu, arch)) {
-      omitted.push(identity);
-    } else {
-      missing.push(identity);
+  const entries = Object.entries(lock.packages).filter(
+    ([, [identity]]) => !identity.includes("@workspace:") && !present.has(identity),
+  );
+  const omitted = new Set(
+    entries
+      .filter(
+        ([, [, , metadata]]) => excluded(metadata?.os, platform) || excluded(metadata?.cpu, arch),
+      )
+      .map(([, [identity]]) => identity),
+  );
+  const dependents = new Map<string, string[]>();
+  const dependencies: (readonly [string, DependencyMetadata | undefined])[] = [
+    ...Object.values(lock.workspaces).map((workspace) => ["<workspace>", workspace] as const),
+    ...Object.values(lock.packages).map(([identity, , metadata]) => [identity, metadata] as const),
+  ];
+  for (const [dependent, metadata] of dependencies) {
+    for (const name of dependencyNames(metadata)) {
+      const users = dependents.get(name);
+      if (users) users.push(dependent);
+      else dependents.set(name, [dependent]);
     }
   }
-  return { missing: [...new Set(missing)], omitted: [...new Set(omitted)] };
+  // Every name the entry is installed or depended on under; one identity can sit under several keys.
+  const usersOf = new Map<string, string[]>();
+  for (const [key, [identity]] of entries) {
+    const names = new Set([identity.slice(0, identity.lastIndexOf("@")), keyName(key)]);
+    const users = [...names].flatMap((name) => dependents.get(name) ?? []);
+    usersOf.set(identity, [...(usersOf.get(identity) ?? []), ...users]);
+  }
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const [, [identity]] of entries) {
+      if (omitted.has(identity)) continue;
+      const users = usersOf.get(identity)!;
+      if (users.length > 0 && users.every((user) => omitted.has(user))) {
+        omitted.add(identity);
+        changed = true;
+      }
+    }
+  }
+  const identities = [...new Set(entries.map(([, [identity]]) => identity))];
+  return {
+    missing: identities.filter((identity) => !omitted.has(identity)),
+    omitted: identities.filter((identity) => omitted.has(identity)),
+  };
 }
 
 function validatePlatformMetadata(value: unknown): Map<string, PlatformLicenseMetadata> {

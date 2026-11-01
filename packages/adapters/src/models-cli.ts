@@ -1,5 +1,6 @@
 import { parseArgs } from "node:util";
 import { modelsDirectory, resolveDataDirectory } from "./data-directory";
+import { errorLine } from "./errors";
 import { ensureModels, readModelLock, type ModelLock } from "./models";
 
 const help = `Fetch and verify every locked face-model weight file
@@ -48,9 +49,7 @@ if (import.meta.main) {
   try {
     await main(process.argv.slice(2));
   } catch (error) {
-    process.stderr.write(
-      `${JSON.stringify({ error: error instanceof Error ? error.message : String(error) })}\n`,
-    );
+    process.stderr.write(errorLine(error));
     process.exitCode = 1;
   }
 }

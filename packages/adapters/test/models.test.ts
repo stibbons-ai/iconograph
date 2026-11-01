@@ -1,11 +1,11 @@
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, open, readdir, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, open, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureModels, modelsDirectory, readModelLock, resolveDataDirectory } from "../src";
 import { decodeModelLock, type ModelLock, type ModelWeight } from "../src/models";
 import { main } from "../src/models-cli";
+import { temporaryDirectories } from "./temporary-directory";
 
 const sha256 = (input: Bun.BlobOrStringOrBuffer) => Bun.CryptoHasher.hash("sha256", input, "hex");
 
@@ -85,12 +85,11 @@ let directory: string;
 beforeEach(async () => {
   hits.clear();
   gate = Promise.withResolvers<void>();
-  directory = await mkdtemp(join(tmpdir(), "iconograph-models-"));
+  directory = await temporaryDirectory();
 });
-afterEach(async () => {
-  gate.resolve();
-  await rm(directory, { recursive: true, force: true });
-});
+afterEach(() => gate.resolve());
+// Registered after the gate release so a held download is released before cleanup.
+const temporaryDirectory = temporaryDirectories("models");
 
 describe("ensureModels", () => {
   test("downloads missing weights once, then skips verified files", async () => {

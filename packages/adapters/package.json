@@ -9,6 +9,9 @@
     "@libsql/client": "catalog:",
     "@mastra/core": "catalog:",
     "@mastra/libsql": "catalog:",
-    "effect": "catalog:"
+    "effect": "catalog:",
+    "libheif-js": "catalog:",
+    "onnxruntime-node": "catalog:",
+    "sharp": "catalog:"
   }
 }
