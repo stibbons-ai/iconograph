@@ -9,7 +9,7 @@ import {
   type RgbImage,
 } from "@iconograph/domain";
 import { Effect, Layer, Schema } from "effect";
-import { InferenceSession, Tensor } from "onnxruntime-node";
+import { env, InferenceSession, Tensor } from "onnxruntime-node";
 import sharp from "sharp";
 import { estimateSimilarity, warpAffine } from "./alignment";
 import { modelsDirectory } from "./data-directory";
@@ -192,8 +192,14 @@ export interface OnnxFaceEmbedderOptions {
 const openSession = (path: string) =>
   Effect.acquireRelease(
     Effect.tryPromise({
-      // Severity 3 (errors only) hides ORT's harmless initializer warnings for these models.
-      try: () => InferenceSession.create(path, { logSeverityLevel: 3 }),
+      try: () => {
+        // ORT's process-wide environment is created on the first session and logs at its
+        // own level, not the session's: on CI VMs it printed a coloured device-discovery
+        // warning to stderr ahead of the CLI's JSON error. Errors only, for both.
+        env.logLevel = "error";
+        // Severity 3 (errors only) hides ORT's harmless initializer warnings for these models.
+        return InferenceSession.create(path, { logSeverityLevel: 3 });
+      },
       catch: modelError(`Loading ${path}`),
     }),
     (session) => releaseSession(path, () => session.release()),
