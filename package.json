@@ -13,6 +13,7 @@
     "eval": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun packages/eval-harness/src/cli.ts",
     "models:fetch": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun packages/adapters/src/models-cli.ts",
     "models:export-facenet": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun packages/adapters/src/models-export-cli.ts",
+    "faces:heldout": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun packages/adapters/src/heldout-cli.ts",
     "photos:validate": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun packages/adapters/src/photos-cli.ts",
     "prices": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun packages/adapters/src/prices-cli.ts",
     "prices:snapshot": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun scripts/update-price-snapshot.ts",

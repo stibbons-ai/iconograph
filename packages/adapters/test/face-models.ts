@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import type { FaceBox } from "@iconograph/domain";
 import { modelsDirectory, resolveDataDirectory } from "../src/data-directory";
 import { OnnxFaceEmbedder, type OnnxFaceEmbedderOptions } from "../src/face-embedder";
+import { OnnxHeldOutFaceEmbedder } from "../src/held-out-embedder";
 import { ensureModels, type Fetch, readModelLock } from "../src/models";
 
 /**
@@ -34,6 +35,14 @@ const missingWeights: Fetch = async (url) => {
 /** The real YuNet + SFace backend on the verified local weights (or `dataDirectory`'s). */
 export const realFaceEmbedder = (options: Partial<Omit<OnnxFaceEmbedderOptions, "fetch">> = {}) =>
   OnnxFaceEmbedder({ dataDirectory: weightsDataDirectory, fetch: missingWeights, ...options });
+
+/**
+ * The real YuNet + FaceNet held-out backend on the verified local weights (or
+ * `dataDirectory`'s). FaceNet is built, never fetched: a missing file fails with
+ * `bun run models:export-facenet`.
+ */
+export const realHeldOutEmbedder = (dataDirectory = weightsDataDirectory) =>
+  OnnxHeldOutFaceEmbedder({ dataDirectory, fetch: missingWeights });
 
 /**
  * Put corrupt files at every locked weight path in `dataDirectory`, so the
