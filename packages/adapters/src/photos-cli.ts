@@ -4,7 +4,7 @@ import { Effect, type Layer, Logger } from "effect";
 import { resolveDataDirectory } from "./data-directory";
 import { errorLine } from "./errors";
 import { OnnxFaceEmbedder } from "./face-embedder";
-import { validateReferencePhotos } from "./reference-photos";
+import { parseFaceChoices, validateReferencePhotos } from "./reference-photos";
 
 const help = `Validate 1 to ${MAX_REFERENCE_PHOTOS} Reference Photos of one Subject
 
@@ -35,18 +35,6 @@ logged while running (e.g. a failed model release) print JSON to stderr.
 export interface PhotosCliDependencies {
   embedder?: (dataDirectory: string) => Layer.Layer<FaceEmbedder, FaceModelError>;
   stdout?: (text: string) => void;
-}
-
-function parseFaceChoices(values: readonly string[]): Map<number, number> {
-  const choices = new Map<number, number>();
-  for (const value of values) {
-    const match = /^([1-9]\d*):([1-9]\d*)$/.exec(value);
-    if (!match) throw new Error(`--face expects PHOTO:FACE numbered from 1, got ${value}`);
-    const photo = Number(match[1]);
-    if (choices.has(photo)) throw new Error(`--face given twice for photo ${photo}`);
-    choices.set(photo, Number(match[2]));
-  }
-  return choices;
 }
 
 export async function main(args: string[], dependencies: PhotosCliDependencies = {}) {

@@ -79,9 +79,12 @@ function sniffFormat(bytes: Uint8Array): PhotoFormat | undefined {
   return "heic";
 }
 
-const failure = (photo: string, message: string) => new ReferencePhotoError({ photo, message });
-const photoError = (photo: string, action: string) => (error: unknown) =>
-  failure(photo, `Reference Photo ${photo} could not be ${action}: ${errorMessage(error)}`);
+export const failure = (photo: string, message: string) =>
+  new ReferencePhotoError({ photo, message });
+const photoError =
+  (photo: string, action: string, label = "Reference Photo") =>
+  (error: unknown) =>
+    failure(photo, `${label} ${photo} could not be ${action}: ${errorMessage(error)}`);
 
 /**
  * Validate an upload by fully decoding it into upright sRGB pixels. For JPEG and
@@ -91,11 +94,13 @@ const photoError = (photo: string, action: string) => (error: unknown) =>
  * Images over `MAX_PHOTO_PIXELS` are rejected from their headers. HEIC is
  * decoded in software first, since prebuilt libvips has no HEVC; its corruption
  * detection is best-effort (see `decodeHeic`). A decoder that fails to load is a
- * `HeicDecoderError`, not an error about the photo.
+ * `HeicDecoderError`, not an error about the photo. `label` names the image in
+ * errors (the held-out command also decodes a Candidate this way).
  */
 export const decodeReferencePhoto = (
   path: string,
   loadDecoder: () => Promise<HeicDecoder> = loadHeicDecoder,
+  label = "Reference Photo",
 ) =>
   Effect.gen(function* () {
     const bytes = yield* Effect.tryPromise({
@@ -106,10 +111,10 @@ export const decodeReferencePhoto = (
         }
         return Bun.file(path).bytes();
       },
-      catch: photoError(path, "read"),
+      catch: photoError(path, "read", label),
     });
     const format = sniffFormat(bytes);
-    if (!format) return yield* photoError(path, "decoded")("not a JPEG, PNG or HEIC image");
+    if (!format) return yield* photoError(path, "decoded", label)("not a JPEG, PNG or HEIC image");
     const heic =
       format === "heic"
         ? yield* Effect.tryPromise({
@@ -136,9 +141,16 @@ export const decodeReferencePhoto = (
         }
         return { format, image: { data, width: info.width, height: info.height } };
       },
-      catch: photoError(path, "decoded"),
+      catch: photoError(path, "decoded", label),
     });
   });
+
+/**
+ * Identifies an image by its decoded pixels, so the same picture in another
+ * file or format is recognised as a duplicate (it would vote twice).
+ */
+export const pixelKey = ({ data, width, height }: RgbImage) =>
+  `${width}×${height}:${Bun.CryptoHasher.hash("sha256", data, "hex")}`;
 
 export interface EncodedPhoto {
   jpeg: Uint8Array;
@@ -198,7 +210,7 @@ interface PhotoSummary {
 }
 
 /** `face` is numbered from 1 in detection order (highest score first). */
-type FaceSummary = Pick<DetectedFace, "box" | "score"> & { face: number };
+export type FaceSummary = Pick<DetectedFace, "box" | "score"> & { face: number };
 
 export type PhotoReport = PhotoSummary &
   (
@@ -217,15 +229,30 @@ export interface ReferencePhotoReport {
   warnings: string[];
 }
 
-const summarize = ({ box, score }: DetectedFace, face: number): FaceSummary => ({
+export const summarize = ({ box, score }: DetectedFace, face: number): FaceSummary => ({
   face,
   box,
   score,
 });
 
 /** A face-model failure, named with the photo it ran on. */
-const onPhoto = (photo: string) => (error: FaceModelError) =>
-  new FaceModelError({ message: `Reference Photo ${photo}: ${error.message}`, photo });
+export const onPhoto =
+  (photo: string, label = "Reference Photo") =>
+  (error: FaceModelError) =>
+    new FaceModelError({ message: `${label} ${photo}: ${error.message}`, photo });
+
+/** Parse repeated `--face PHOTO:FACE` values (both numbered from 1) into photo → face. */
+export function parseFaceChoices(values: readonly string[]): Map<number, number> {
+  const choices = new Map<number, number>();
+  for (const value of values) {
+    const match = /^([1-9]\d*):([1-9]\d*)$/.exec(value);
+    if (!match) throw new Error(`--face expects PHOTO:FACE numbered from 1, got ${value}`);
+    const photo = Number(match[1]);
+    if (choices.has(photo)) throw new Error(`--face given twice for photo ${photo}`);
+    choices.set(photo, Number(match[2]));
+  }
+  return choices;
+}
 
 /**
  * What validation keeps per photo: never the decoded pixels. Only a photo with
@@ -244,16 +271,15 @@ function withFace(record: Inspected) {
 }
 
 /**
- * Validate a Run's Reference Photos: decode each, find its face (or apply the
- * operator's choice), embed it, judge the set, and store accepted photos
- * stripped of metadata. The same file given twice is an error, and so is a
- * photo with a usable face whose pixels repeat an earlier one: a duplicate
- * would vote twice and inflate the Ceiling. A face-model failure is a
- * `FaceModelError` naming the photo it happened on.
+ * Check a Reference Photo set before any photo is read: 1 to
+ * `MAX_REFERENCE_PHOTOS` paths, no file given twice, and every face choice
+ * naming a given photo and a face number (both from 1).
  */
-export const validateReferencePhotos = (options: ValidateReferencePhotosOptions) =>
+export const checkReferenceSet = (
+  paths: readonly string[],
+  faceChoices: ReadonlyMap<number, number>,
+) =>
   Effect.gen(function* () {
-    const { paths, faceChoices = new Map<number, number>(), dataDirectory } = options;
     if (paths.length < 1 || paths.length > MAX_REFERENCE_PHOTOS) {
       return yield* new ReferencePhotoError({
         message: `A Run takes 1 to ${MAX_REFERENCE_PHOTOS} Reference Photos; got ${paths.length}`,
@@ -284,6 +310,39 @@ export const validateReferencePhotos = (options: ValidateReferencePhotosOptions)
         return yield* failure(path, `Face choice ${face} for ${path} is not a face number`);
       }
     }
+  });
+
+/**
+ * The number (from 1, in detection order) of the face to use in a photo: the
+ * operator's `choice`, else its only face; undefined when it has no face or
+ * several and no choice. A choice beyond the faces detected is an error.
+ */
+export const chooseFace = (
+  path: string,
+  faces: readonly DetectedFace[],
+  choice: number | undefined,
+): Effect.Effect<number | undefined, ReferencePhotoError> =>
+  choice !== undefined && !faces[choice - 1]
+    ? Effect.fail(
+        failure(
+          path,
+          `Face ${choice} was chosen for ${path}, but ${faces.length} face${faces.length === 1 ? " was" : "s were"} detected`,
+        ),
+      )
+    : Effect.succeed(choice ?? (faces.length === 1 ? 1 : undefined));
+
+/**
+ * Validate a Run's Reference Photos: decode each, find its face (or apply the
+ * operator's choice), embed it, judge the set, and store accepted photos
+ * stripped of metadata. The same file given twice is an error, and so is a
+ * photo with a usable face whose pixels repeat an earlier one: a duplicate
+ * would vote twice and inflate the Ceiling. A face-model failure is a
+ * `FaceModelError` naming the photo it happened on.
+ */
+export const validateReferencePhotos = (options: ValidateReferencePhotosOptions) =>
+  Effect.gen(function* () {
+    const { paths, faceChoices = new Map<number, number>(), dataDirectory } = options;
+    yield* checkReferenceSet(paths, faceChoices);
     const embedder = yield* FaceEmbedder;
     // Decoded pixels are dropped after each photo, so one full-size image is held
     // at a time, plus one encoded JPEG per photo with a usable face.
@@ -292,24 +351,18 @@ export const validateReferencePhotos = (options: ValidateReferencePhotosOptions)
     for (const [index, path] of paths.entries()) {
       const { format, image } = yield* decodeReferencePhoto(path);
       const faces = yield* embedder.detect(image).pipe(Effect.mapError(onPhoto(path)));
-      const choice = faceChoices.get(index + 1);
-      if (choice !== undefined && !faces[choice - 1]) {
-        return yield* failure(
-          path,
-          `Face ${choice} was chosen for ${path}, but ${faces.length} face${faces.length === 1 ? " was" : "s were"} detected`,
-        );
-      }
-      const faceNumber = choice ?? (faces.length === 1 ? 1 : undefined);
+      const faceNumber = yield* chooseFace(path, faces, faceChoices.get(index + 1));
       const summary = { photo: index + 1, path, format, width: image.width, height: image.height };
       if (faceNumber !== undefined) {
         const face = faces[faceNumber - 1]!;
         const embedding = yield* embedder.embed(image, face).pipe(Effect.mapError(onPhoto(path)));
-        const encoded = yield* encodeReferencePhoto(path, image);
-        const earlier = seenPixels.get(encoded.sha256);
+        const key = pixelKey(image);
+        const earlier = seenPixels.get(key);
         if (earlier !== undefined) {
           return yield* failure(path, `Reference Photos ${earlier} and ${path} are the same image`);
         }
-        seenPixels.set(encoded.sha256, path);
+        seenPixels.set(key, path);
+        const encoded = yield* encodeReferencePhoto(path, image);
         inspected.push({
           summary,
           found: { kind: "face", face, embedding },
