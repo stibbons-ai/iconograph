@@ -13,10 +13,12 @@ import {
 import {
   DEFAULT_BUDGET_USD,
   DEFAULT_CANDIDATES,
+  DEFAULT_JUDGE,
   type FaceEmbedder,
   type FaceModelError,
   GEMINI_IMAGE_MODEL,
   type ImageModels,
+  type Judges,
   MAX_CANDIDATES,
   MAX_REFERENCE_PHOTOS,
   OPENAI_FLARE_IMAGE_MODEL,
@@ -27,10 +29,11 @@ import {
 } from "@iconograph/domain";
 import { Effect, type Layer, Schema } from "effect";
 import { createRunApplication, readRunReport } from "./index";
+import { MastraJudges } from "./judge";
 import { jsonLine } from "./warnings";
 import { LANE_CONCURRENCY } from "./workflow";
 
-const help = `Start a Run: one or more Lanes, up to ${LANE_CONCURRENCY} at a time, one Iteration of Candidates each
+const help = `Start a Run: one or more Lanes, up to ${LANE_CONCURRENCY} at a time, one Iteration of Candidates each, each judged
 
 Usage:
   bun run run [options] PHOTO...          1 to ${MAX_REFERENCE_PHOTOS} Reference Photos of the Subject
@@ -61,6 +64,12 @@ Options:
                       an OpenAI Lane.
   --face PHOTO:FACE   Use face FACE of photo PHOTO when it shows several faces,
                       as in photos:validate. Repeatable.
+  --judge-model ID    The Judge, as a Mastra model router id: an anthropic/,
+                      openai/ or google/ vision model (default:
+                      ${DEFAULT_JUDGE.model}).
+  --judge-effort LEVEL
+                      The Judge's reasoning effort: low, medium or high
+                      (default: ${DEFAULT_JUDGE.effort}).
   --data-dir PATH     Data volume (default: ICONOGRAPH_DATA_DIR, else ./.data):
                       images, face-model weights and the price cache.
   --db PATH           LibSQL file for Runs (default: ./iconograph.db); its
@@ -77,19 +86,31 @@ Keys are read from the environment only, never stored or logged. Each Lane
 sends only its chosen character references (stripped of metadata) and its
 Prompt to its vendor.
 
+Every Candidate that passes the Identity Gate is scored by the Judge against
+Rubric v1 with the default weights. The Judge needs its vendor's key in the
+environment: ANTHROPIC_API_KEY, OPENAI_API_KEY, or GOOGLE_GENERATIVE_AI_API_KEY
+(or GOOGLE_API_KEY); keys are checked before any billable call and never stored
+or logged. Only the Rubric, at most 3 Reference Photos (stripped), the
+Candidate and the Target Look are sent to the Judge's vendor.
+
 Before generating, an estimate prints as one JSON line on stderr. Every
 billable call is checked against the remaining Budget first; a call that
 doesn't fit isn't made and the Lane stops with "budget-exhausted". The result
 is one JSON object on stdout: per Candidate its Outcome (Refused, Failed,
 Gated or Scored), Likeness, reason, stored image and estimated and actual
-cost; each Lane's initial Prompt and stop reason; totals; the Reference Photo warnings. read
+cost, and its judgement (Resemblance, per-criterion scores, weighted total,
+Disputed, Rubric version, issues, suggested Prompt fixes) with the Judge's
+cost; each Lane's initial Prompt and stop reason; the Judge; totals; the Run's
+warnings (code judge-same-vendor when the Judge's vendor makes a Lane's Image
+Model); the Reference Photo warnings. read
 prints the same report for a stored Run. Errors print JSON to stderr (the
 last line) and exit nonzero.
 `;
 
-/** The Image Models a Run uses, and how to release what they hold. */
-export interface ImageModelsResource {
-  layer: Layer.Layer<ImageModels>;
+/** The Image Models and Judges a Run uses, and how to release what they hold. */
+export interface VendorsResource {
+  imageModels: Layer.Layer<ImageModels>;
+  judges: Layer.Layer<Judges>;
   close(): void;
 }
 
@@ -114,28 +135,27 @@ export function refreshOnFirstLookup(
   };
 }
 
-/** The native adapters, priced by the price source in the data volume. */
-async function nativeImageModels(
+/** The native Image Model adapters and the Mastra Judges, priced by the price source in the data volume. */
+async function nativeVendors(
   dataDirectory: string,
   warn: (message: string) => void,
-): Promise<ImageModelsResource> {
-  const prices = await openPriceSource({ dataDirectory });
+): Promise<VendorsResource> {
+  const source = await openPriceSource({ dataDirectory });
+  const prices = refreshOnFirstLookup(source, warn);
   return {
-    layer: NativeImageModels({ prices: refreshOnFirstLookup(prices, warn) }),
-    close: () => prices.close(),
+    imageModels: NativeImageModels({ prices }),
+    judges: MastraJudges({ prices }),
+    close: () => source.close(),
   };
 }
 
 /**
- * Test seam: the Image Models and face backend. Production uses the native
- * adapters with the price source and the locked ONNX models; nothing in the
- * environment can switch to a fake.
+ * Test seam: the Image Models, Judges and face backend. Production uses the
+ * native adapters and Mastra Judges with the price source and the locked ONNX
+ * models; nothing in the environment can switch to a fake.
  */
 export interface RunCliDependencies {
-  imageModels?: (
-    dataDirectory: string,
-    warn: (message: string) => void,
-  ) => Promise<ImageModelsResource>;
+  vendors?: (dataDirectory: string, warn: (message: string) => void) => Promise<VendorsResource>;
   faceEmbedder?: (dataDirectory: string) => Layer.Layer<FaceEmbedder, FaceModelError>;
   retryPolicy?: RetryPolicy;
   stdout?: (text: string) => void;
@@ -217,7 +237,7 @@ async function readLane(spec: string) {
 
 export async function main(args: string[], dependencies: RunCliDependencies = {}) {
   const {
-    imageModels = nativeImageModels,
+    vendors = nativeVendors,
     faceEmbedder = (dataDirectory: string) => OnnxFaceEmbedder({ dataDirectory }),
     stdout = (text) => process.stdout.write(text),
     stderr = (text) => process.stderr.write(text),
@@ -233,6 +253,8 @@ export async function main(args: string[], dependencies: RunCliDependencies = {}
       lane: { type: "string", multiple: true },
       pin: { type: "string", multiple: true },
       face: { type: "string", multiple: true },
+      "judge-model": { type: "string" },
+      "judge-effort": { type: "string" },
       "data-dir": { type: "string" },
       db: { type: "string", default: "./iconograph.db" },
       "run-id": { type: "string" },
@@ -245,7 +267,16 @@ export async function main(args: string[], dependencies: RunCliDependencies = {}
   }
   const reading = positionals[0] === "read";
   if (reading) {
-    const runOptions = ["budget", "candidates", "look", "lane", "pin", "face"] as const;
+    const runOptions = [
+      "budget",
+      "candidates",
+      "look",
+      "lane",
+      "pin",
+      "face",
+      "judge-model",
+      "judge-effort",
+    ] as const;
     if (
       positionals.length > 1 ||
       values["run-id"] === undefined ||
@@ -277,15 +308,21 @@ export async function main(args: string[], dependencies: RunCliDependencies = {}
       values.lane === undefined
         ? [{ model: GEMINI_IMAGE_MODEL }]
         : await Promise.all(values.lane.map(readLane)),
+    judge: {
+      model: values["judge-model"] ?? DEFAULT_JUDGE.model,
+      effort: values["judge-effort"] ?? DEFAULT_JUDGE.effort,
+      weights: DEFAULT_JUDGE.weights,
+    },
   });
   const printLine = (value: unknown) => stderr(jsonLine(value));
-  const models = await imageModels(dataDirectory, (warning) => printLine({ warning }));
+  const models = await vendors(dataDirectory, (warning) => printLine({ warning }));
   await withCleanup(
     async () => {
       const application = await createRunApplication({
         databasePath: values.db,
         dataDirectory,
-        imageModels: models.layer,
+        imageModels: models.imageModels,
+        judges: models.judges,
         faceEmbedder: faceEmbedder(dataDirectory),
         ...(dependencies.retryPolicy && { retryPolicy: dependencies.retryPolicy }),
         warn: printLine,

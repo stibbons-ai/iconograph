@@ -31,10 +31,11 @@ const Likeness = Schema.Finite.check(Schema.isBetween({ minimum: 0, maximum: MAX
 const Similarity = Schema.Finite.check(Schema.isBetween({ minimum: -1, maximum: 1 }));
 
 /**
- * How a Candidate ended (GLOSSARY "Candidate Outcome"). Until the Judge exists,
- * `Scored` means the Candidate passed the Identity Gate and has a Likeness.
- * `similarity` is the raw cosine similarity to the Identity Anchor; Likeness is
- * that similarity scaled to 0–10.
+ * How a Candidate ended (GLOSSARY "Candidate Outcome"). `Scored` means the
+ * Candidate passed the Identity Gate and has a Likeness; the Judge's
+ * `Judgement` of it is stored beside the outcome. `similarity` is the raw
+ * cosine similarity to the Identity Anchor; Likeness is that similarity
+ * scaled to 0–10.
  */
 export const CandidateOutcome = Schema.Union([
   /** The Image Model declined; `reason` is the vendor's. */
@@ -58,7 +59,7 @@ export type CandidateOutcome = typeof CandidateOutcome.Type;
  * Score a generated Candidate from the embeddings of every face found in it.
  * With several faces, the one most similar to the Identity Anchor counts: a
  * Candidate showing the Subject beside someone else isn't Gated for it (the
- * Judge, later, scores the composition). An embedding that can't be compared
+ * Judge scores the composition). An embedding that can't be compared
  * (zero or non-finite) fails this Candidate, not the Run.
  */
 export function scoreCandidate(

@@ -1,4 +1,4 @@
-import { LaneStopReason } from "@iconograph/domain";
+import { JudgeEffort, LaneStopReason } from "@iconograph/domain";
 import { Schema } from "effect";
 
 /**
@@ -14,7 +14,7 @@ export const LaneInput = Schema.Struct({
 });
 export type LaneInput = typeof LaneInput.Type;
 
-/** After generating: `stopReason` is set when the Lane already has to stop. */
+/** After generating, and after scoring: `stopReason` is set when the Lane already has to stop. */
 export const LaneGenerated = Schema.Struct({
   runId: Schema.String,
   lane: Schema.Int,
@@ -34,7 +34,7 @@ export const RunResult = Schema.Struct({
   lanes: Schema.Array(LaneResult),
 });
 export type RunResult = typeof RunResult.Type;
-/** Printed before any Candidate is generated. */
+/** Printed before any Candidate is generated; `estimatedUsd` includes the Judge's calls. */
 export const EstimateEvent = Schema.Struct({
   event: Schema.Literal("estimate"),
   runId: Schema.String,
@@ -50,5 +50,13 @@ export const EstimateEvent = Schema.Struct({
       estimatedUsd: Schema.Finite,
     }),
   ),
+  /** Judging every Candidate of every Lane, at the first-call estimate. */
+  judge: Schema.Struct({
+    model: Schema.String,
+    effort: JudgeEffort,
+    calls: Schema.Int,
+    perCallUsd: Schema.Finite,
+    estimatedUsd: Schema.Finite,
+  }),
 });
 export type EstimateEvent = typeof EstimateEvent.Type;

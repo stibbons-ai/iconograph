@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   type CallGate,
+  type SettledCall,
   type CallResult,
   generateCandidate,
   type ImageModel,
@@ -39,7 +40,7 @@ function scripted(results: (CallResult | "hang")[]) {
  * a retry's reservation signals `reserving`, then waits for `admit`.
  */
 function recordingGate() {
-  const settles: [number, CallResult][] = [];
+  const settles: [number, SettledCall][] = [];
   const settled = Deferred.makeUnsafe<void>();
   const reserving = Deferred.makeUnsafe<void>();
   const admit = Deferred.makeUnsafe<void>();

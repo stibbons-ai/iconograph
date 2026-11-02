@@ -6,7 +6,6 @@ import {
   comparedSimilarity,
   type DetectedFace,
   type Embedding,
-  type EncodedImage,
   FaceBox,
   FaceEmbedder,
   FaceModelError,
@@ -21,7 +20,7 @@ import { Data, Effect, Schema } from "effect";
 import sharp from "sharp";
 import { errorMessage } from "./errors";
 import { decodeHeic, type HeicDecoder, loadHeicDecoder } from "./heic";
-import { type StoredImage, storeImage } from "./image-store";
+import { readImageAtMost, type StoredImage, storeImage } from "./image-store";
 
 /** Which step on a photo file failed. */
 type PhotoStage = "read" | "decoded" | "encoded" | "stored";
@@ -210,19 +209,7 @@ const MAX_REFERENCE_UPLOAD_SIDE = 2048;
  */
 export const loadCharacterReference = (stored: StoredImage) =>
   Effect.tryPromise({
-    try: async (): Promise<EncodedImage> => {
-      const bytes = await Bun.file(stored.path).bytes();
-      const image = sharp(bytes);
-      const { width = 0, height = 0 } = await image.metadata();
-      if (Math.max(width, height) <= MAX_REFERENCE_UPLOAD_SIDE) {
-        return { bytes, mimeType: "image/jpeg" };
-      }
-      const resized = await image
-        .resize(MAX_REFERENCE_UPLOAD_SIDE, MAX_REFERENCE_UPLOAD_SIDE, { fit: "inside" })
-        .jpeg({ quality: 90 })
-        .toBuffer();
-      return { bytes: resized, mimeType: "image/jpeg" };
-    },
+    try: () => readImageAtMost(stored.path, "image/jpeg", MAX_REFERENCE_UPLOAD_SIDE),
     catch: photoError(stored.path, "read"),
   });
 

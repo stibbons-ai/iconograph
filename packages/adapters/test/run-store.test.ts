@@ -2,11 +2,17 @@ import { describe, expect, test } from "bun:test";
 import { chmod, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import {
-  type CallResult,
+  byCriterion,
   checkBudget,
+  DEFAULT_JUDGE,
   DEFAULT_TARGET_LOOK,
+  DEFAULT_WEIGHTS,
+  JUDGED_CRITERIA,
   type LedgerEntry,
+  RUBRIC_V1,
   type RunRequest,
+  scoreVerdict,
+  type SettledCall,
   toMicros,
 } from "@iconograph/domain";
 import { Effect, type Layer, ManagedRuntime } from "effect";
@@ -24,6 +30,7 @@ const request = (budgetUsd: number): RunRequest => ({
   budgetUsd,
   candidates: 3,
   lanes: [{ model: "fake" }],
+  judge: DEFAULT_JUDGE,
 });
 
 const face = { face: 1, box: { x: 0, y: 0, width: 10, height: 10 }, score: 0.9 };
@@ -103,15 +110,14 @@ async function storeWithRun(budgetUsd: number) {
   return { runtime, run, databasePath };
 }
 
-const key = (candidate: number, attempt = 0, runId = "run") => ({
-  runId,
-  lane: 0,
-  iteration: 1,
-  candidate,
-  attempt,
-});
+const key = (
+  candidate: number,
+  attempt = 0,
+  runId = "run",
+  purpose: "generate" | "judge" = "generate",
+) => ({ runId, lane: 0, iteration: 1, candidate, purpose, attempt });
 const estimate = (micros: number) => ({ micros, usage: {} });
-const settled = (costMicros: number | null): CallResult => ({
+const settled = (costMicros: number | null): SettledCall => ({
   kind: "transient",
   reason: "test",
   costMicros,
@@ -240,6 +246,37 @@ describe("RunStore Budget ledger", () => {
     }
   });
 
+  test("a Candidate's generate and judge calls are separate ledger rows, both counted", async () => {
+    const { runtime, run } = await storeWithRun(0.25);
+    try {
+      expect(await run(reserve(0, 100_000))).toBe(true);
+      const judge = (micros: number) =>
+        withStore((store) =>
+          store.reserveCall(key(0, 0, "run", "judge"), "judge-model", estimate(micros)),
+        ).pipe(Effect.result);
+      expect((await run(judge(100_000)))._tag).toBe("Success");
+      await run(
+        withStore((store) =>
+          store.settleCall(key(0, 0, "run", "judge"), { kind: "judged", costMicros: 30_000 }),
+        ),
+      );
+      const calls = await run(ledger());
+      expect(calls.map(({ purpose, attempt, result }) => [purpose, attempt, result])).toEqual([
+        ["generate", 0, null],
+        ["judge", 0, "judged"],
+      ]);
+      // $0.25 − $0.10 reserved − $0.03 actual leaves $0.12: a second $0.15 judge call doesn't fit.
+      const second = await run(
+        withStore((store) =>
+          store.reserveCall(key(0, 1, "run", "judge"), "judge-model", estimate(150_000)),
+        ).pipe(Effect.flip),
+      );
+      expect(second).toMatchObject({ _tag: "BudgetExhausted", remainingMicros: 120_000 });
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
   test("a call that doesn't fit fails with BudgetExhausted naming the remaining Budget, and records nothing", async () => {
     const { runtime, run } = await storeWithRun(0.15);
     try {
@@ -346,6 +383,56 @@ describe("RunStore rows", () => {
     expect(() => insert(1, null, "abc", null)).toThrow(/CHECK/);
     expect(() => insert(2, '{"_tag":"Failed","reason":"x"}', null, "image/jpeg")).toThrow(/CHECK/);
     insert(3, null, "abc", "image/jpeg");
+  });
+
+  test("a judgement whose scores don't follow from its levels is never stored, and a tampered one names its Candidate", async () => {
+    const { runtime, run, databasePath } = await storeWithRun(1);
+    try {
+      const judged = scoreVerdict(
+        { levels: byCriterion(JUDGED_CRITERIA, () => 4), issues: [], promptFixes: [] },
+        7,
+        DEFAULT_WEIGHTS,
+        RUBRIC_V1,
+      );
+      const bad = { ...judged, scores: { ...judged.scores, realism: 10 } };
+      const error = await run(Effect.flip(withStore((store) => store.saveJudgement(key(0), bad))));
+      expect(error.message).toContain("Saving the judgement of Candidate 0 failed");
+      expect(error.message).toContain("don't follow from the levels");
+
+      tamper(
+        databasePath,
+        `INSERT INTO candidates (run_id, lane, iteration, candidate, outcome, image_sha256, image_type)
+         VALUES ('run', 0, 1, 2, '{"_tag":"Failed","reason":"x"}', NULL, NULL)`,
+      );
+      tamper(
+        databasePath,
+        "INSERT INTO judgements (run_id, lane, iteration, candidate, judgement) VALUES ('run', 0, 1, 2, ?)",
+        JSON.stringify(bad),
+      );
+      const unreadable = await run(Effect.flip(withStore((store) => store.loadRecords("run"))));
+      expect(unreadable.message).toContain("the judgement of Lane 0, Iteration 1, Candidate 2");
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  test("a database from before the Judge is refused, for writing and for reading", async () => {
+    const databasePath = join(await temporaryDirectory(), "old.db");
+    tamper(
+      databasePath,
+      `CREATE TABLE cost_records (run_id TEXT, lane INTEGER, iteration INTEGER, candidate INTEGER,
+         attempt INTEGER, PRIMARY KEY (run_id, lane, iteration, candidate, attempt))`,
+    );
+    for (const readOnly of [false, true]) {
+      const runtime = ManagedRuntime.make(LibsqlRunStore(databasePath, { readOnly }));
+      try {
+        await expect(runtime.runPromise(withStore((store) => store.loadRun("x")))).rejects.toThrow(
+          "predate the Judge",
+        );
+      } finally {
+        await runtime.dispose();
+      }
+    }
   });
 
   test("reading needs an existing database file and doesn't create one", async () => {

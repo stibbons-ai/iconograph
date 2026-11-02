@@ -1,4 +1,4 @@
-import { Context, Data, Duration, Effect } from "effect";
+import { Context, Data, Duration, Effect, Schema } from "effect";
 import { type BudgetExhausted, fitsBudget } from "./budget";
 import type { PriceQuote, Unpriced } from "./prices";
 
@@ -41,21 +41,14 @@ export interface CallEstimate {
 }
 
 /**
- * What one billable call returned, classified by the adapter. `costMicros` is
+ * A billable call that produced nothing usable, classified by the adapter;
+ * shared by every kind of billable call (Image Model, Judge). `costMicros` is
  * the actual cost from the vendor's usage report: 0 when the vendor doesn't
  * bill the response (Google doesn't bill HTTP errors), null when unknown (no
  * usable response, or a response that may have been billed but whose usage
  * report is missing or too incomplete to price without undercounting).
  */
-export type CallResult =
-  | {
-      readonly kind: "image";
-      readonly image: EncodedImage;
-      /** Null when the vendor sent no usage report; the image may still have been billed. */
-      readonly usage: Usage | null;
-      /** Null when the usage report is missing or too incomplete to price the call without undercounting. */
-      readonly costMicros: number | null;
-    }
+export type UnsuccessfulCall =
   /** A safety block or the model declining; never retried. */
   | {
       readonly kind: "refused";
@@ -71,6 +64,35 @@ export type CallResult =
       readonly usage: Usage | null;
       readonly costMicros: number | null;
     };
+
+/** What one Image Model call returned (see `UnsuccessfulCall` for `costMicros`). */
+export type CallResult =
+  | {
+      readonly kind: "image";
+      readonly image: EncodedImage;
+      /** Null when the vendor sent no usage report; the image may still have been billed. */
+      readonly usage: Usage | null;
+      /** Null when the usage report is missing or too incomplete to price the call without undercounting. */
+      readonly costMicros: number | null;
+    }
+  | UnsuccessfulCall;
+
+/** How any billable call ended, as the Budget's ledger records it. */
+export const SettledCallKind = Schema.Literals([
+  "image",
+  "judged",
+  "refused",
+  "transient",
+  "failed",
+]);
+
+/** What the Budget's ledger records of any billable call's result (Image Model or Judge). */
+export interface SettledCall {
+  readonly kind: typeof SettledCallKind.Type;
+  readonly costMicros: number | null;
+  readonly usage?: Usage | null;
+  readonly reason?: string;
+}
 
 /** One specific image-generation model behind our own interface (ADR-0004). */
 export interface ImageModel {
@@ -119,15 +141,16 @@ export interface RetryPolicy {
 export const DEFAULT_RETRY_POLICY: RetryPolicy = { maxRetries: 2, baseDelayMs: 1000 };
 
 /**
- * The Budget's view of one Candidate's billable calls, by attempt (from 0).
- * `reserve` must succeed before a call is made; `settle` records what it cost.
+ * The Budget's view of one subject's billable calls (a Candidate's Image Model
+ * calls, or its Judge calls), by attempt (from 0). `reserve` must succeed
+ * before a call is made; `settle` records what it cost.
  */
 export interface CallGate<E = never> {
   readonly reserve: (
     attempt: number,
     estimate: CallEstimate,
   ) => Effect.Effect<void, BudgetExhausted | E>;
-  readonly settle: (attempt: number, result: CallResult) => Effect.Effect<void, E>;
+  readonly settle: (attempt: number, result: SettledCall) => Effect.Effect<void, E>;
 }
 
 export type Generation =
@@ -145,32 +168,52 @@ export interface GenerateCandidateOptions<E> {
 }
 
 /** The result booked for a reserved call that was never sent: failed, at $0. */
-export const notSent = (why: string): CallResult => ({
+export const notSent = (why: string): UnsuccessfulCall => ({
   kind: "failed",
   reason: `Not sent: ${why}`,
   usage: null,
   costMicros: 0,
 });
 
+type Transient = Extract<UnsuccessfulCall, { kind: "transient" }>;
+const isTransient = (result: SettledCall): result is Transient => result.kind === "transient";
+
+/** A call that kept failing transiently: retries ran out, or the next didn't fit the Budget. */
+export interface GaveUp {
+  readonly kind: "gave-up";
+  readonly reason: string;
+  /** A retry was due but didn't fit the Budget, so it wasn't made. */
+  readonly budgetExhausted: boolean;
+}
+
+export interface RetriedCallOptions<S extends SettledCall, E> {
+  readonly estimate: CallEstimate;
+  /** One billable call; never fails, every outcome is a result. Interrupting it aborts the request. */
+  readonly call: Effect.Effect<S | UnsuccessfulCall>;
+  /** Attempt 0 is already reserved: the caller reserves every first call before launching any. */
+  readonly gate: CallGate<E>;
+  readonly policy?: RetryPolicy;
+}
+
 /**
- * One Candidate: the reserved first call, then a retry per transient error up
- * to the policy's limit, each retry reserved against the Budget first. A
- * refusal is final; a retry that doesn't fit ends the Candidate as Failed.
+ * One billable call: the reserved first attempt, then a retry per transient
+ * error up to the policy's limit, each retry reserved against the Budget
+ * first. Returns the first non-transient result, or `GaveUp`.
  *
  * When interrupted (e.g. a sibling step failed), the attempt in progress is
  * settled: a call already sent as of unknown cost, since the vendor may still
  * bill it; a reservation whose call was never sent as $0. A failed settle is
  * logged as a warning; the unsettled row then counts at its estimate.
  */
-export const generateCandidate = <E>(options: GenerateCandidateOptions<E>) =>
+export const callWithRetries = <S extends SettledCall, E>(options: RetriedCallOptions<S, E>) =>
   Effect.suspend(() => {
-    const { model, request, gate, policy = DEFAULT_RETRY_POLICY } = options;
+    const { estimate, call, gate, policy = DEFAULT_RETRY_POLICY } = options;
     // The current attempt: reserved (attempt 0 by the caller), sent, or settled.
     let attempt = 0;
     let state: "reserved" | "sent" | "settled" = "reserved";
     const settleOnInterrupt = Effect.suspend(() => {
       if (state === "settled") return Effect.void;
-      const result: CallResult =
+      const result: UnsuccessfulCall =
         state === "sent"
           ? { kind: "transient", reason: "Interrupted before the call finished", costMicros: null }
           : notSent("interrupted first");
@@ -181,10 +224,9 @@ export const generateCandidate = <E>(options: GenerateCandidateOptions<E>) =>
         );
     });
     return Effect.gen(function* () {
-      const estimate = model.estimate(request);
       for (;;) {
         state = "sent";
-        const result = yield* model.call(request);
+        const result = yield* call;
         // A settle and its bookkeeping complete together, so an interrupt can't
         // overwrite a recorded result.
         yield* Effect.uninterruptible(
@@ -196,25 +238,14 @@ export const generateCandidate = <E>(options: GenerateCandidateOptions<E>) =>
             ),
           ),
         );
-        switch (result.kind) {
-          case "image":
-            return { kind: "image", image: result.image } satisfies Generation;
-          case "refused":
-            return { kind: "refused", reason: result.reason } satisfies Generation;
-          case "failed":
-            return {
-              kind: "failed",
-              reason: result.reason,
-              budgetExhausted: false,
-            } satisfies Generation;
-        }
+        if (!isTransient(result)) return result;
         if (attempt >= policy.maxRetries) {
           const tries = attempt + 1;
           return {
-            kind: "failed",
+            kind: "gave-up",
             reason: `${result.reason} (gave up after ${tries} attempt${tries === 1 ? "" : "s"})`,
             budgetExhausted: false,
-          } satisfies Generation;
+          } satisfies GaveUp;
         }
         yield* Effect.sleep(Duration.millis(policy.baseDelayMs * 2 ** attempt));
         // Likewise a reservation and the switch to the next attempt.
@@ -231,11 +262,43 @@ export const generateCandidate = <E>(options: GenerateCandidateOptions<E>) =>
         );
         if (!fits) {
           return {
-            kind: "failed",
+            kind: "gave-up",
             reason: `${result.reason}; retry not made: Budget exhausted`,
             budgetExhausted: true,
-          } satisfies Generation;
+          } satisfies GaveUp;
         }
       }
     }).pipe(Effect.onInterrupt(() => settleOnInterrupt));
   });
+
+/**
+ * One Candidate's Image Model call with retries (`callWithRetries`). A refusal
+ * is final; a retry that doesn't fit ends the Candidate as Failed.
+ */
+export const generateCandidate = <E>({
+  model,
+  request,
+  gate,
+  policy,
+}: GenerateCandidateOptions<E>) =>
+  Effect.suspend(() =>
+    callWithRetries({
+      estimate: model.estimate(request),
+      call: model.call(request),
+      gate,
+      ...(policy && { policy }),
+    }),
+  ).pipe(
+    Effect.map((result): Generation => {
+      switch (result.kind) {
+        case "image":
+          return { kind: "image", image: result.image };
+        case "refused":
+          return { kind: "refused", reason: result.reason };
+        case "failed":
+          return { kind: "failed", reason: result.reason, budgetExhausted: false };
+        case "gave-up":
+          return { kind: "failed", reason: result.reason, budgetExhausted: result.budgetExhausted };
+      }
+    }),
+  );

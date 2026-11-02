@@ -70,3 +70,30 @@ export function errorLine(error: unknown): string {
     ...(typeof runId === "string" && runId && { runId }),
   })}\n`;
 }
+
+/** The error, its `cause`, the cause's `cause`, and so on, up to `depth` links. */
+function* causeChain(error: unknown, depth = 4): Generator<object> {
+  for (let link = error, index = 0; index < depth; index++) {
+    if (typeof link !== "object" || link === null) return;
+    yield link;
+    link = "cause" in link ? link.cause : undefined;
+  }
+}
+
+/** The first integer HTTP `statusCode` on the error or its cause chain; undefined when none. */
+export function statusOf(error: unknown): number | undefined {
+  for (const link of causeChain(error)) {
+    if ("statusCode" in link && Number.isInteger(Number(link.statusCode))) {
+      return Number(link.statusCode);
+    }
+  }
+  return undefined;
+}
+
+/** The first string `code` on the error or its cause chain (e.g. Bun's `ENOTFOUND`). */
+export function codeOf(error: unknown): string | undefined {
+  for (const link of causeChain(error)) {
+    if ("code" in link && typeof link.code === "string") return link.code;
+  }
+  return undefined;
+}

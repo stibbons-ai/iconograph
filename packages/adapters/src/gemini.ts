@@ -36,12 +36,13 @@ import {
   type Usage,
 } from "@iconograph/domain";
 import { Effect, Schema } from "effect";
+import { redactKey } from "./api-key";
 import { errorMessage } from "./errors";
 import {
   base64Of,
   Count,
   encodeOncePerRequest,
-  isTransientStatus,
+  httpErrorResult,
   parseJson,
   promptTokens,
 } from "./vendor-http";
@@ -281,9 +282,7 @@ function classifyHttpError(status: number, body: unknown): CallResult {
     return { kind: "refused", reason: `${code}: ${message}`, usage: null, costMicros: 0 };
   }
   const reason = `Gemini HTTP ${status}${error?.status ? ` ${error.status}` : ""}: ${message}`;
-  return isTransientStatus(status)
-    ? { kind: "transient", reason, costMicros: 0 }
-    : { kind: "failed", reason, usage: null, costMicros: 0 };
+  return httpErrorResult(status, reason);
 }
 
 /**
@@ -293,8 +292,7 @@ function classifyHttpError(status: number, body: unknown): CallResult {
 export function geminiImageModel(options: GeminiImageModelOptions): ImageModel {
   const { model, apiKey, price, fetch: send = fetch, timeoutMs = 180_000 } = options;
   const { pricing } = price;
-  /** Error text with the key removed, e.g. from a runtime rejecting the header value. */
-  const redact = (text: string) => (apiKey ? text.replaceAll(apiKey, "[redacted]") : text);
+  const redact = redactKey(apiKey);
 
   const estimate = (request: ImageRequest): CallEstimate => {
     const usage = {
