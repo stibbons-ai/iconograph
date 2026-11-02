@@ -35,15 +35,6 @@
         "effect": "catalog:",
       },
     },
-    "packages/eval-harness": {
-      "name": "@iconograph/eval-harness",
-      "version": "0.0.0",
-      "dependencies": {
-        "@iconograph/domain": "workspace:*",
-        "@iconograph/server": "workspace:*",
-        "effect": "catalog:",
-      },
-    },
     "packages/server": {
       "name": "@iconograph/server",
       "version": "0.0.0",
@@ -97,8 +88,6 @@
     "@iconograph/adapters": ["@iconograph/adapters@workspace:packages/adapters"],
 
     "@iconograph/domain": ["@iconograph/domain@workspace:packages/domain"],
-
-    "@iconograph/eval-harness": ["@iconograph/eval-harness@workspace:packages/eval-harness"],
 
     "@iconograph/server": ["@iconograph/server@workspace:packages/server"],
 
