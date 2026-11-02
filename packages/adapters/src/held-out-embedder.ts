@@ -36,8 +36,8 @@ export const facenetConfig = {
    * (`--margin 32` at 160), which applies it in source-image pixels instead.
    */
   margin: 32,
-  /** ADR-0008's starting threshold, to be recalibrated on real pairs. */
-  threshold: 0.7,
+  /** Equal error rate of `faces:calibrate` on real anchor pairs (issue #11); ADR-0008 started at 0.70. */
+  threshold: 0.52,
 } as const;
 
 /** A square in image pixels; it may extend past the image's edges. */

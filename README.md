@@ -226,7 +226,7 @@ bun run photos:validate --face 2:1 me-1.jpg team-photo.jpg me-3.png # photo 2: u
 
 Thresholds live in one per-model config (`sfaceConfig` in
 [`packages/adapters/src/face-embedder.ts`](packages/adapters/src/face-embedder.ts)); the Identity
-Gate and the single-photo Ceiling (0.60) are provisional until calibrated on real pairs with
+Gate (0.40) and the single-photo Ceiling (0.66) were calibrated on real pairs with
 `faces:calibrate` (see Calibrating the face thresholds below; issue #11). The
 face tests use only licence-clear fixtures, listed in
 [`packages/adapters/test/fixtures/faces/README.md`](packages/adapters/test/fixtures/faces/README.md),
@@ -256,7 +256,7 @@ the 160 output pixels (facenet-pytorch's MTCNN convention), padded black where i
 image, resized to 160×160 and normalised as (x − 127.5) / 128. The JSON report gives the model, the
 threshold, the Candidate's face and its cosine similarity to each Reference Photo, its similarity
 to the held-out anchor (the normalised mean of the reference embeddings) and `pass` when that
-reaches the threshold. The threshold (0.70, ADR-0008, to be recalibrated on real pairs) lives in
+reaches the threshold. The threshold (0.52, calibrated on real pairs in issue #11; ADR-0008) lives in
 `facenetConfig` in
 [`packages/adapters/src/held-out-embedder.ts`](packages/adapters/src/held-out-embedder.ts).
 
@@ -268,8 +268,8 @@ is the other command that loads it).
 
 ### Calibrating the face thresholds
 
-The SFace Identity Gate (0.40), the single-photo Identity Ceiling (0.60) and the FaceNet threshold
-(0.70) are provisional until calibrated on real pairs (issue #11). `faces:calibrate` measures both
+The SFace Identity Gate (0.40), the single-photo Identity Ceiling (0.66) and the FaceNet threshold
+(0.52) were calibrated on real pairs (issue #11; rationale in ADR-0008). `faces:calibrate` measures both
 face models on photos of consenting Subjects and suggests values; it never changes them.
 
 ```sh

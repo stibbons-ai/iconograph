@@ -161,8 +161,8 @@ describe("faces:heldout in-process", () => {
     expect(report.references.map(({ path }) => path)).toEqual(references);
   });
 
-  test("the starting threshold is ADR-0008's 0.70", () => {
-    expect(facenetConfig.threshold).toBe(0.7);
+  test("the threshold is the 0.52 calibrated in issue #11 (ADR-0008)", () => {
+    expect(facenetConfig.threshold).toBe(0.52);
   });
 });
 
