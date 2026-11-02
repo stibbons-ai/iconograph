@@ -19,7 +19,7 @@ import {
 } from "../../adapters/test/openai-fixtures";
 import { tamper } from "../../adapters/test/tamper";
 import { temporaryDirectories } from "../../adapters/test/temporary-directory";
-import { createRunApplication, type RunWarning } from "../src";
+import { createRunApplication, readRunReport, type RunWarning } from "../src";
 import {
   FAKE_ACTUAL_MICROS,
   FAKE_ESTIMATE_MICROS,
@@ -777,7 +777,7 @@ describe("Run engine with two Lanes", () => {
   }, 60_000);
 
   test("read shows each Lane's stored Prompt, and null for a Lane that lost its Iteration (died mid-prepare)", async () => {
-    const { application, databasePath } = await setup([]);
+    const { application, databasePath, dataDirectory } = await setup([]);
     try {
       const own = "A studio headshot.";
       const look = { ...DEFAULT_TARGET_LOOK, clothing: "a green knitted jumper" };
@@ -798,13 +798,16 @@ describe("Run engine with two Lanes", () => {
       await tamper(databasePath, "DELETE FROM iterations WHERE lane = 0");
       const report = await application.report(runId);
       expect(report.lanes.map(({ initialPrompt }) => initialPrompt)).toEqual([null, "as sent"]);
-      // Any other fault reading a Prompt still fails `read`, rather than showing null.
+      // Any other fault reading a Prompt still fails `read`, rather than showing null. The table is
+      // renamed with the application closed, and `read` opens its own read-only connection (which
+      // creates no tables), so every platform sees the schema change.
+      await application.close();
       await tamper(databasePath, "ALTER TABLE iterations RENAME TO iterations_moved");
-      await expect(application.report(runId)).rejects.toThrow(
+      await expect(readRunReport(databasePath, dataDirectory, runId)).rejects.toThrow(
         "Loading the Prompt of Iteration 1 failed",
       );
     } finally {
-      await application.close();
+      await application.close().catch(() => {});
     }
   }, 60_000);
 
