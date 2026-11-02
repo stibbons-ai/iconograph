@@ -19,7 +19,8 @@ import type { Fetch } from "./models";
  * structural: `HeldOutFaceEmbedder` is its own service, not a `FaceEmbedder`,
  * and nothing here is exported from `@iconograph/adapters` (whose `exports`
  * field is its index only), so the server and its workflow cannot import or
- * provide it. Only the `faces:heldout` command (`heldout-cli.ts`) uses it.
+ * provide it. Only the `faces:heldout` and `faces:calibrate` commands
+ * (`heldout-cli.ts`, `calibrate-cli.ts`) use it.
  * `packages/server/test/held-out-isolation.test.ts` proves it.
  */
 
