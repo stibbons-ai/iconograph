@@ -7,7 +7,7 @@ import {
   collectInstalledPackages,
   missingLockedPackages,
 } from "./check-licenses.ts";
-import type { BunLock } from "./check-licenses.ts";
+import type { BunLock } from "./bun-lock.ts";
 import { licenseViolation, validateAllowlist } from "./license-policy.ts";
 
 const pkg = (license: unknown) => ({ name: "example", version: "1.2.3", license });
@@ -120,8 +120,8 @@ describe("installed graph coverage", () => {
       lockfileVersion: 2,
       workspaces: {},
       packages: {
-        a: ["a@1.0.0"],
-        alias: ["real-package@2.0.0"],
+        a: ["a@1.0.0", ""],
+        alias: ["real-package@2.0.0", ""],
         native: ["native@1.0.0", "", { os: "linux", cpu: "x64" }],
         foreign: ["foreign@1.0.0", "", { os: "darwin", cpu: "arm64" }],
         excluded: ["excluded@1.0.0", "", { os: ["!linux"] }],
@@ -153,10 +153,10 @@ describe("installed graph coverage", () => {
           { os: "freebsd", dependencies: { fallback: "1.0.0", "shared-runtime": "1.0.0" } },
         ],
         fallback: ["fallback@1.0.0", "", { dependencies: { "fallback-runtime": "1.0.0" } }],
-        "fallback-runtime": ["fallback-runtime@1.0.0"],
+        "fallback-runtime": ["fallback-runtime@1.0.0", ""],
         native: ["native@1.0.0", "", { os: "linux", dependencies: { "host-helper": "1.0.0" } }],
-        "host-helper": ["host-helper@1.0.0"],
-        "shared-runtime": ["shared-runtime@1.0.0"],
+        "host-helper": ["host-helper@1.0.0", ""],
+        "shared-runtime": ["shared-runtime@1.0.0", ""],
       },
     };
     expect(missingLockedPackages(lock, [], "linux", "x64")).toEqual({
@@ -169,37 +169,37 @@ describe("installed graph coverage", () => {
     {
       edge: "a root devDependency",
       workspaces: { "": { name: "root", devDependencies: { tool: "1.0.0" } } },
-      packages: { tool: ["tool@1.0.0"] },
+      packages: { tool: ["tool@1.0.0", ""] },
       missing: ["tool@1.0.0"],
     },
     {
       edge: "an npm alias a host package depends on",
       workspaces: { "": { name: "root", dependencies: { "my-alias": "npm:real@1.0.0" } } },
-      packages: { "my-alias": ["real@1.0.0"] },
+      packages: { "my-alias": ["real@1.0.0", ""] },
       missing: ["real@1.0.0"],
     },
     {
       edge: "a scoped npm alias",
       workspaces: { "": { name: "root", dependencies: { alias: "npm:@scope/real@~1.0.0" } } },
-      packages: { alias: ["@scope/real@1.0.0"] },
+      packages: { alias: ["@scope/real@1.0.0", ""] },
       missing: ["@scope/real@1.0.0"],
     },
     {
       edge: "another version of a name the host needs",
       workspaces: { "": { name: "root", dependencies: { lib: "2.0.0" } } },
-      packages: { lib: ["lib@2.0.0"], "foreign/lib": ["lib@1.0.0"] },
+      packages: { lib: ["lib@2.0.0", ""], "foreign/lib": ["lib@1.0.0", ""] },
       missing: ["lib@2.0.0", "lib@1.0.0"],
     },
     {
       edge: "a catalog alias (the specifier is just `catalog:`)",
       workspaces: { "": { name: "root", dependencies: { "bar-alias": "catalog:" } } },
-      packages: { "bar-alias": ["bar@1.0.0"] },
+      packages: { "bar-alias": ["bar@1.0.0", ""] },
       missing: ["bar@1.0.0"],
     },
     {
       edge: "a top-level override alias",
       workspaces: { "": { name: "root", dependencies: { foo: "1.0.0" } } },
-      packages: { foo: ["bar@1.0.0"] },
+      packages: { foo: ["bar@1.0.0", ""] },
       missing: ["bar@1.0.0"],
     },
     {
@@ -207,14 +207,14 @@ describe("installed graph coverage", () => {
       workspaces: { "": { name: "root", dependencies: { host: "1.0.0" } } },
       packages: {
         host: ["host@1.0.0", "", { dependencies: { "@scope/alias": "catalog:" } }],
-        "host/@scope/alias": ["bar@1.0.0"],
+        "host/@scope/alias": ["bar@1.0.0", ""],
       },
       missing: ["host@1.0.0", "bar@1.0.0"],
     },
     {
       edge: "one identity under two keys, one of them a host alias",
       workspaces: { "": { name: "root", dependencies: { "bar-alias": "catalog:" } } },
-      packages: { "bar-alias": ["bar@1.0.0"], "foreign/bar": ["bar@1.0.0"] },
+      packages: { "bar-alias": ["bar@1.0.0", ""], "foreign/bar": ["bar@1.0.0", ""] },
       missing: ["bar@1.0.0"],
     },
   ] as const)(

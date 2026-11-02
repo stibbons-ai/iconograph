@@ -1,0 +1,21 @@
+# Only sources and manifests reach the build; never weights, keys, databases or local state.
+**/node_modules
+.data
+dist
+.git
+.github
+.githooks
+.idea
+.devenv*
+.direnv
+.env
+.env.*
+.envrc
+.work
+*.db
+*.db-shm
+*.db-wal
+*.onnx
+packages/*/test
+scripts/*.test.ts
+docs

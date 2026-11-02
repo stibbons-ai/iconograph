@@ -94,6 +94,11 @@ export function readModelLock(): ModelLock {
   return decodeModelLock(bundledLock);
 }
 
+/** The models `ensureModels` may download; built ones (FaceNet, ADR-0011) are never among them. */
+export function downloadableModelIds(lock: ModelLock): string[] {
+  return lock.models.flatMap((model) => (model.url ? [model.id] : []));
+}
+
 export type Fetch = (url: string) => Promise<Response>;
 
 export interface EnsureModelsOptions {

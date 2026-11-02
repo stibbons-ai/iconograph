@@ -11,6 +11,9 @@
     "@iconograph/domain": "workspace:*",
     "@iconograph/adapters": "workspace:*",
     "@mastra/core": "catalog:",
-    "effect": "catalog:"
+    "@mastra/hono": "catalog:",
+    "effect": "catalog:",
+    "hono": "catalog:",
+    "sharp": "catalog:"
   }
 }

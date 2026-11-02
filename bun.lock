@@ -42,17 +42,22 @@
         "@iconograph/adapters": "workspace:*",
         "@iconograph/domain": "workspace:*",
         "@mastra/core": "catalog:",
+        "@mastra/hono": "catalog:",
         "effect": "catalog:",
+        "hono": "catalog:",
+        "sharp": "catalog:",
       },
     },
   },
   "catalog": {
     "@libsql/client": "0.18.0",
     "@mastra/core": "1.80.0",
+    "@mastra/hono": "1.7.22",
     "@mastra/libsql": "1.27.1",
     "@types/bun": "1.4.4",
     "@types/spdx-expression-parse": "4.0.0",
     "effect": "^4",
+    "hono": "4.13.14",
     "libheif-js": "1.23.5",
     "onnxruntime-node": "1.31.1",
     "oxfmt": "0.75.0",
@@ -82,6 +87,10 @@
     "@chat-adapter/catalog": ["@chat-adapter/catalog@4.43.0", "", {}, "sha512-JRH40HwYIXdIiwSc/gNw65q5T/gaf691n4//2YOhjRE4YO9KzSFJ/N+RrTD3M8iGz2jI4Jg92wb6OAqfYsAkTQ=="],
 
     "@emnapi/runtime": ["@emnapi/runtime@1.11.3", "", { "dependencies": { "tslib": "^2.4.0" } }, "sha512-Xz4Tpyki7XyrpbUK1jR1AhdAdaXyhhY4lZ3neLodmhpuWfy2PAQN5B46sAiU4liOXGLkHypn/qU+jvfWSCYYLA=="],
+
+    "@hono/node-server": ["@hono/node-server@1.19.17", "", { "peerDependencies": { "hono": "^4" } }, "sha512-dSneS5qhiauZWGDCeK4o695Xd9nUNjviSZCMQrj10eetr8Uln1ucn6bbphOM6UynAMMtNIzZNSpL9vnASJwrPQ=="],
+
+    "@hono/node-ws": ["@hono/node-ws@1.3.1", "", { "dependencies": { "ws": "^8.17.0" }, "peerDependencies": { "@hono/node-server": "^1.19.11", "hono": "^4.6.0" } }, "sha512-vo/MwCnpJAVHBkGzWjCJ28wF45fYHAfbPZcH2rodZODHtch2GHA94KtMfusmVycTUtsLAsaNsHhtY6P8X3RQsA=="],
 
     "@hono/standard-validator": ["@hono/standard-validator@0.4.1", "", { "peerDependencies": { "@standard-schema/spec": "^1.0.0", "hono": ">=4.11.2" } }, "sha512-Q0+1dgMKAXEvsmJ5FNoamwnfrf/I5JNnKn7WzfynH8nJlNe1lNOW1+vlKpEQZbrBLEgmxIeys6HjRotDvZzq+A=="],
 
@@ -179,9 +188,13 @@
 
     "@mastra/core": ["@mastra/core@1.80.0", "", { "dependencies": { "@a2a-js/sdk-v0_3": "npm:@a2a-js/sdk@~0.3.14", "@a2a-js/sdk-v1": "npm:@a2a-js/sdk@~1.0.1", "@ai-sdk/provider-utils-v6": "npm:@ai-sdk/provider-utils@4.0.61", "@ai-sdk/provider-utils-v7": "npm:@ai-sdk/provider-utils@5.0.62", "@ai-sdk/provider-v5": "npm:@ai-sdk/provider@2.0.5", "@ai-sdk/provider-v6": "npm:@ai-sdk/provider@3.0.19", "@ai-sdk/provider-v7": "npm:@ai-sdk/provider@4.0.29", "@isaacs/ttlcache": "^2.1.5", "@lukeed/uuid": "^2.0.1", "@mastra/schema-compat": "1.3.17", "@standard-schema/spec": "^1.1.0", "chat": "^4.43.0", "croner": "^10.0.1", "dotenv": "^17.4.2", "execa": "^9.6.1", "fastq": "^1.20.3", "hono": "^4.13.13", "hono-openapi": "^1.5.0", "ignore": "^7.0.14", "jpeg-js": "^0.4.4", "json-schema": "^0.4.0", "lru-cache": "^11.5.3", "p-map": "^7.1.1", "p-retry": "^7.1.1", "picomatch": "^4.0.7", "posthog-node": "^5.57.1", "re2js": "^2.9.0", "ws": "^8.22.0", "xxhash-wasm": "^1.1.0", "yaml": "^2.9.1" }, "peerDependencies": { "zod": "^3.25.0 || ^4.0.0" } }, "sha512-0yaOz2u5SLTT8JKqTGF0GUBqaMAiVDMatC5Rcu7uIP+O6HPW3XpA8JtLqjfBZmNREflnLxYgKYHN7mSYZy+zCA=="],
 
+    "@mastra/hono": ["@mastra/hono@1.7.22", "", { "dependencies": { "@hono/node-ws": "^1.3.1", "@mastra/server": "1.80.0", "fetch-to-node": "^2.1.0", "ws": "^8.22.0" }, "peerDependencies": { "@mastra/core": ">=1.80.0-0 <2.0.0-0", "hono": "^4.13.5" } }, "sha512-V14IZVGBIP4KEpuyyAdAbJdd0w+uA9QISxI5XVb0/W7hY04r1ZRs0p5VCr7FnyEPKkaLvTwvXjcU3wRAWlP95g=="],
+
     "@mastra/libsql": ["@mastra/libsql@1.27.1", "", { "dependencies": { "@libsql/client": "^0.18.0" }, "peerDependencies": { "@mastra/core": ">=1.76.0-0 <2.0.0-0" } }, "sha512-8P52TspmK2t2HKLx0DYp6riTTcxsW+VWgmc7SdgAe5WiY1vhEO4Z+nr+moh22E5kfgZhzuMTT9ZeL5AyOYLRkw=="],
 
     "@mastra/schema-compat": ["@mastra/schema-compat@1.3.17", "", { "dependencies": { "json-schema-to-zod": "^2.8.1", "zod-from-json-schema": "0.5.2" }, "peerDependencies": { "zod": "^3.25.0 || ^4.0.0" } }, "sha512-8tuRZkVL7JE5A7pH2/GV3khYM+R8xHa+WPSjykq4OjKT2O4s9mNpPl8174dEN8TZUYetUAtxZM0HVM24ON0UQg=="],
+
+    "@mastra/server": ["@mastra/server@1.80.0", "", { "dependencies": { "hono": "^4.13.13" }, "peerDependencies": { "@mastra/core": ">=1.80.0-0 <2.0.0-0", "zod": "^3.25.0 || ^4.0.0" } }, "sha512-VbRNgfP02GnOUcuPsjvQPihC1AbWhT10CvjuB/ILo5zmJTQONucZfLUugetvAg9N67LcO+iAgqJRMsl3ITRFYw=="],
 
     "@neon-rs/load": ["@neon-rs/load@0.0.4", "", {}, "sha512-kTPhdZyTQxB+2wpiRcFWrDcejc4JI6tkPuS7UZCG4l6Zvc5kU/gGQ/ozvHTh1XR5tS+UlfAfGuPajjzQjCiHCw=="],
 
@@ -382,6 +395,8 @@
     "extend": ["extend@3.0.2", "", {}, "sha512-fjquC59cD7CyW6urNXK0FBufkZcoiGG80wTuPujX590cB5Ttln20E2UB4S/WARVqhXffZl2LNgS+gQdPIIim/g=="],
 
     "fastq": ["fastq@1.20.3", "", { "dependencies": { "reusify": "^1.0.4" } }, "sha512-XKv5nnLs6nLF71NgiKJLIZFLkPyIEuOselLG7ujZnGrRfQK8HpvY+WqKhAJUAdLomwVHErVS4LfxFlPq0/FTAw=="],
+
+    "fetch-to-node": ["fetch-to-node@2.1.0", "", {}, "sha512-Wq05j6LE1GrWpT2t1YbCkyFY6xKRJq3hx/oRJdWEJpZlik3g25MmdJS6RFm49iiMJw6zpZuBOrgihOgy2jGyAA=="],
 
     "figures": ["figures@6.1.0", "", { "dependencies": { "is-unicode-supported": "^2.0.0" } }, "sha512-d+l3qxjSesT4V7v2fh+QnmFnUWv9lSpjarhShNTgBOfA0ttejbQUAlHLitbjkoRiDulW0OPoQPYIGhIC8ohejg=="],
 

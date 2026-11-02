@@ -51,3 +51,233 @@ jobs:
         run: bun test
       - name: Run formatting, lint, typecheck, licence policy and tests
         run: bun run check
+
+  # The built image as shipped (ADR-0009): bundle, pruned externals and Mastra's capability
+  # metadata, built and smoked on each published platform's own runner. Weights are fetched
+  # here and mounted, never baked in. `image` runs for PRs and pushes other than main;
+  # `image-release` runs the same steps for pushes to main, where the smoked image is then
+  # pushed untagged by digest. GitHub has no per-event job permissions, hence two jobs sharing
+  # one definition: only `image-release`, `publish` and `promote-latest` hold `packages: write`.
+  image:
+    if: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    strategy: &image-strategy
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-26.04
+            arch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-26.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env: &image-env
+      MASTRA_TELEMETRY_DISABLED: "1"
+      DO_NOT_TRACK: "1"
+      RELEASE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    steps: &image-steps
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      # Restore only: this job never has FaceNet, so saving under check's key would make check
+      # rebuild FaceNet on every run.
+      - name: Restore verified face-model weights
+        id: models
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .data/models
+          key: face-models-${{ hashFiles('packages/adapters/models.lock.json', 'scripts/export-facenet.py') }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        if: steps.models.outputs.cache-hit != 'true'
+        with:
+          bun-version: "1.4.2"
+      - name: Install locked runtime and development dependencies
+        if: steps.models.outputs.cache-hit != 'true'
+        run: bun install --frozen-lockfile
+      # The server re-verifies them at boot and the smoke test on load.
+      - name: Fetch and verify face-model weights
+        if: steps.models.outputs.cache-hit != 'true'
+        run: bun run models:fetch
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      # Builds are reproducible (timestamps pinned to the commit), so the release rebuild below
+      # pushes exactly the bits smoked here; the push step checks that.
+      - name: Pin build timestamps to the commit
+        id: epoch
+        run: echo "epoch=$(git log -1 --format=%ct)" >> "$GITHUB_OUTPUT"
+      - name: Build the ${{ matrix.arch }} image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        env:
+          SOURCE_DATE_EPOCH: ${{ steps.epoch.outputs.epoch }}
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          provenance: false
+          outputs: type=docker,name=iconograph:ci,rewrite-timestamp=true
+          cache-from: type=gha,scope=image-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=image-${{ matrix.arch }}
+      - name: Smoke test the image (Mastra capabilities, ORT loads SFace, sharp, LibSQL, HEIC, Judge idle timeout)
+        run: >-
+          docker run --rm -v "$PWD/.data/models:/data/models:ro"
+          --entrypoint /usr/local/bin/bun iconograph:ci /app/smoke.js
+      - name: Boot the image and check /health
+        run: |
+          docker run -d --name iconograph -p 127.0.0.1:4111:4111 \
+            -v "$PWD/.data/models:/data/models:ro" iconograph:ci
+          for _ in $(seq 60); do
+            if curl -sf http://127.0.0.1:4111/health >/dev/null; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:4111/health
+          docker exec iconograph /usr/local/bin/bun /app/healthcheck.js
+      # The real first start: the image downloads the public weights itself, as the non-root
+      # user, into an empty named volume (no paid API).
+      - name: First start with an empty volume downloads the face models
+        run: |
+          docker run -d --name fresh -p 127.0.0.1:4112:4111 -v fresh-data:/data iconograph:ci
+          for _ in $(seq 180); do
+            if curl -sf http://127.0.0.1:4112/health >/dev/null; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:4112/health
+          docker logs fresh 2>&1 | grep '"event":"face-models-verified"' | grep '"downloaded":true'
+      - name: Server logs
+        if: always()
+        run: |
+          docker logs iconograph || true
+          docker logs fresh || true
+      # Only after every smoke above passed: the same build again, from the build cache, pushed
+      # untagged by digest. `publish` tags it once both platforms got here.
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        if: env.RELEASE == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push the smoked ${{ matrix.arch }} image by digest
+        id: release-build
+        if: env.RELEASE == 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        env:
+          SOURCE_DATE_EPOCH: ${{ steps.epoch.outputs.epoch }}
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          provenance: false
+          outputs: type=image,name=ghcr.io/${{ github.repository }},push-by-digest=true,name-canonical=true,push=true,rewrite-timestamp=true
+          cache-from: type=gha,scope=image-${{ matrix.arch }}
+      - name: Check the pushed layers are the smoked ones, and record the digest
+        if: env.RELEASE == 'true'
+        run: |
+          set -euo pipefail
+          if [ -z "$DIGEST" ]; then
+            echo "::error::The release build reported no digest"
+            exit 1
+          fi
+          # jq -e exits non-zero unless the layers are a non-empty array, so a failed or empty
+          # inspect fails the step instead of two empty values comparing equal.
+          layers='select(type == "array" and length > 0)'
+          pushed="$(docker buildx imagetools inspect "ghcr.io/${REPOSITORY}@${DIGEST}" \
+            --format '{{json .Image.RootFS.DiffIDs}}' | jq -ce "$layers")"
+          smoked="$(docker image inspect iconograph:ci --format '{{json .RootFS.Layers}}' \
+            | jq -ce "$layers")"
+          if [ "$pushed" != "$smoked" ]; then
+            echo "::error::The pushed image's layers differ from the smoked image's"
+            echo "pushed: $pushed"
+            echo "smoked: $smoked"
+            exit 1
+          fi
+          mkdir -p digests
+          touch "digests/${DIGEST#sha256:}"
+        env:
+          DIGEST: ${{ steps.release-build.outputs.digest }}
+          REPOSITORY: ${{ github.repository }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: env.RELEASE == 'true'
+        with:
+          name: digest-${{ matrix.arch }}
+          path: digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  image-release:
+    needs: [check]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    strategy: *image-strategy
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    env: *image-env
+    steps: *image-steps
+
+  # Tags the smoked per-platform images as one multi-arch `sha-…` image; nothing is rebuilt.
+  # Every push to main gets its tag: no concurrency group here, which would drop queued runs.
+  publish:
+    needs: [check, image-release]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: digests
+          pattern: digest-*
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Tag linux/amd64 and linux/arm64 as sha-${{ github.sha }}
+        working-directory: digests
+        run: |
+          shopt -s nullglob
+          sources=()
+          for digest in *; do sources+=("ghcr.io/${REPOSITORY}@sha256:${digest}"); done
+          if [ "${#sources[@]}" -ne 2 ]; then
+            echo "::error::Expected 2 smoked digests (amd64, arm64), found ${#sources[@]}"
+            exit 1
+          fi
+          docker buildx imagetools create -t "ghcr.io/${REPOSITORY}:sha-${SHA}" "${sources[@]}"
+          docker buildx imagetools inspect "ghcr.io/${REPOSITORY}:sha-${SHA}"
+        env:
+          REPOSITORY: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+
+  # Moves `latest` to this run's image, only while it is main's tip. One at a time (a queued
+  # promotion replaced by a newer one is no loss: the newer one is the tip).
+  promote-latest:
+    needs: [publish]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    concurrency:
+      group: promote-latest-main
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Tag sha-${{ github.sha }} as latest, if main's tip
+        run: |
+          tip="$(gh api "repos/${REPOSITORY}/commits/main" --jq .sha)"
+          if [ "$tip" != "$SHA" ]; then
+            echo "::notice::main moved on to ${tip}; not moving latest"
+            exit 0
+          fi
+          docker buildx imagetools create -t "ghcr.io/${REPOSITORY}:latest" \
+            "ghcr.io/${REPOSITORY}:sha-${SHA}"
+        env:
+          REPOSITORY: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}

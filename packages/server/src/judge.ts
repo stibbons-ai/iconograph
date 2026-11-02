@@ -98,7 +98,7 @@ const BUN_DEFAULT_IDLE_TIMEOUT_S = 300;
  * other value leaves the default. Calls are non-streaming, so no bytes arrive
  * until the answer is done, and a call running longer than this is cut off.
  */
-function bunIdleTimeoutMs(env: Record<string, string | undefined>): number {
+export function bunIdleTimeoutMs(env: Record<string, string | undefined>): number {
   const value = env.BUN_CONFIG_HTTP_IDLE_TIMEOUT?.trim() ?? "";
   return (/^[1-9]\d*$/.test(value) ? Number(value) : BUN_DEFAULT_IDLE_TIMEOUT_S) * 1000;
 }
@@ -286,7 +286,7 @@ export const MastraJudges = (options: MastraJudgesOptions) =>
         if (idleMs <= timeoutMs) {
           return yield* new JudgeUnavailable({
             model,
-            message: `Bun's fetch idle timeout (BUN_CONFIG_HTTP_IDLE_TIMEOUT, ${idleMs / 1000} s) would cut off a ${effort}-effort Judge call before its ${timeoutMs / 1000} s timeout; start with \`bun run run\`, or start Bun with BUN_CONFIG_HTTP_IDLE_TIMEOUT above ${timeoutMs / 1000} (whole seconds) in the OS environment; a .env file is read too late`,
+            message: `Bun's fetch idle timeout (BUN_CONFIG_HTTP_IDLE_TIMEOUT, ${idleMs / 1000} s) would cut off a ${effort}-effort Judge call before its ${timeoutMs / 1000} s timeout; start with \`bun run run\` or \`bun run serve\`, or start Bun with BUN_CONFIG_HTTP_IDLE_TIMEOUT above ${timeoutMs / 1000} (whole seconds) in the OS environment; a .env file is read too late`,
           });
         }
         const imageTokens = judgeImageTokens(model);

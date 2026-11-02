@@ -9,6 +9,7 @@ import {
   readImageAtMost,
   loadCharacterReference,
   type ReferencePhotoReport,
+  resolveInsideDataDirectory,
   RunStore,
   type RunStoreError,
   storeImage,
@@ -46,15 +47,27 @@ import type { EstimateEvent, LaneGenerated, LaneInput, LaneResult } from "./sche
 /** M0 runs one Iteration per Lane; Iterations are numbered from 1. */
 export const ITERATION = 1;
 
-/** Where a Run keeps its files, and how it retries. */
+/**
+ * Which Reference Photo paths a Run may read: `confined` (the default) only
+ * files inside the data volume, so a client can't make the server read
+ * arbitrary files; `operator` any path, for the operator's own CLI.
+ */
+export type PhotoPaths = "confined" | "operator";
+
+/** Where a Run keeps its files, how it retries, and which photo paths it reads. */
 export class RunConfig extends Context.Service<
   RunConfig,
-  { readonly dataDirectory: string; readonly retryPolicy: RetryPolicy }
+  {
+    readonly dataDirectory: string;
+    readonly retryPolicy: RetryPolicy;
+    readonly photoPaths: PhotoPaths;
+  }
 >()("@iconograph/server/RunConfig") {}
 
-export const defaultRunConfig = (dataDirectory: string) => ({
+export const defaultRunConfig = (dataDirectory: string): RunConfig["Service"] => ({
   dataDirectory,
   retryPolicy: DEFAULT_RETRY_POLICY,
+  photoPaths: "confined",
 });
 
 /** A Run that can't proceed, for a reason the operator can fix. */
@@ -171,15 +184,26 @@ export const prepareRun = (
   Effect.gen(function* () {
     const store = yield* RunStore;
     const imageModels = yield* ImageModels;
-    const { dataDirectory } = yield* RunConfig;
-    // The Judge first: a Run without the Judge's key fails before any price is looked up.
+    const { dataDirectory, photoPaths } = yield* RunConfig;
+    // The photo paths first: a client's path outside the data volume is refused before anything
+    // else. Every Lane's photos are numbers into these paths, so this confines every Lane's too.
+    const paths =
+      photoPaths === "operator"
+        ? request.photos
+        : yield* Effect.forEach(request.photos, (photo) =>
+            Effect.tryPromise({
+              try: () => resolveInsideDataDirectory(photo, dataDirectory),
+              catch: (error) => new RunError({ message: errorMessage(error), cause: error }),
+            }),
+          );
+    // Then the Judge: a Run without the Judge's key fails before any price is looked up.
     const judge = yield* (yield* Judges).get(request.judge);
     const models = yield* Effect.forEach(request.lanes, ({ model }) => imageModels.get(model));
 
     // The request schema already rejects two choices for one photo.
     const faceChoices = new Map(request.faceChoices.map(({ photo, face }) => [photo, face]));
     const { report, accepted } = yield* validateReferencePhotos({
-      paths: request.photos,
+      paths,
       faceChoices,
       dataDirectory,
     });

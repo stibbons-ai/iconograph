@@ -136,7 +136,7 @@ export function refreshOnFirstLookup(
 }
 
 /** The native Image Model adapters and the Mastra Judges, priced by the price source in the data volume. */
-async function nativeVendors(
+export async function nativeVendors(
   dataDirectory: string,
   warn: (message: string) => void,
 ): Promise<VendorsResource> {
@@ -324,6 +324,8 @@ export async function main(args: string[], dependencies: RunCliDependencies = {}
         imageModels: models.imageModels,
         judges: models.judges,
         faceEmbedder: faceEmbedder(dataDirectory),
+        // The operator names their own files on the command line.
+        photoPaths: "operator",
         ...(dependencies.retryPolicy && { retryPolicy: dependencies.retryPolicy }),
         warn: printLine,
       });
