@@ -15,6 +15,7 @@ jobs:
       matrix:
         os: [ubuntu-26.04, macos-26]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     env:
       MASTRA_TELEMETRY_DISABLED: "1"
       DO_NOT_TRACK: "1"
@@ -30,13 +31,22 @@ jobs:
       - name: Validate ADR frontmatter
         run: bun run adrs:check
       # Face tests need the real locked weights; they fail with the fix command when absent.
+      # YuNet and SFace are downloaded; FaceNet is built locally and never redistributed
+      # (ADR-0011), so the cache also keys on its export script.
       - name: Cache verified face-model weights
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .data/models
-          key: face-models-${{ hashFiles('packages/adapters/models.lock.json') }}
+          key: face-models-${{ hashFiles('packages/adapters/models.lock.json', 'scripts/export-facenet.py') }}
       - name: Fetch and verify face-model weights
         run: bun run models:fetch
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.11.19"
+          enable-cache: false
+      # A no-op when the cached export verifies against the lock.
+      - name: Build and verify the held-out FaceNet model
+        run: bun run models:export-facenet
       - name: Run tests
         run: bun test
       - name: Run formatting, lint, typecheck, licence policy and tests

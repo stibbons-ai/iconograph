@@ -94,11 +94,45 @@ libheif-js 1.23.5 — LGPL-3.0 (reviewed exact exception in
   LICENSE files (full LGPL-3.0 text) must be retained when redistributing.
   HEVC is covered by patents in some jurisdictions; see README.md.
 
-Model weights (downloaded at runtime, never committed; see models.lock.json)
+Model weights (never committed; see models.lock.json)
+YuNet and SFace are downloaded at runtime; FaceNet is built by an explicit command.
 YuNet face_detection_yunet_2023mar.onnx — MIT.
   Upstream: https://huggingface.co/opencv/face_detection_yunet
 SFace face_recognition_sface_2021dec.onnx — Apache-2.0.
   Upstream: https://huggingface.co/opencv/face_recognition_sface
+FaceNet facenet_inception_resnet_v1_vggface2.onnx (held-out model, ADR-0008) —
+  built locally by each operator with `bun run models:export-facenet`, never
+  downloaded from or redistributed by this project (ADR-0011).
+  scripts/export-facenet.py exports it from:
+  - facenet-pytorch 2.6.0 (code) — MIT, Copyright (c) 2019 Timothy Esler.
+    Upstream: https://github.com/timesler/facenet-pytorch
+    Installed only into the export script's own uv environment, with its
+    pinned PyTorch, ONNX and ONNX Runtime; none of it ships with Iconograph.
+  - Pretrained weights 20180402-114759 (Inception-ResNet-v1, trained on
+    VGGFace2) by David Sandberg, published in an MIT repository, Copyright (c)
+    2016 David Sandberg (https://github.com/davidsandberg/facenet, LICENSE.md;
+    the README is silent on separate terms for the weights). Ported to
+    PyTorch by facenet-pytorch (also MIT, no separate terms for the weights):
+    https://github.com/timesler/facenet-pytorch/releases/download/v2.2.9/20180402-114759-vggface2.pt
+  - Training data: the VGGFace2 dataset (Oxford Visual Geometry Group;
+    Q. Cao, L. Shen, W. Xie, O. M. Parkhi, A. Zisserman, "VGGFace2: A dataset
+    for recognising faces across pose and age", FG 2018,
+    https://arxiv.org/abs/1710.08092). Its terms, checked 2026-11-01 in the
+    Internet Archive (the live page no longer offers the data):
+    dataset page, 2019-02-21
+    (http://web.archive.org/web/20190221052714/http://www.robots.ox.ac.uk/~vgg/data/vgg_face2/):
+    "The VGGFace2 dataset is available to download for commercial/research
+    purposes under a Creative Commons Attribution-ShareAlike 4.0 International
+    License. The copyright remains with the original owners of the image."
+    Its licence file
+    (http://web.archive.org/web/2019/http://www.robots.ox.ac.uk/~vgg/data/vgg_face2/files/licence_vggface2.txt):
+    "The dataset is covered under a Creative Commons Attribution 4.0
+    International license." and "Downloading this dataset implies agreement
+    to follow the same conditions for any modification and/or
+    re-distribution of the dataset in any form." Oxford VGG has since
+    withdrawn the download links. How these terms apply to weights trained
+    on the data is unsettled; this project therefore chooses not to
+    redistribute the weights or its export, and credits VGGFace2 as above.
 
 Test fixtures
 -------------

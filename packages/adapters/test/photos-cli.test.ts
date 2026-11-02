@@ -1,5 +1,4 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { FaceEmbedder } from "@iconograph/domain";
@@ -9,10 +8,11 @@ import type { ReferencePhotoReport } from "../src/reference-photos";
 import { main } from "../src/photos-cli";
 import {
   corruptAllWeights,
+  dataVolume,
   fixture,
   realFaceEmbedder,
   rightmostFace,
-  verifiedModelsDirectory,
+  spawnCli,
 } from "./face-models";
 import { expectStripped } from "./metadata";
 import { temporaryDirectories } from "./temporary-directory";
@@ -122,18 +122,11 @@ describe("photos:validate in-process", () => {
 });
 
 describe("photos:validate as a process", () => {
-  const cli = fileURLToPath(new URL("../src/photos-cli.ts", import.meta.url));
-  const spawn = (args: string[]) =>
-    Bun.spawn([process.execPath, cli, ...args], { stdout: "pipe", stderr: "pipe" });
-  /** A fresh data volume whose models folder links to the verified local weights. */
-  async function dataVolume() {
-    const data = await temporaryDirectory();
-    await symlink(await verifiedModelsDirectory(), join(data, "models"));
-    return data;
-  }
+  const spawn = (args: string[]) => spawnCli("photos-cli.ts", args);
+  const sfaceVolume = () => dataVolume(temporaryDirectory, ["yunet", "sface"]);
 
   test("exits 0 with the report on stdout", async () => {
-    const child = spawn(["--data-dir", await dataVolume(), fixture("biden-2021.jpg")]);
+    const child = spawn(["--data-dir", await sfaceVolume(), fixture("biden-2021.jpg")]);
     expect(await child.exited).toBe(0);
     const report: ReferencePhotoReport = JSON.parse(await new Response(child.stdout).text());
     expect(report.photos[0]?.verdict).toBe("accepted");
@@ -147,7 +140,7 @@ describe("photos:validate as a process", () => {
     });
 
     const notAnImage = fileURLToPath(new URL("../package.json", import.meta.url));
-    const unreadable = spawn(["--data-dir", await dataVolume(), notAnImage]);
+    const unreadable = spawn(["--data-dir", await sfaceVolume(), notAnImage]);
     expect(await unreadable.exited).toBe(1);
     // Compare the raw text first so a stray line (e.g. a native library's log) shows in the diff.
     const stderr = await new Response(unreadable.stderr).text();

@@ -6,8 +6,9 @@ import { errorMessage } from "./errors";
 import { writeFileAtomically } from "./files";
 
 /**
- * Licences reviewed for automatically fetched weights (ADR-0002). InsightFace's
- * `buffalo_l` weights are non-commercial, so they can never be listed here.
+ * Licences reviewed for locked weights, downloaded or built (ADR-0002,
+ * ADR-0011). InsightFace's `buffalo_l` weights are non-commercial, so they can
+ * never be listed here.
  */
 const ModelLicense = Schema.Literals(["MIT", "Apache-2.0"]);
 
@@ -24,15 +25,49 @@ const notInsightFace = Schema.makeFilter<string>((value) =>
   insightFace.test(value) ? "InsightFace weights are opt-in and never fetched automatically" : true,
 );
 
-export const ModelWeight = Schema.Struct({
+const Sha256 = Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/));
+const HttpsUrl = Schema.String.check(Schema.isPattern(/^https:\/\/[^\s]+$/), notInsightFace);
+const Size = Schema.Int.check(Schema.isGreaterThan(0));
+
+const weightFields = {
   id: Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9-]*$/), notInsightFace),
   /** A bare file name inside the models folder, never a path. */
   file: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]*\.onnx$/), notInsightFace),
-  url: Schema.String.check(Schema.isPattern(/^https:\/\/[^\s]+$/), notInsightFace),
-  sha256: Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/)),
-  size: Schema.Int.check(Schema.isGreaterThan(0)),
+  sha256: Sha256,
+  size: Size,
   license: ModelLicense,
+};
+
+/** Weights downloaded from `url` by `ensureModels`; never also a `build` entry. */
+export const DownloadedWeight = Schema.Struct({
+  ...weightFields,
+  url: HttpsUrl,
+  build: Schema.optionalKey(Schema.Never),
 });
+
+/**
+ * Weights that are never downloaded: we choose not to redistribute them (their
+ * training data's terms are unsettled, ADR-0011), so each operator builds the
+ * file locally with `build.command` from the upstream `build.source`, verified
+ * by its SHA-256. `sha256` pins the build's output, so a build must be
+ * byte-identical wherever it runs (for FaceNet see scripts/export-facenet.py).
+ */
+export const BuiltWeight = Schema.Struct({
+  ...weightFields,
+  /** Never downloaded, so never a `url`. */
+  url: Schema.optionalKey(Schema.Never),
+  build: Schema.Struct({
+    /** The root command that builds `file` into the models folder. */
+    command: Schema.String.check(Schema.isPattern(/^bun run [a-z][a-z0-9:-]*$/)),
+    /** The export script, relative to the repository root. */
+    script: Schema.String.check(Schema.isPattern(/^scripts\/[A-Za-z0-9][A-Za-z0-9._-]*\.py$/)),
+    /** The upstream weights the script exports from. */
+    source: Schema.Struct({ url: HttpsUrl, sha256: Sha256, size: Size }),
+  }),
+});
+
+/** Exactly one kind: an entry with both `url` and `build` matches neither. */
+export const ModelWeight = Schema.Union([DownloadedWeight, BuiltWeight]);
 
 export const ModelLock = Schema.Struct({
   models: Schema.NonEmptyArray(ModelWeight).check(
@@ -47,6 +82,8 @@ export const ModelLock = Schema.Struct({
 });
 
 export type ModelWeight = typeof ModelWeight.Type;
+export type DownloadedWeight = typeof DownloadedWeight.Type;
+export type BuiltWeight = typeof BuiltWeight.Type;
 export type ModelLock = typeof ModelLock.Type;
 
 /** Validate a lock manifest; throws a schema error naming the offending field. */
@@ -77,8 +114,9 @@ export interface EnsuredModel {
 }
 
 /**
- * Return verified local paths for the requested models, downloading any that are
- * missing. A path is only returned after its SHA-256 matches the lock.
+ * Return verified local paths for the requested models, downloading any missing
+ * downloadable ones; a missing built one fails with its build command. A path
+ * is only returned after its SHA-256 matches the lock.
  */
 export async function ensureModels(options: EnsureModelsOptions): Promise<EnsuredModel[]> {
   const { lock, directory, fetch: fetchModel = fetch } = options;
@@ -108,10 +146,15 @@ export async function ensureModels(options: EnsureModelsOptions): Promise<Ensure
       );
     });
     if (present === undefined) {
+      if (model.build) {
+        throw new ModelWeightError(
+          `Model ${model.id} is missing at ${path}; it is never downloaded. Build it with \`${model.build.command}\` (pass the same --data-dir).`,
+        );
+      }
       await download(model, path, fetchModel);
     } else if (present !== model.sha256) {
       throw new ModelWeightError(
-        `Model ${model.id} at ${path} failed SHA-256 verification: expected ${model.sha256}, actual ${present}. Delete the file to re-download it.`,
+        `Model ${model.id} at ${path} failed SHA-256 verification: expected ${model.sha256}, actual ${present}. ${model.build ? `Rebuild it with \`${model.build.command}\`.` : "Delete the file to re-download it."}`,
       );
     }
     ensured.push({ id: model.id, path, sha256: model.sha256, downloaded: present === undefined });
@@ -123,7 +166,7 @@ export async function ensureModels(options: EnsureModelsOptions): Promise<Ensure
 class ModelWeightError extends Error {}
 
 /** SHA-256 of a file, or undefined when it does not exist. */
-async function hashFile(path: string): Promise<string | undefined> {
+export async function hashFile(path: string): Promise<string | undefined> {
   const hasher = new Bun.CryptoHasher("sha256");
   try {
     for await (const chunk of Bun.file(path).stream()) hasher.update(chunk);
@@ -139,7 +182,7 @@ async function hashFile(path: string): Promise<string | undefined> {
  * hash the stored file and rename only after it verifies, so no caller ever sees
  * a partial or unverified file.
  */
-async function download(model: ModelWeight, path: string, fetchModel: Fetch): Promise<void> {
+async function download(model: DownloadedWeight, path: string, fetchModel: Fetch): Promise<void> {
   let size = 0;
   try {
     await writeFileAtomically(

@@ -17,18 +17,24 @@ import { errorMessage } from "./errors";
 import { ensureModels, type Fetch, readModelLock } from "./models";
 
 /**
+ * YuNet detection settings, shared by the SFace pipeline and the held-out
+ * FaceNet pipeline (ADR-0008: the two share only detection).
+ */
+export const yunetDetection = {
+  /** YuNet 2023mar takes a fixed 640×640 input. */
+  inputSize: 640,
+  /** OpenCV `FaceDetectorYN` defaults. */
+  scoreThreshold: 0.9,
+  nmsThreshold: 0.3,
+} as const;
+
+/**
  * Configuration of the default YuNet + SFace backend (ADR-0002, ADR-0008). Every
  * threshold the pipeline uses lives here, never inline.
  */
 export const sfaceConfig = {
   model: "sface",
-  detection: {
-    /** YuNet 2023mar takes a fixed 640×640 input. */
-    inputSize: 640,
-    /** OpenCV `FaceDetectorYN` defaults. */
-    scoreThreshold: 0.9,
-    nmsThreshold: 0.3,
-  },
+  detection: yunetDetection,
   thresholds: {
     /** ADR-0008; to be calibrated on real pairs in Milestone 0 (issue #1). */
     identityGate: 0.4,
@@ -52,7 +58,7 @@ const sfaceTemplate: readonly Point[] = [
 const sfaceSize = 112;
 const yunetStrides = [8, 16, 32] as const;
 
-const modelError = (action: string) => (cause: unknown) =>
+export const modelError = (action: string) => (cause: unknown) =>
   new FaceModelError({ message: `${action} failed: ${errorMessage(cause)}` });
 
 const clamp = (value: number) => Math.min(Math.max(value, 0), 1);
@@ -73,7 +79,7 @@ function decodeDetections(
   outputs: InferenceSession.OnnxValueMapType,
   scale: number,
 ): DetectedFace[] {
-  const { inputSize, scoreThreshold, nmsThreshold } = sfaceConfig.detection;
+  const { inputSize, scoreThreshold, nmsThreshold } = yunetDetection;
   const candidates: DetectedFace[] = [];
   for (const stride of yunetStrides) {
     const head = (name: string) => outputs[`${name}_${stride}`]!.data as Float32Array;
@@ -120,7 +126,7 @@ function decodeDetections(
  * matching OpenCV's `blobFromImage` defaults.
  */
 async function detectorInput(image: RgbImage): Promise<{ tensor: Tensor; scale: number }> {
-  const { inputSize } = sfaceConfig.detection;
+  const { inputSize } = yunetDetection;
   const scale = Math.min(1, inputSize / Math.max(image.width, image.height));
   const width = Math.max(1, Math.round(image.width * scale));
   const height = Math.max(1, Math.round(image.height * scale));
@@ -170,7 +176,7 @@ function recognizerInput(aligned: RgbImage): Tensor {
 }
 
 /** Decoded pixels must fill the image exactly; short data would warp to black silently. */
-function checkImage({ data, width, height }: RgbImage): void {
+export function checkImage({ data, width, height }: RgbImage): void {
   if (data.length !== width * height * 3) {
     throw new Error(
       `expected ${width}×${height}×3 = ${width * height * 3} bytes, got ${data.length}`,
@@ -217,9 +223,52 @@ export const releaseSession = (path: string, release: () => Promise<void>) =>
   );
 
 /**
+ * Verify and open YuNet and the recognizer `recognizerId`; weights come only
+ * from `ensureModels`, which returns a path only after its SHA-256 matches the
+ * lock. Returns YuNet's `detect`, shared by the SFace and held-out FaceNet
+ * pipelines (ADR-0008: they share only detection), and `recognize`, which runs
+ * the recognizer on one prepared input and returns the L2-normalised embedding.
+ */
+export const openFacePipeline = (
+  options: { dataDirectory: string; fetch?: Fetch | undefined },
+  recognizerId: "sface" | "facenet",
+) =>
+  Effect.gen(function* () {
+    const models = yield* Effect.tryPromise({
+      try: () =>
+        ensureModels({
+          lock: readModelLock(),
+          directory: modelsDirectory(options.dataDirectory),
+          ids: ["yunet", recognizerId],
+          ...(options.fetch && { fetch: options.fetch }),
+        }),
+      catch: modelError("Verifying face-model weights"),
+    });
+    const path = (id: string) => models.find((model) => model.id === id)!.path;
+    const detector = yield* openSession(path("yunet"));
+    const recognizer = yield* openSession(path(recognizerId));
+    return {
+      /** Every face found, highest score first, in image pixels. */
+      detect: (image: RgbImage) =>
+        Effect.tryPromise({
+          try: async () => {
+            checkImage(image);
+            const { tensor, scale } = await detectorInput(image);
+            const outputs = await detector.run({ [detector.inputNames[0]!]: tensor });
+            return decodeDetections(outputs, scale);
+          },
+          catch: modelError("Face detection"),
+        }),
+      recognize: async (input: Tensor): Promise<Embedding> => {
+        const outputs = await recognizer.run({ [recognizer.inputNames[0]!]: input });
+        return normalize(Array.from(outputs[recognizer.outputNames[0]!]!.data as Float32Array));
+      },
+    };
+  });
+
+/**
  * YuNet detection, 5-point similarity alignment and SFace embedding in-process
- * via onnxruntime-node (ADR-0003). Weights come only from `ensureModels`, which
- * returns a path only after its SHA-256 matches the lock.
+ * via onnxruntime-node (ADR-0003).
  */
 export const OnnxFaceEmbedder = (options: OnnxFaceEmbedderOptions) =>
   Layer.effect(FaceEmbedder)(
@@ -234,42 +283,17 @@ export const OnnxFaceEmbedder = (options: OnnxFaceEmbedderOptions) =>
             }),
         ),
       );
-      const models = yield* Effect.tryPromise({
-        try: () =>
-          ensureModels({
-            lock: readModelLock(),
-            directory: modelsDirectory(options.dataDirectory),
-            ids: ["yunet", "sface"],
-            ...(options.fetch && { fetch: options.fetch }),
-          }),
-        catch: modelError("Verifying face-model weights"),
-      });
-      const path = (id: string) => models.find((model) => model.id === id)!.path;
-      const detector = yield* openSession(path("yunet"));
-      const recognizer = yield* openSession(path("sface"));
+      const { detect, recognize } = yield* openFacePipeline(options, sfaceConfig.model);
 
       return {
         model: sfaceConfig.model,
         thresholds,
-        detect: (image: RgbImage) =>
+        detect,
+        embed: (image: RgbImage, face: DetectedFace) =>
           Effect.tryPromise({
             try: async () => {
               checkImage(image);
-              const { tensor, scale } = await detectorInput(image);
-              const outputs = await detector.run({ [detector.inputNames[0]!]: tensor });
-              return decodeDetections(outputs, scale);
-            },
-            catch: modelError("Face detection"),
-          }),
-        embed: (image: RgbImage, face: DetectedFace) =>
-          Effect.tryPromise({
-            try: async (): Promise<Embedding> => {
-              checkImage(image);
-              const input = recognizerInput(alignFace(image, face));
-              const outputs = await recognizer.run({ [recognizer.inputNames[0]!]: input });
-              return normalize(
-                Array.from(outputs[recognizer.outputNames[0]!]!.data as Float32Array),
-              );
+              return recognize(recognizerInput(alignFace(image, face)));
             },
             catch: modelError("Face embedding"),
           }),

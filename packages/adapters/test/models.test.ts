@@ -3,11 +3,10 @@ import { mkdir, open, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureModels, modelsDirectory, readModelLock, resolveDataDirectory } from "../src";
-import { decodeModelLock, type ModelLock, type ModelWeight } from "../src/models";
+import { decodeModelLock, type DownloadedWeight, type ModelLock } from "../src/models";
 import { main } from "../src/models-cli";
+import { sha256 } from "./sha256";
 import { temporaryDirectories } from "./temporary-directory";
-
-const sha256 = (input: Bun.BlobOrStringOrBuffer) => Bun.CryptoHasher.hash("sha256", input, "hex");
 
 // Larger than one stream chunk so streaming to disk is exercised.
 const detector = crypto.getRandomValues(new Uint8Array(200_000));
@@ -59,8 +58,8 @@ function weight(
   id: string,
   path: string,
   bytes: Uint8Array,
-  overrides: Partial<ModelWeight> = {},
-): ModelWeight {
+  overrides: Partial<DownloadedWeight> = {},
+): DownloadedWeight {
   return {
     id,
     file: `${id}.onnx`,
@@ -80,6 +79,21 @@ const lock: ModelLock = {
     weight("recognizer", "/recognizer.onnx", recognizer),
   ],
 };
+
+/** A built entry: never downloaded, so its bytes are written by the test. */
+const built = {
+  id: "embedder",
+  file: "embedder.onnx",
+  sha256: sha256(recognizer),
+  size: recognizer.byteLength,
+  license: "MIT",
+  build: {
+    command: "bun run models:export-embedder",
+    script: "scripts/export-embedder.py",
+    source: { url: "https://example.test/embedder.pt", sha256: "a".repeat(64), size: 1 },
+  },
+} as const;
+const withBuilt: ModelLock = { models: [...lock.models, built] };
 
 let directory: string;
 beforeEach(async () => {
@@ -127,6 +141,28 @@ describe("ensureModels", () => {
     await expect(ensureModels({ lock, directory, ids: ["buffalo_l"] })).rejects.toThrow(
       "Unknown model buffalo_l",
     );
+  });
+
+  test("never downloads a built model: missing fails with its build command", async () => {
+    await expect(ensureModels({ lock: withBuilt, directory })).rejects.toThrow(
+      `Model embedder is missing at ${join(directory, "embedder.onnx")}; it is never downloaded. Build it with \`bun run models:export-embedder\``,
+    );
+    // Downloadable models before it were fetched; nothing was requested for the built one.
+    expect(Object.fromEntries(hits)).toEqual({ "/detector.onnx": 1, "/recognizer.onnx": 1 });
+    expect((await readdir(directory)).sort()).toEqual(["detector.onnx", "recognizer.onnx"]);
+  });
+
+  test("verifies a built model like any other, and a tampered one names the rebuild", async () => {
+    const path = join(directory, "embedder.onnx");
+    await Bun.write(path, recognizer);
+    expect(await ensureModels({ lock: withBuilt, directory, ids: ["embedder"] })).toEqual([
+      { id: "embedder", path, sha256: sha256(recognizer), downloaded: false },
+    ]);
+    await Bun.write(path, detector);
+    await expect(ensureModels({ lock: withBuilt, directory, ids: ["embedder"] })).rejects.toThrow(
+      `Model embedder at ${path} failed SHA-256 verification: expected ${sha256(recognizer)}, actual ${sha256(detector)}. Rebuild it with \`bun run models:export-embedder\`.`,
+    );
+    expect(hits.size).toBe(0);
   });
 
   test("a download that fails verification leaves no file and no temp file", async () => {
@@ -289,16 +325,60 @@ describe("model lock manifest", () => {
     expect(decodeModelLock({ models: [valid] })).toEqual({ models: [valid] });
   });
 
-  test("the committed lock pins YuNet and SFace by HTTPS URL, SHA-256 and permissive licence", () => {
+  test("the committed lock pins YuNet and SFace by HTTPS URL and FaceNet by its local build", () => {
     const committed = readModelLock();
     expect(committed.models.map(({ id, license }) => [id, license])).toEqual([
       ["yunet", "MIT"],
       ["sface", "Apache-2.0"],
+      ["facenet", "MIT"],
     ]);
-    for (const model of committed.models) {
+    const [yunet, sface, facenet] = committed.models;
+    for (const model of [yunet!, sface!]) {
       expect(model.url).toStartWith("https://huggingface.co/opencv/");
       expect(model.url).not.toContain("/resolve/main/");
     }
+    // FaceNet is never downloaded (ADR-0011): no URL, only its build and upstream source.
+    expect(facenet!.url).toBeUndefined();
+    expect(facenet!.build).toEqual({
+      command: "bun run models:export-facenet",
+      script: "scripts/export-facenet.py",
+      source: {
+        url: "https://github.com/timesler/facenet-pytorch/releases/download/v2.2.9/20180402-114759-vggface2.pt",
+        sha256: "281cebca8662831adb987a874bdcb36e73f5b1c6dc5ee5878f305e985625d99b",
+        size: 111898327,
+      },
+    });
+  });
+
+  test("accepts a built entry; an entry is either downloaded or built, never both", () => {
+    expect(decodeModelLock({ models: [valid, built] })).toEqual({ models: [valid, built] });
+    expect(() => decodeModelLock({ models: [{ ...built, url: valid.url }] })).toThrow();
+    expect(() =>
+      decodeModelLock({ models: [{ ...built, build: { ...built.build, command: "rm -rf /" } }] }),
+    ).toThrow();
+    for (const script of [
+      "scripts/../outside.py",
+      "scripts/..",
+      "scripts/export.sh",
+      "export.py",
+    ]) {
+      expect(() =>
+        decodeModelLock({ models: [{ ...built, build: { ...built.build, script } }] }),
+      ).toThrow();
+    }
+    expect(() =>
+      decodeModelLock({
+        models: [
+          {
+            ...built,
+            build: {
+              ...built.build,
+              source: { ...built.build.source, url: "https://example.test/buffalo_l.zip" },
+            },
+          },
+        ],
+      }),
+    ).toThrow("InsightFace weights are opt-in and never fetched automatically");
   });
 
   test.each([
@@ -375,6 +455,15 @@ describe("models:fetch", () => {
     expect(downloaded(first)).toEqual([true, true]);
     expect(downloaded(await capture(["--data-dir", directory]))).toEqual([false, false]);
     expect(Object.fromEntries(hits)).toEqual({ "/detector.onnx": 1, "/recognizer.onnx": 1 });
+  });
+
+  test("leaves built models to their build command", async () => {
+    let output = "";
+    await main(["--data-dir", directory], { lock: withBuilt, stdout: (text) => (output += text) });
+    expect(JSON.parse(output).models.map(({ id }: { id: string }) => id)).toEqual([
+      "detector",
+      "recognizer",
+    ]);
   });
 
   test("help documents the data directory; unknown or extra arguments are rejected", async () => {

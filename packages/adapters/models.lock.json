@@ -15,6 +15,22 @@
       "sha256": "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79",
       "size": 38696353,
       "license": "Apache-2.0"
+    },
+    {
+      "id": "facenet",
+      "file": "facenet_inception_resnet_v1_vggface2.onnx",
+      "sha256": "81673ade409f2f9c9169429847f2df229d970756c4e520d5c4cfe73be5dc4eb0",
+      "size": 94144922,
+      "license": "MIT",
+      "build": {
+        "command": "bun run models:export-facenet",
+        "script": "scripts/export-facenet.py",
+        "source": {
+          "url": "https://github.com/timesler/facenet-pytorch/releases/download/v2.2.9/20180402-114759-vggface2.pt",
+          "sha256": "281cebca8662831adb987a874bdcb36e73f5b1c6dc5ee5878f305e985625d99b",
+          "size": 111898327
+        }
+      }
     }
   ]
 }

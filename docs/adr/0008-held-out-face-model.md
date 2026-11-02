@@ -13,3 +13,5 @@ Likeness inside the loop is measured with SFace; finalists are additionally scor
 - FaceNet needs a different crop than SFace (square margin crop at 160×160, no 5-point template); the two pipelines share only detection.
 - No official ONNX export exists; we export it ourselves and never commit weights to git.
 - Thresholds differ per model (SFace Identity Gate 0.40; FaceNet starts at 0.70) and are recalibrated on real pairs.
+
+Amended by [ADR-0011](0011-facenet-weights-built-locally.md), which corrects "weights MIT by inheritance" and records the local build.

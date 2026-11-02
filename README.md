@@ -98,15 +98,16 @@ dependencies are therefore audited on both hosts. Formatting commands include th
 The default face backend (YuNet detector, MIT; SFace recognizer, Apache-2.0) needs ONNX weights
 that are never committed or baked into an image. They live in the data volume's models folder,
 `<data dir>/models`, where the data dir is `ICONOGRAPH_DATA_DIR` (default `./.data`, gitignored).
-[`packages/adapters/models.lock.json`](packages/adapters/models.lock.json) pins each file to an
-immutable Hugging Face revision URL, SHA-256, size, and licence. InsightFace weights (`buffalo_l`,
-non-commercial) are never fetched automatically: the lock admits only MIT or Apache-2.0 entries,
-rejects known InsightFace pack and file names (`buffalo`, `antelope`, `scrfd`, `w600k`, …), and a
-test pins the shipped lock to exactly YuNet and SFace.
+[`packages/adapters/models.lock.json`](packages/adapters/models.lock.json) pins each downloaded
+file to an immutable Hugging Face revision URL, SHA-256, size, and licence. InsightFace weights
+(`buffalo_l`, non-commercial) are never fetched automatically: the lock admits only MIT or
+Apache-2.0 entries, rejects known InsightFace pack and file names (`buffalo`, `antelope`, `scrfd`,
+`w600k`, …), and a test pins the shipped lock to exactly YuNet, SFace and the held-out FaceNet.
 
 ```sh
-bun run models:fetch                      # fetch and verify every locked model now
+bun run models:fetch                      # fetch and verify every downloadable locked model now
 bun run models:fetch --data-dir /srv/data # or ICONOGRAPH_DATA_DIR=/srv/data
+bun run models:export-facenet             # build the held-out FaceNet model (needs uv, see below)
 ```
 
 Weights are otherwise downloaded on first use. Missing files stream into a temp file beside the
@@ -115,6 +116,21 @@ are re-hashed on every use and never downloaded again once verified. **Offline m
 locked files (same names) into `<data dir>/models` by any means; they are verified like downloads.
 **A checksum mismatch** is a hard error naming the model, path, expected and actual hash, and the
 file is never used. A corrupt present file is left in place: delete it and rerun `models:fetch`.
+
+**The held-out FaceNet model is built, never downloaded** (ADR-0011): how its training data's
+terms (VGGFace2) reach trained weights is unsettled, so we choose not to redistribute it.
+`models:export-facenet` runs [`scripts/export-facenet.py`](scripts/export-facenet.py) with
+[uv](https://docs.astral.sh/uv/), which installs the script's pinned Python 3.12, PyTorch
+(CPU-only on Linux x64) and facenet-pytorch on first run, downloads the upstream facenet-pytorch
+weights (112 MB, verified by the SHA-256 in the lock entry's `build.source`), exports them to
+ONNX, checks ONNX Runtime against PyTorch on fixed inputs, and installs
+`<data dir>/models/facenet_inception_resnet_v1_vggface2.onnx` (94 MB) only if its SHA-256 matches
+the lock. The Python packages download about 110 MB on macOS arm64 (about 540 MB installed) and
+about 280 MB on Linux x64 (about 1.8 GB in uv's cache), measured 2026-11-01. The export is
+byte-identical on macOS arm64 and Linux x64/arm64, which is what makes that hash pinnable.
+`models:fetch` skips FaceNet; anything that needs it fails with the build command while it is
+missing, and with a SHA-256 error if the file was changed; `models:export-facenet` rebuilds a
+changed file.
 
 ### Model prices
 
@@ -219,8 +235,40 @@ Gate and the single-photo Ceiling (0.60) are provisional until calibrated on rea
 Milestone 0 (issue #1). The
 face tests use only licence-clear fixtures, listed in
 [`packages/adapters/test/fixtures/faces/README.md`](packages/adapters/test/fixtures/faces/README.md),
-and need the real weights: run `bun run models:fetch` first (CI caches them); missing weights fail
-the tests with that command rather than skipping them.
+and need the real weights: run `bun run models:fetch` and `bun run models:export-facenet` first (CI
+caches both); missing weights fail the tests with those commands rather than skipping them.
+
+### Held-out face model
+
+The Optimizer loop scores Likeness with SFace and drifts towards whatever that model rewards, so a
+finalist is also scored with a second face model the loop never sees (ADR-0008): FaceNet
+(Inception-ResNet-v1 trained on VGGFace2, built locally as above). A high Likeness that FaceNet
+does not confirm is "Likeness Unconfirmed". `faces:heldout` scores one Candidate image against 1 to
+8 Reference Photos of the Subject:
+
+```sh
+bun run faces:heldout candidate.png me-1.jpg me-2.heic me-3.png    # data dir as for models:fetch
+bun run faces:heldout --candidate-face 2 --face 3:1 group.png me-1.jpg me-2.heic team-photo.jpg
+```
+
+Photos are decoded and checked as by `photos:validate` (formats, limits, the same file twice; also
+the Candidate given again as a Reference Photo, and any two images with identical pixels) and
+nothing is stored. Faces come from the same YuNet detector; each image needs exactly one face, or a
+chosen one (`--candidate-face FACE`, `--face PHOTO:FACE` numbered as given, from 1), otherwise the
+error lists the faces to choose from. FaceNet gets a square margin crop, not SFace's five-point
+alignment: a square around the detection box, its side the box's longer side plus a margin of 32 of
+the 160 output pixels (facenet-pytorch's MTCNN convention), padded black where it extends past the
+image, resized to 160×160 and normalised as (x − 127.5) / 128. The JSON report gives the model, the
+threshold, the Candidate's face and its cosine similarity to each Reference Photo, its similarity
+to the held-out anchor (the normalised mean of the reference embeddings) and `pass` when that
+reaches the threshold. The threshold (0.70, ADR-0008, to be recalibrated on real pairs) lives in
+`facenetConfig` in
+[`packages/adapters/src/held-out-embedder.ts`](packages/adapters/src/held-out-embedder.ts).
+
+**Never used by the Optimizer loop:** the held-out embedder is its own service
+(`HeldOutFaceEmbedder`, not a `FaceEmbedder`) and is not exported from `@iconograph/adapters`,
+whose `exports` field exposes only its index, so the server and its run workflow cannot import or
+provide it; `packages/server/test/held-out-isolation.test.ts` checks this.
 
 ### ADR validation and commits
 
