@@ -81,6 +81,8 @@ export const spawnCli = (name: string, args: readonly string[]) =>
   Bun.spawn(
     [process.execPath, fileURLToPath(new URL(`../src/${name}`, import.meta.url)), ...args],
     {
+      // The current environment, so a test's changes to it (e.g. cleaned GIT_*) reach the CLI.
+      env: process.env,
       stdout: "pipe",
       stderr: "pipe",
     },

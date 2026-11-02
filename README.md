@@ -226,8 +226,8 @@ bun run photos:validate --face 2:1 me-1.jpg team-photo.jpg me-3.png # photo 2: u
 
 Thresholds live in one per-model config (`sfaceConfig` in
 [`packages/adapters/src/face-embedder.ts`](packages/adapters/src/face-embedder.ts)); the Identity
-Gate and the single-photo Ceiling (0.60) are provisional until calibrated on real pairs in
-Milestone 0 (issue #1). The
+Gate and the single-photo Ceiling (0.60) are provisional until calibrated on real pairs with
+`faces:calibrate` (see Calibrating the face thresholds below; issue #11). The
 face tests use only licence-clear fixtures, listed in
 [`packages/adapters/test/fixtures/faces/README.md`](packages/adapters/test/fixtures/faces/README.md),
 and need the real weights: run `bun run models:fetch` and `bun run models:export-facenet` first (CI
@@ -263,7 +263,98 @@ reaches the threshold. The threshold (0.70, ADR-0008, to be recalibrated on real
 **Never used by the Optimizer loop:** the held-out embedder is its own service
 (`HeldOutFaceEmbedder`, not a `FaceEmbedder`) and is not exported from `@iconograph/adapters`,
 whose `exports` field exposes only its index, so the server and its run workflow cannot import or
-provide it; `packages/server/test/held-out-isolation.test.ts` checks this.
+provide it; `packages/server/test/held-out-isolation.test.ts` checks this (`faces:calibrate` below
+is the other command that loads it).
+
+### Calibrating the face thresholds
+
+The SFace Identity Gate (0.40), the single-photo Identity Ceiling (0.60) and the FaceNet threshold
+(0.70) are provisional until calibrated on real pairs (issue #11). `faces:calibrate` measures both
+face models on photos of consenting Subjects and suggests values; it never changes them.
+
+```sh
+bun run faces:calibrate ~/calibration                  # data dir as for models:fetch
+bun run faces:calibrate --target-far 0.001 ~/calibration
+```
+
+- **Consent:** use only photos of people who agreed to their use for this calibration, and of
+  generated Candidates of them.
+- **Folder layout:** one directory per Subject holding that Subject's real photos (JPEG, PNG or
+  HEIC, decoded as by `photos:validate`). Optional generated Candidates that a person labelled go in
+  `<subject>/candidates/like/` (judged to show the Subject) or `<subject>/candidates/unlike/` (judged
+  not to). No manifest is needed:
+
+  ```text
+  calibration/
+    ada/1.jpg  ada/2.heic  ada/candidates/like/c1.png  ada/candidates/unlike/c2.png
+    bob/1.jpg  bob/2.png
+  ```
+
+  Four pair sets are reported, the two the thresholds come from first. `realAnchor`: each real
+  photo against the Identity Anchor of its Subject's other photos (same-person, Subjects with 2 or
+  more photos) and against each other Subject's anchor (different-person), as Reference Photos are
+  judged against the Gate; a value that is one photo pair twice (a 2-photo Subject's two photos, two
+  1-photo Subjects against each other) is counted once. `candidateAnchor`: each Candidate against
+  its Subject's Identity Anchor; the Gate also judges Candidates, against the full anchor, and so
+  does the held-out check. `real` (photo against photo) and `candidatePhoto` (each Candidate against
+  each real photo of its Subject) are context. `like` counts as same-person, `unlike` as
+  different-person. Anchors and Ceilings use every photo with one face, with no cap at 8 and no
+  Gate flagging, unlike a Run. At least 2 Subjects are needed, one with 2 or more photos. Hidden
+  files are ignored and other entries outside the layout are listed as `skipped`; an image (photo
+  or Candidate) with no face or several faces is skipped and reported, never guessed; any other file
+  in a photo folder that can't be read or decoded as an image, or the same image twice, is an error.
+  A backslash (`\`) in the folder's path (as given or as it links to) or in any entry's name fails
+  the run with a hint to rename it: Bun reads it as a folder separator, which can name another file.
+
+- **Never committed:** photos are read in place, from their real location, never copied, stored or
+  uploaded. The report names images only relative to the folder; errors name the folder as you
+  gave it (an absolute path if you gave one) and images relative to it, never by their absolute
+  path (nor where a symlinked image really lives). Git must not be able to add any file in the
+  folder or in the real folder of any image in it (symlinks resolved): each lies outside any git
+  working tree, or all its files are ignored (`git ls-files --others --exclude-standard` lists
+  nothing) and none is tracked; otherwise the command refuses, so git won't pick up the photos
+  (keep the folder outside the repository, or under the git-ignored `.data/`). For a folder inside
+  the calibration folder, the refusal names the first such file relative to it (often a stray
+  `.DS_Store` or `notes.txt`); files beside a symlinked image's real file are not named. A folder
+  inside a repository's git folder (e.g. a bare repository nested in a working tree) is refused
+  too, since a working tree around it could add it. A forced `git add -f` is not prevented. The
+  check runs for the folder and for each distinct real image folder, each twice: with your `GIT_*`
+  variables (as your git sees it, e.g. with `GIT_DIR` and `GIT_WORK_TREE` set; then refusals and
+  failures say "with your GIT_* settings", and a folder outside that `GIT_WORK_TREE` counts as
+  outside for this pass) and without them (so `GIT_CEILING_DIRECTORIES` can't hide a repository);
+  both must accept, with up to 3 git calls each. Git runs with English messages (`LC_ALL=C`), file
+  names unquoted (`core.quotePath=false`, so umlauts print as they are), discovery across
+  filesystems (so a folder on another volume is judged by the repository it is in, if any), and in
+  the folder itself with a literal `.`, so no folder name is read as a pathspec. If git can't be
+  run, or fails while checking (other than finding no repository), the command refuses. Limit: a
+  repository bound to the folder only on git's command line or in its config (`--work-tree`,
+  `core.worktree`, e.g. a bare dotfiles repository used through a shell alias) is invisible to the
+  check.
+- **Report** (one JSON object): per model (`sface`, `facenet`), its configured values and, per pair
+  set, the same- and different-person similarity distributions (count, min, p05, p25, median, p75,
+  p95, max; `null` for a side without pairs) and FAR (share of different-person pairs at or above a
+  threshold) and FRR (share of same-person pairs below it; either is `null` without pairs) at
+  0.20–0.90 in steps of 0.05 and at the configured threshold. `realAnchor` and `candidateAnchor`
+  also give the `suggestion` (the lowest threshold on a 0.01 grid whose FAR is at most
+  `--target-far`, default 0.01, with its FAR and FRR; absent when the set has no different-person
+  pairs, `null` when no threshold up to 1 reaches the target) and the `equalErrorRate` point (`null`
+  unless both sides have pairs); `real` and `candidatePhoto` don't. For SFace, `ceiling.suggested`
+  is the median of the per-Subject Ceilings (`ceiling.subjects`, each the median of that Subject's
+  real-photo pairs), with `pooledMedian` (the median of all same-person real-photo pairs) beside it.
+  `rules` states each rule. Warnings per pair set: fewer than 30 pairs on a side; on the suggesting
+  sets also too few different-person pairs to resolve the target FAR (at least 1/target) and no
+  threshold reaching the target. Report-level `warnings`: a Subject whose Candidates have no real
+  photo with one face to pair with; a Subject with more than 8 photos (its anchor similarities run
+  higher than a Run's, for other people too); a suggested Ceiling more than 0.05 from the pooled
+  median; and, since the thresholds require Ceiling ≥ Gate, a suggested Ceiling below a Gate
+  suggested by `realAnchor` or `candidateAnchor` or below the configured Gate, and a suggested Gate
+  above the configured Ceiling.
+- **Recording the result:** take the SFace Identity Gate and the FaceNet threshold from the
+  `realAnchor` suggestion, and from `candidateAnchor` when you have labelled Candidates; weigh both.
+  Set the chosen values in `sfaceConfig` (`identityGate`, `singlePhotoCeiling`) and `facenetConfig`
+  (`threshold`), update the tests that pin them, and record the rationale (pair counts, rates at the
+  chosen values) in ADR-0008's consequences or on issue #11. Too high a FaceNet threshold marks real
+  likeness "Likeness Unconfirmed"; too low misses scorer overfitting.
 
 ### Runs
 

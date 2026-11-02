@@ -10,7 +10,7 @@ import * as adapters from "@iconograph/adapters";
 
 const serverSource = fileURLToPath(new URL("../src/", import.meta.url));
 const packagesRoot = realpathSync(fileURLToPath(new URL("../../", import.meta.url)));
-const heldOutModules = ["held-out-embedder.ts", "heldout-cli.ts"].map((name) =>
+const heldOutModules = ["held-out-embedder.ts", "heldout-cli.ts", "calibrate-cli.ts"].map((name) =>
   join(packagesRoot, "adapters", "src", name),
 );
 /** Source files Bun can import; anything else (e.g. the JSON model lock) imports nothing. */
@@ -61,7 +61,12 @@ test("the adapters package exports nothing of the held-out model", () => {
 });
 
 test("the held-out modules can't be imported from the server by subpath", () => {
-  for (const name of ["src/held-out-embedder", "src/held-out-embedder.ts", "src/heldout-cli.ts"]) {
+  for (const name of [
+    "src/held-out-embedder",
+    "src/held-out-embedder.ts",
+    "src/heldout-cli.ts",
+    "src/calibrate-cli.ts",
+  ]) {
     expect(() => Bun.resolveSync(`@iconograph/adapters/${name}`, serverSource)).toThrow();
   }
 });

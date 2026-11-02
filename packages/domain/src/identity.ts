@@ -35,7 +35,8 @@ export function identityAnchor(embeddings: readonly Embedding[]): Embedding {
   return normalize(sum);
 }
 
-function median(values: readonly number[]): number {
+/** The middle value, or the mean of the two middle values; `values` must not be empty. */
+export function median(values: readonly number[]): number {
   const sorted = [...values].sort((a, b) => a - b);
   const middle = sorted.length >> 1;
   return sorted.length % 2 === 1 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
@@ -46,6 +47,25 @@ export const IdentityCeiling = Schema.Struct({
   source: Schema.Literals(["median-pairwise", "single-photo-default"]),
 });
 export type IdentityCeiling = typeof IdentityCeiling.Type;
+
+/**
+ * Cosine similarity of `embedding` to the Identity Anchor of `references`: a
+ * Candidate's Likeness, or a Reference Photo against the others' anchor.
+ */
+export function anchorSimilarity(embedding: Embedding, references: readonly Embedding[]): number {
+  return cosineSimilarity(embedding, identityAnchor(references));
+}
+
+/** Cosine similarity of every pair of `embeddings` (i < j, in order). */
+export function pairwiseSimilarities(embeddings: readonly Embedding[]): number[] {
+  const pairs: number[] = [];
+  for (let i = 0; i < embeddings.length; i++) {
+    for (let j = i + 1; j < embeddings.length; j++) {
+      pairs.push(cosineSimilarity(embeddings[i]!, embeddings[j]!));
+    }
+  }
+  return pairs;
+}
 
 /**
  * The Identity Ceiling: the median pairwise similarity among the accepted
@@ -59,13 +79,7 @@ export function identityCeiling(
   if (embeddings.length === 1) {
     return { value: thresholds.singlePhotoCeiling, source: "single-photo-default" };
   }
-  const pairs: number[] = [];
-  for (let i = 0; i < embeddings.length; i++) {
-    for (let j = i + 1; j < embeddings.length; j++) {
-      pairs.push(cosineSimilarity(embeddings[i]!, embeddings[j]!));
-    }
-  }
-  return { value: median(pairs), source: "median-pairwise" };
+  return { value: median(pairwiseSimilarities(embeddings)), source: "median-pairwise" };
 }
 
 /** What the face model found in one Reference Photo, after any operator face choice. */
@@ -172,9 +186,9 @@ export function assessReferencePhotos(
   const readmitted = new Set<number>();
   /** Similarity of `index` to the anchor of the other accepted photos. */
   const againstOthers = (index: number) =>
-    cosineSimilarity(
+    anchorSimilarity(
       embeddingOf(index),
-      identityAnchor([...candidates].filter((other) => other !== index).map(embeddingOf)),
+      [...candidates].filter((other) => other !== index).map(embeddingOf),
     );
   /** Similarity of two photos to each other. */
   const pairSimilarity = (first: number, second: number) =>
