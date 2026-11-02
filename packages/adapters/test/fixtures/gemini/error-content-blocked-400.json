@@ -1,0 +1,6 @@
+{
+  "error": {
+    "message": "Request blocked for an unspecified policy reason. Please modify your input and retry.",
+    "code": "content_blocked"
+  }
+}

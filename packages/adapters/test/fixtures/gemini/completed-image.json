@@ -1,0 +1,38 @@
+{
+  "id": "REDACTED_INTERACTION_ID",
+  "object": "interaction",
+  "model": "gemini-nano-banana-2.1",
+  "status": "completed",
+  "created": "2026-11-01T21:00:00Z",
+  "updated": "2026-11-01T21:00:09Z",
+  "steps": [
+    { "type": "thought", "signature": "REDACTED" },
+    {
+      "type": "model_output",
+      "content": [
+        { "type": "text", "text": "Here is the headshot." },
+        {
+          "type": "image",
+          "mime_type": "image/jpeg",
+          "data": "/9j/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAAQABADASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAT/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFAEBAAAAAAAAAAAAAAAAAAAABv/EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAMAwEAAhEDEQA/AKQAI2f/2Q=="
+        }
+      ]
+    }
+  ],
+  "usage": {
+    "total_input_tokens": 2600,
+    "input_tokens_by_modality": [
+      { "modality": "text", "tokens": 360 },
+      { "modality": "image", "tokens": 2240 }
+    ],
+    "total_cached_tokens": 0,
+    "total_output_tokens": 1690,
+    "output_tokens_by_modality": [
+      { "modality": "image", "tokens": 1680 },
+      { "modality": "text", "tokens": 10 }
+    ],
+    "total_thought_tokens": 290,
+    "total_tool_use_tokens": 0,
+    "total_tokens": 4580
+  }
+}

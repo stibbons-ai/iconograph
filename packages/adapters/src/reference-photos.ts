@@ -1,27 +1,39 @@
-import { mkdir, stat } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { stat } from "node:fs/promises";
+import { resolve } from "node:path";
 import {
+  aloneSimilarity,
   assessReferencePhotos,
+  comparedSimilarity,
   type DetectedFace,
   type Embedding,
+  type EncodedImage,
+  FaceBox,
   FaceEmbedder,
   FaceModelError,
-  type IdentityCeiling,
+  IdentityCeiling,
   MAX_REFERENCE_PHOTOS,
   type PhotoFaces,
+  ReferencePhotoWarning,
   type RgbImage,
+  SimilarityBasis,
 } from "@iconograph/domain";
-import { Data, Effect } from "effect";
+import { Data, Effect, Schema } from "effect";
 import sharp from "sharp";
-import { imagesDirectory } from "./data-directory";
 import { errorMessage } from "./errors";
-import { writeFileAtomically } from "./files";
 import { decodeHeic, type HeicDecoder, loadHeicDecoder } from "./heic";
+import { type StoredImage, storeImage } from "./image-store";
+
+/** Which step on a photo file failed. */
+type PhotoStage = "read" | "decoded" | "encoded" | "stored";
 
 /** A Reference Photo set or file that can't be used; `photo` names the file when there is one. */
 export class ReferencePhotoError extends Data.TaggedError("ReferencePhotoError")<{
   message: string;
   photo?: string;
+  /** What failed for a file: `decoded` means the bytes aren't a usable image. */
+  stage?: PhotoStage;
+  /** The underlying reason, without the photo wording. */
+  detail?: string;
 }> {}
 
 /** The HEIC decoder itself failed to load: a fault of the install, not of any photo. */
@@ -82,9 +94,14 @@ function sniffFormat(bytes: Uint8Array): PhotoFormat | undefined {
 export const failure = (photo: string, message: string) =>
   new ReferencePhotoError({ photo, message });
 const photoError =
-  (photo: string, action: string, label = "Reference Photo") =>
+  (photo: string, stage: PhotoStage, label = "Reference Photo") =>
   (error: unknown) =>
-    failure(photo, `${label} ${photo} could not be ${action}: ${errorMessage(error)}`);
+    new ReferencePhotoError({
+      photo,
+      stage,
+      detail: errorMessage(error),
+      message: `${label} ${photo} could not be ${stage}: ${errorMessage(error)}`,
+    });
 
 /**
  * Validate an upload by fully decoding it into upright sRGB pixels. For JPEG and
@@ -175,23 +192,59 @@ export const encodeReferencePhoto = (photo: string, image: RgbImage) =>
     catch: photoError(photo, "encoded"),
   });
 
-export interface StoredPhoto {
-  path: string;
-  sha256: string;
-}
-
 /** Write an encoded Reference Photo into the content-addressed image store. */
 export const storeReferencePhoto = (photo: string, encoded: EncodedPhoto, dataDirectory: string) =>
   Effect.tryPromise({
-    try: async (): Promise<StoredPhoto> => {
-      const directory = imagesDirectory(dataDirectory);
-      const path = join(directory, `${encoded.sha256}.jpg`);
-      await mkdir(directory, { recursive: true });
-      await writeFileAtomically(path, (file) => file.writeFile(encoded.jpeg), { suffix: ".tmp" });
-      return { path, sha256: encoded.sha256 };
-    },
+    try: () => storeImage(encoded.jpeg, "image/jpeg", dataDirectory),
     catch: photoError(photo, "stored"),
   });
+
+/** Character references are sent at most this many pixels on their longest side. */
+const MAX_REFERENCE_UPLOAD_SIDE = 2048;
+
+/**
+ * A stored (metadata-free) Reference Photo as sent to an Image Model: as
+ * stored, or downscaled to `MAX_REFERENCE_UPLOAD_SIDE` when larger. Image
+ * models read a fixed token budget per image (1120 tokens for Gemini 3), so
+ * larger uploads add request size, not detail.
+ */
+export const loadCharacterReference = (stored: StoredImage) =>
+  Effect.tryPromise({
+    try: async (): Promise<EncodedImage> => {
+      const bytes = await Bun.file(stored.path).bytes();
+      const image = sharp(bytes);
+      const { width = 0, height = 0 } = await image.metadata();
+      if (Math.max(width, height) <= MAX_REFERENCE_UPLOAD_SIDE) {
+        return { bytes, mimeType: "image/jpeg" };
+      }
+      const resized = await image
+        .resize(MAX_REFERENCE_UPLOAD_SIDE, MAX_REFERENCE_UPLOAD_SIDE, { fit: "inside" })
+        .jpeg({ quality: 90 })
+        .toBuffer();
+      return { bytes: resized, mimeType: "image/jpeg" };
+    },
+    catch: photoError(stored.path, "read"),
+  });
+
+/** One `--face PHOTO:FACE` argument, both numbered from 1. */
+export function parseFaceChoice(value: string): { photo: number; face: number } {
+  const match = /^([1-9]\d*):([1-9]\d*)$/.exec(value);
+  if (!match) throw new Error(`--face expects PHOTO:FACE numbered from 1, got ${value}`);
+  return { photo: Number(match[1]), face: Number(match[2]) };
+}
+
+/**
+ * `--face PHOTO:FACE` arguments as photo number → face number; the same photo
+ * twice is an error.
+ */
+export function faceChoiceMap(values: readonly string[]): Map<number, number> {
+  const choices = new Map<number, number>();
+  for (const { photo, face } of values.map(parseFaceChoice)) {
+    if (choices.has(photo)) throw new Error(`--face given twice for photo ${photo}`);
+    choices.set(photo, face);
+  }
+  return choices;
+}
 
 export interface ValidateReferencePhotosOptions {
   paths: readonly string[];
@@ -200,33 +253,89 @@ export interface ValidateReferencePhotosOptions {
   dataDirectory: string;
 }
 
-interface PhotoSummary {
+const photoSummary = {
   /** Numbered from 1 in input order. */
-  photo: number;
-  path: string;
-  format: PhotoFormat;
-  width: number;
-  height: number;
-}
+  photo: Schema.Int,
+  path: Schema.String,
+  format: Schema.Literals(["jpeg", "png", "heic"]),
+  width: Schema.Int,
+  height: Schema.Int,
+};
+type PhotoSummary = Schema.Struct.Type<typeof photoSummary>;
 
 /** `face` is numbered from 1 in detection order (highest score first). */
-export type FaceSummary = Pick<DetectedFace, "box" | "score"> & { face: number };
+const FaceSummary = Schema.Struct({ face: Schema.Int, box: FaceBox, score: Schema.Finite });
+export type FaceSummary = typeof FaceSummary.Type;
 
-export type PhotoReport = PhotoSummary &
-  (
-    | { verdict: "rejected"; reason: "no-face" }
-    | { verdict: "choice-required"; faces: FaceSummary[] }
-    | { verdict: "accepted"; face: FaceSummary; similarity: number | null; stored: StoredPhoto }
-    | { verdict: "flagged"; reason: "not-the-same-person"; face: FaceSummary; similarity: number }
-  );
+const StoredImageSchema = Schema.Struct({ path: Schema.String, sha256: Schema.String });
 
-export interface ReferencePhotoReport {
-  model: string;
-  identityGate: number;
-  photos: PhotoReport[];
+/** One photo's line in the report. An accepted photo has a similarity only when others were accepted too. */
+export const PhotoReport = Schema.Union([
+  Schema.Struct({
+    ...photoSummary,
+    verdict: Schema.Literal("rejected"),
+    reason: Schema.Literal("no-face"),
+  }),
+  Schema.Struct({
+    ...photoSummary,
+    verdict: Schema.Literal("choice-required"),
+    faces: Schema.Array(FaceSummary),
+  }),
+  Schema.Struct({
+    ...photoSummary,
+    verdict: Schema.Literal("accepted"),
+    face: FaceSummary,
+    ...comparedSimilarity,
+    stored: StoredImageSchema,
+  }),
+  Schema.Struct({
+    ...photoSummary,
+    verdict: Schema.Literal("accepted"),
+    face: FaceSummary,
+    ...aloneSimilarity,
+    stored: StoredImageSchema,
+  }),
+  Schema.Struct({
+    ...photoSummary,
+    verdict: Schema.Literal("flagged"),
+    reason: Schema.Literal("not-the-same-person"),
+    face: FaceSummary,
+    similarity: Schema.Finite,
+    similarityTo: SimilarityBasis,
+  }),
+]);
+export type PhotoReport = typeof PhotoReport.Type;
+
+/** The `photos:validate` report, also stored with each Run. */
+export const ReferencePhotoReport = Schema.Struct({
+  model: Schema.String,
+  identityGate: Schema.Finite,
+  photos: Schema.Array(PhotoReport),
   /** Absent when no photo was accepted. `photos` lists the accepted photo numbers. */
-  identity?: { photos: number[]; anchor: Embedding; ceiling: IdentityCeiling };
-  warnings: string[];
+  identity: Schema.optionalKey(
+    Schema.Struct({
+      photos: Schema.Array(Schema.Int),
+      anchor: Schema.Array(Schema.Finite),
+      ceiling: IdentityCeiling,
+    }),
+  ),
+  warnings: Schema.Array(ReferencePhotoWarning),
+});
+export type ReferencePhotoReport = typeof ReferencePhotoReport.Type;
+
+/** What a Run needs of an accepted photo beyond the report: its full face and embedding. */
+export interface AcceptedReferencePhoto {
+  /** Numbered from 1 in input order, as in the report. */
+  photo: number;
+  face: DetectedFace;
+  embedding: Embedding;
+  stored: StoredImage;
+}
+
+export interface ReferencePhotoValidation {
+  report: ReferencePhotoReport;
+  /** In photo order. */
+  accepted: AcceptedReferencePhoto[];
 }
 
 export const summarize = ({ box, score }: DetectedFace, face: number): FaceSummary => ({
@@ -240,19 +349,6 @@ export const onPhoto =
   (photo: string, label = "Reference Photo") =>
   (error: FaceModelError) =>
     new FaceModelError({ message: `${label} ${photo}: ${error.message}`, photo });
-
-/** Parse repeated `--face PHOTO:FACE` values (both numbered from 1) into photo → face. */
-export function parseFaceChoices(values: readonly string[]): Map<number, number> {
-  const choices = new Map<number, number>();
-  for (const value of values) {
-    const match = /^([1-9]\d*):([1-9]\d*)$/.exec(value);
-    if (!match) throw new Error(`--face expects PHOTO:FACE numbered from 1, got ${value}`);
-    const photo = Number(match[1]);
-    if (choices.has(photo)) throw new Error(`--face given twice for photo ${photo}`);
-    choices.set(photo, Number(match[2]));
-  }
-  return choices;
-}
 
 /**
  * What validation keeps per photo: never the decoded pixels. Only a photo with
@@ -381,6 +477,7 @@ export const validateReferencePhotos = (options: ValidateReferencePhotosOptions)
       embedder.thresholds,
     );
     const photos: PhotoReport[] = [];
+    const accepted: AcceptedReferencePhoto[] = [];
     for (const [index, verdict] of assessment.photos.entries()) {
       const record = inspected[index]!;
       const { summary: base } = record;
@@ -403,18 +500,20 @@ export const validateReferencePhotos = (options: ValidateReferencePhotosOptions)
           });
           break;
         case "accepted": {
-          const { faceNumber, encoded } = withFace(record);
-          photos.push({
-            ...base,
-            ...verdict,
-            face: summarize(verdict.face, faceNumber),
-            stored: yield* storeReferencePhoto(base.path, encoded, dataDirectory),
+          const { faceNumber, encoded, found } = withFace(record);
+          const stored = yield* storeReferencePhoto(base.path, encoded, dataDirectory);
+          photos.push({ ...base, ...verdict, face: summarize(verdict.face, faceNumber), stored });
+          accepted.push({
+            photo: base.photo,
+            face: found.face,
+            embedding: found.embedding,
+            stored,
           });
         }
       }
     }
     const { identity } = assessment;
-    return {
+    const report = {
       model: embedder.model,
       identityGate: embedder.thresholds.identityGate,
       photos,
@@ -427,4 +526,5 @@ export const validateReferencePhotos = (options: ValidateReferencePhotosOptions)
       }),
       warnings: assessment.warnings,
     } satisfies ReferencePhotoReport;
+    return { report, accepted } satisfies ReferencePhotoValidation;
   });

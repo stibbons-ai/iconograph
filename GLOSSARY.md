@@ -46,8 +46,12 @@ One attempt by an Image Model, within an Iteration, to produce a headshot; it en
 _Avoid_: Output, result, sample
 
 **Candidate Outcome**:
-How a Candidate ended: **Refused** (the Image Model declined), **Failed** (errored after retries), **Gated** (no face, or below the Identity Gate) or **Scored** (judged against the Rubric).
+How a Candidate ended: **Refused** (the Image Model declined), **Failed** (errored after retries, or its image was unusable), **Gated** (no face, or below the Identity Gate) or **Scored** (judged against the Rubric; until the Judge exists, M0 uses Scored for "passed the Identity Gate and has a Likeness").
 _Avoid_: Status, state
+
+**Character Reference**:
+One of the accepted Reference Photos sent to an Image Model so it keeps the Subject's identity; an Image Model takes only a few (4 for Gemini), chosen per Lane.
+_Avoid_: Reference image, input image
 
 **Pick**:
 The operator's final choice of Candidate(s) that concludes a Run.
@@ -56,7 +60,7 @@ _Avoid_: Selection, winner
 ## Scoring and steering
 
 **Identity Gate**:
-The minimum Likeness, fixed per face model, below which a Candidate is Gated without further judgement.
+The minimum face-recognition similarity to the Identity Anchor, fixed per face model, below which a Candidate is Gated without further judgement; Likeness is 0 at the Gate, unless the Identity Ceiling is at or below the Gate, where reaching the Gate already scores 10.
 _Avoid_: Threshold, face check
 
 **Identity Ceiling**:
@@ -64,7 +68,7 @@ How alike the Subject's own Reference Photos are to each other; the point at whi
 _Avoid_: Max similarity, target similarity
 
 **Likeness**:
-A Candidate's identity match to the Identity Anchor as measured by a face-recognition model.
+A Candidate's identity match to the Identity Anchor as measured by a face-recognition model, on a 0–10 scale: the raw cosine similarity scaled linearly from the Identity Gate (0) to the Identity Ceiling (10). Code keeps the raw value as `similarity`; in prose, say Likeness.
 _Avoid_: ArcFace score, similarity, identity score
 
 **Resemblance**:

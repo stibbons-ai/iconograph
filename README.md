@@ -1,8 +1,9 @@
 # Iconograph
 
-A Bun workspace proving a persistent, model-free **Run** workflow before image-product work, plus the
-local face pipeline that validates Reference Photos. There are no provider credentials, vendor model
-calls, UI, or production deployment in this milestone.
+A Bun workspace for the headless Run loop: validate the Subject's Reference Photos with a local face
+pipeline, generate Candidates with an Image Model inside a hard Budget, and score their Likeness.
+Milestone 0 runs one Gemini Lane for one Iteration from the command line; there is no UI or
+production deployment yet.
 
 ## Requirements and installation
 
@@ -49,25 +50,18 @@ one-command exception rather than weakening shared configuration.
 ## Commands
 
 The development shell supplies both telemetry opt-out variables to tooling through environment
-inheritance. Root `run`, `eval`, and `test` scripts, and package runtime entrypoints, retain explicit
-`MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1` prefixes so they remain safe outside the shell.
-Formatting, linting, typechecking, licence auditing, and ADR validation use plain commands;
-`check` composes the scripts and finishes with `bun run test`. Outside the shell, set both variables
-when invoking Bun or Mastra directly instead of the runtime/evaluation/test scripts.
+inheritance. Root runtime scripts (`run`, `photos:validate`, `prices`, …) and `test`, and package
+runtime entrypoints, retain explicit `MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1` prefixes so they
+remain safe outside the shell. Formatting, linting, typechecking, licence auditing, and ADR
+validation use plain commands; `check` composes the scripts and finishes with `bun run test`.
+Outside the shell, set both variables when invoking Bun or Mastra directly instead of the scripts.
 
 ```sh
-# Validate, execute, and persist one Run in a local SQLite-compatible file.
-bun run run --db ./iconograph.db --input '{"message":"hello"}'
+# Start a Run (see "Runs" below); needs GEMINI_API_KEY.
+bun run run --budget 0.50 me-1.jpg me-2.jpg me-3.jpg
 
-# Inspect the same persisted run from a separate CLI invocation.
-# Replace RUN_ID with the runId from the first command's JSON output.
-bun run run read --db ./iconograph.db --run-id RUN_ID
-
-# Exercise four real, persisted tracer fixtures without model access.
-bun run eval
-
-# Optional: retain the evaluation database at a chosen path.
-bun run eval --db ./evaluation.db
+# Print a stored Run again from the database.
+bun run run read --run-id RUN_ID
 
 bun run test
 bun run format        # write formatting in the authored workspace scope
@@ -80,11 +74,7 @@ bun run hooks:install
 bun run check         # format → lint → typecheck → licences → ADRs → tests
 ```
 
-The database's parent directory must already exist. The default Run database is `./iconograph.db`;
-local database files and their WAL/shared-memory companions are gitignored. Without `--db`, the
-evaluation harness uses an isolated temporary database and removes it afterwards. CLI success is
-JSON on stdout; failures are JSON on stderr and exit nonzero. The tracer returns the message and
-its JavaScript string length (**UTF-16 code units**, not Unicode graphemes).
+CLI success is JSON on stdout; failures are JSON on stderr and exit nonzero.
 
 CI is independent of Nix, devenv, and direnv: it installs Bun directly and explicitly sets
 `MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1` for all steps. It uses a frozen install, fetches the
@@ -204,16 +194,20 @@ bun run photos:validate --face 2:1 me-1.jpg team-photo.jpg me-3.png # photo 2: u
   detection; transparency is flattened onto white.
 - **Report** (one JSON object on stdout; photos and faces are numbered from 1, faces highest score
   first): per photo, `accepted` (with its face box and score, its similarity to the other accepted
-  photos, `null` when it is the only one, and the stored file), `rejected` with `no-face`,
-  `choice-required` with every detected face (box and score; rerun with `--face PHOTO:FACE`), or
-  `flagged` as `not-the-same-person` with its similarity. Then the Identity Anchor (the 128-d
-  normalised mean SFace embedding of the accepted photos), the Identity Ceiling (median pairwise
-  similarity of the accepted photos, or SFace's single-photo default) and warnings: fewer than 3
-  accepted photos, nothing accepted, or a Ceiling below the Gate (every photo passed against the
-  others, but they barely agree with each other; the Ceiling is reported as measured, not clamped).
-  Errors print JSON to stderr and exit nonzero, with `photo` when the error is about one photo
-  (including a face-model failure while processing it); a HEIC decoder that fails to load is
-  reported as such, not as a bad photo. Warnings from the run itself also go to stderr as JSON.
+  photos and the stored file), `rejected` with `no-face`, `choice-required` with every detected face
+  (box and score; rerun with `--face PHOTO:FACE`), or `flagged` as `not-the-same-person` with its
+  similarity. Every similarity states its basis in `similarityTo`: `accepted-anchor` (the Identity
+  Anchor of the other accepted photos) or `best-photo` (the best match to any one other photo, used
+  only when nothing was accepted); an accepted photo that is the only one has `similarity` and
+  `similarityTo` `null`. Then the Identity Anchor (the 128-d normalised mean SFace embedding of the
+  accepted photos), the Identity Ceiling (median pairwise similarity of the accepted photos, or
+  SFace's single-photo default) and `warnings`, each `{ code, message }`: `few-photos` (fewer than 3
+  accepted), `none-accepted`, or `ceiling-below-gate` (every photo passed against the others, but
+  they barely agree with each other; the Ceiling is reported as measured, not clamped). Programs
+  branch on `code`; `message` is for people and may change. Errors print JSON to stderr and exit
+  nonzero, with `photo` when the error is about one photo (including a face-model failure while
+  processing it); a HEIC decoder that fails to load is reported as such, not as a bad photo.
+  Warnings from the run itself also go to stderr as JSON.
 - **"Not the same person"** is judged against the others: each photo's cosine similarity to the
   Identity Anchor of the _other_ accepted photos, compared with the SFace Identity Gate (0.40,
   ADR-0008). The lowest photo below the Gate is flagged and left out, and the rest are rechecked,
@@ -225,9 +219,10 @@ bun run photos:validate --face 2:1 me-1.jpg team-photo.jpg me-3.png # photo 2: u
   best similarity to any one other photo (always below the Gate, since no pair reached it).
   Flagged photos are excluded from the anchor and ceiling; remove them, or replace them with better
   photos of the Subject.
-- **Privacy:** photos never leave the machine. Accepted photos are re-encoded from decoded pixels
-  (JPEG, quality 95) into `<data dir>/images/<sha256>.jpg`, so no EXIF, GPS, XMP, IPTC or ICC
-  metadata from the upload is stored. Rejected, flagged and choice-required photos are not stored.
+- **Privacy:** `photos:validate` never sends photos anywhere. Accepted photos are re-encoded from
+  decoded pixels (JPEG, quality 95) into `<data dir>/images/<sha256>.jpg`, so no EXIF, GPS, XMP,
+  IPTC or ICC metadata from the upload is stored. Rejected, flagged and choice-required photos are
+  not stored. A Run sends only these stripped copies of its character references (see Runs).
 
 Thresholds live in one per-model config (`sfaceConfig` in
 [`packages/adapters/src/face-embedder.ts`](packages/adapters/src/face-embedder.ts)); the Identity
@@ -270,6 +265,89 @@ reaches the threshold. The threshold (0.70, ADR-0008, to be recalibrated on real
 whose `exports` field exposes only its index, so the server and its run workflow cannot import or
 provide it; `packages/server/test/held-out-isolation.test.ts` checks this.
 
+### Runs
+
+`bun run run` starts a Run: it validates the Reference Photos (as `photos:validate` does), generates
+one Iteration of Candidates in one Gemini Lane (`gemini-nano-banana-2.1`), scores each Candidate's
+Likeness and prints the results with their costs.
+
+```sh
+GEMINI_API_KEY="op://Freelancing/Gemini test run key/password" \
+  op run --account my.1password.com -- \
+  bun run run --budget 0.50 --candidates 3 --look look.json --pin 2 me-1.jpg me-2.heic me-3.jpg
+```
+
+`op run` resolves the 1Password reference into the environment of that one process, so the key is
+never written to disk; any other way of setting `GEMINI_API_KEY` works too. The key is read only
+from the environment and sent only in the request header; it never enters the database, the output
+or an error. A key shorter than 20 characters or with spaces, control or non-ASCII characters (a
+bad paste) is rejected before any call, without echoing it.
+
+- **Arguments:** 1 to 8 Reference Photos; `--budget USD` (default 5), `--candidates N` (1 to 8,
+  default 3), `--look FILE`, `--pin PHOTO` (repeatable), `--face PHOTO:FACE` (as for
+  `photos:validate`), `--data-dir PATH` and `--db PATH` (default `./iconograph.db`, whose directory
+  must exist). `bun run run read --run-id ID` prints a stored Run's report again; it refuses a
+  `--db` file that doesn't exist.
+- **Target Look:** a JSON file with any of the facets `pose`, `background`, `lighting` (lighting
+  and colour), `hairstyle`, `clothing` and `framing`, each a text of up to 500 characters, e.g.
+  `{"background": "dark navy backdrop", "clothing": "grey suit"}`. Missing facets take defaults (a
+  neutral corporate headshot); `hairstyle` defaults to "as in the Reference Photos". Unknown facets
+  are rejected, and so is text with leading or trailing spaces. The look is frozen with the Run, and
+  the first Prompt is built from it.
+- **Character references:** Gemini keeps a character's identity from at most 4 reference images,
+  chosen from the accepted photos: pinned photos first (more than 4 pins is an error); without pins
+  the first pick is the largest, most frontal face (frontality × √area); each further pick is the
+  photo farthest in face embedding from those already chosen, so near-duplicates lose to different
+  angles or light. Only these photos, as the stripped stored copies (downscaled to 2048 px on the
+  longest side when larger), and the Prompt are sent to Google.
+- **Gemini:** the native Interactions API (`v1beta`, `Api-Revision: 2026-05-20`; v1 rejects image
+  input), one inline 2K JPEG per call, `store=false`, so Google doesn't keep the interaction for
+  later retrieval (stored interactions are otherwise retained 55 days on the paid tier); Google's
+  own abuse monitoring and terms still apply, and every generated image carries a SynthID
+  watermark. Every call returns at most one image (ADR-0004), so N Candidates are N parallel calls.
+  A policy block (`safety`, `jailbreak`, `prohibited_content`, `blocklist`, or `content_blocked`,
+  which Google returned live for photos of a public figure) and a text-only answer are Refused with
+  Google's reason and not retried; 408, 429 and 5xx responses and network failures are retried with
+  exponential backoff (1 s, 2 s) up to twice, then Failed; other errors, and a response without a
+  usable image, are Failed at once.
+- **Budget:** every billable call, retries included, is checked against the remaining Budget
+  (Budget − actual cost so far − estimates of calls in flight) before it is made. All N first calls
+  are reserved in order before any is launched, so parallel calls can't overspend; a call that
+  doesn't fit isn't made and the Lane stops with `budget-exhausted`. The estimate assumes 1120
+  input tokens per reference plus the Prompt (about 3 characters per token), the 2K image price
+  and 4000 tokens of text and thinking; the actual cost comes from the response's usage at the
+  price recorded for the Lane when the Run started (stdout shows its source, age and whether the
+  LiteLLM data was stale). Every HTTP error status is booked at $0 (Google's billing page: failed
+  400 and 500 requests aren't charged); a response without complete usage data (input, output and
+  thought totals, an output split by modality that adds up, and an image-token count whenever the
+  response holds an image), or a call interrupted mid-flight, counts at its estimate. A
+  reservation is booked at $0 when the engine knows its call wasn't sent; otherwise a call whose
+  result couldn't be recorded stays unsettled (`settled: false`) and counts at its estimate,
+  usually with a `{"warning": …}` line on stderr naming the Run, Lane, Iteration and Candidate.
+  A process killed mid-call leaves the call unsettled without a warning; `read` still shows it.
+  A call can cost more than its estimate, so the actual total can exceed the Budget by at most
+  that difference on calls already in flight. A Run with an unpriced model doesn't start. The
+  Budget is in whole micro-dollars: at most 6 decimals, from $0.000001 to $1,000,000.
+- **Output:** first, before any Candidate is generated, one JSON line on stderr with the estimated
+  cost (`{"event":"estimate", …}`). Then one JSON object on stdout: per Candidate its Outcome —
+  `Refused` or `Failed` with a reason, `Gated` (`no-face` or `below-gate`, with the best face's
+  similarity) or `Scored` with its Likeness (similarity to the Identity Anchor scaled linearly from
+  the Gate, 0, to the Identity Ceiling, 10, and clamped; with a Ceiling at or below the Gate,
+  anything at the Gate scores 10) — its stored image path and SHA-256, and its estimated and actual
+  cost per call; the Lane's stop reason (`budget-exhausted` or `iteration-limit`); totals over
+  every billable call of the Run and the remaining Budget; the Reference Photo warnings. `actualUsd`
+  counts calls of unknown cost (`unknownCostCalls`) as $0, while the remaining Budget counts them at
+  their estimate, so `budgetUsd − actualUsd` can exceed `remainingUsd`. Calls whose Candidate was
+  never saved (the Run failed mid-way) are listed in `unattributedCalls` and still counted. With
+  several faces in a Candidate, the best match to the Identity Anchor counts. A Run that fails after
+  it started prints its `runId` in the stderr error, so `read` can show what it spent.
+- **Storage:** Candidates are content-addressed files in `<data dir>/images` (JPEG or PNG; other
+  types fail the Candidate). The `--db` file holds Mastra's workflow snapshots (no image data or
+  embeddings; the Run request is the workflow input) and the tables `runs` (request with the frozen
+  Target Look and Budget, and the photo report with the Identity Anchor and Ceiling), `lanes`, `iterations`
+  (Prompts), `candidates` and `cost_records` (estimated and actual cost and usage per billable call),
+  all keyed by Run, Lane, Iteration and Candidate.
+
 ### ADR validation and commits
 
 [`docs/adr/README.md`](docs/adr/README.md) defines the required frontmatter and reusable template.
@@ -286,12 +364,11 @@ boundary or a replacement for the full CI check.
 
 ## Architecture and schema authority
 
-| Package                    | Responsibility                                                                                                                                  | Dependencies at the boundary                                                               |
-| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| `@iconograph/domain`       | Pure Run schemas; `FaceEmbedder` seam; Identity Anchor/Ceiling and photo verdicts; price precedence and `Unpriced`                              | Effect only; no Mastra, storage, or infrastructure                                         |
-| `@iconograph/adapters`     | Effect-to-Mastra schema helper; LibSQL storage; model weights; YuNet/SFace via ONNX; Reference Photo decoding and storage; LiteLLM price source | Effect, Mastra core and LibSQL adapter, libsql client, onnxruntime-node, sharp, libheif-js |
-| `@iconograph/server`       | Trivial Run workflow and persistent CLI                                                                                                         | Domain and adapters; Mastra owns durable execution                                         |
-| `@iconograph/eval-harness` | Runnable local evaluation fixtures                                                                                                              | Domain and server; no provider credentials                                                 |
+| Package                | Responsibility                                                                                                                                                                                                                             | Dependencies at the boundary                                                               |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------ |
+| `@iconograph/domain`   | Pure Run schemas; Target Look and Prompt; `FaceEmbedder` and `ImageModels` seams; Identity Anchor/Ceiling, photo verdicts, Likeness and Candidate Outcomes; character-reference choice; Budget arithmetic; price precedence and `Unpriced` | Effect only; no Mastra, storage, or infrastructure                                         |
+| `@iconograph/adapters` | Effect-to-Mastra schema helper; LibSQL storage and Run tables; model weights; YuNet/SFace via ONNX; Reference Photo decoding and storage; content-addressed images; LiteLLM price source; Gemini Interactions adapter                      | Effect, Mastra core and LibSQL adapter, libsql client, onnxruntime-node, sharp, libheif-js |
+| `@iconograph/server`   | Run workflow (prepare → Lanes → finish; a Lane generates and scores one Iteration) and the Run CLI                                                                                                                                         | Domain and adapters; Mastra owns durable execution                                         |
 
 **Effect Schema is the single schema source.** Mastra is the single durable workflow engine; LibSQL
 stores its snapshots. Zod exists transitively in Mastra's dependency graph but is not an independent
@@ -317,12 +394,13 @@ OS, or workspace configuration.
 ## Telemetry and licensing policy
 
 No application telemetry is intentionally enabled. The development shell and CI explicitly set
-`MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1`; standalone runtime, evaluation, and test scripts
-retain both flags as well. Tooling inherits the shell or CI environment rather than repeating the
-flags in every script. Transitive telemetry libraries can still be present in the dependency graph;
-their presence is not evidence of a telemetry request. This milestone does not make provider/model
-requests; its only outbound requests fetch locked model weights and LiteLLM's price file. The
-maintainer-run `bun run prices:snapshot` also queries `api.github.com` for LiteLLM's latest commit.
+`MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1`; standalone runtime and test scripts retain both flags
+as well. Tooling inherits the shell or CI environment rather than repeating the flags in every
+script. Transitive telemetry libraries can still be present in the dependency graph; their
+presence is not evidence of a telemetry request. Outbound requests: locked model weights,
+LiteLLM's price file, and, during a Run, the Gemini Interactions API with the Prompt and the chosen
+character references. Tests never call a paid vendor API. The maintainer-run
+`bun run prices:snapshot` also queries `api.github.com` for LiteLLM's latest commit.
 
 `bun run licenses` reads actual installed package manifests across the full runtime **and**
 development graph, including nested installs, scopes, symlinks, and Bun's isolated `.bun` store.

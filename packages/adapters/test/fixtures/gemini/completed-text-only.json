@@ -1,0 +1,21 @@
+{
+  "id": "REDACTED_INTERACTION_ID",
+  "object": "interaction",
+  "model": "gemini-nano-banana-2.1",
+  "status": "completed",
+  "created": "2026-11-01T21:00:00Z",
+  "updated": "2026-11-01T21:00:03Z",
+  "steps": [
+    {
+      "type": "model_output",
+      "content": [{ "type": "text", "text": "I can't create images of this person." }]
+    }
+  ],
+  "usage": {
+    "total_input_tokens": 2600,
+    "total_output_tokens": 9,
+    "output_tokens_by_modality": [{ "modality": "text", "tokens": 9 }],
+    "total_thought_tokens": 120,
+    "total_tokens": 2729
+  }
+}
