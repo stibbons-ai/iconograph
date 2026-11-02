@@ -1,3 +1,4 @@
+import { Schema } from "effect";
 import type { DetectedFace, Embedding, IdentityThresholds } from "./face";
 
 /** A Run takes 1 to 8 Reference Photos (GLOSSARY). */
@@ -40,10 +41,11 @@ function median(values: readonly number[]): number {
   return sorted.length % 2 === 1 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
 }
 
-export interface IdentityCeiling {
-  value: number;
-  source: "median-pairwise" | "single-photo-default";
-}
+export const IdentityCeiling = Schema.Struct({
+  value: Schema.Finite,
+  source: Schema.Literals(["median-pairwise", "single-photo-default"]),
+});
+export type IdentityCeiling = typeof IdentityCeiling.Type;
 
 /**
  * The Identity Ceiling: the median pairwise similarity among the accepted
@@ -72,25 +74,61 @@ export type PhotoFaces =
   | { kind: "several-faces"; faces: readonly DetectedFace[] }
   | { kind: "face"; face: DetectedFace; embedding: Embedding };
 
+/**
+ * What a photo's `similarity` was measured against: `accepted-anchor` is the
+ * Identity Anchor of the other accepted photos; `best-photo` is the best match
+ * to any single other photo with a face, used only when nothing was accepted.
+ */
+export const SimilarityBasis = Schema.Literals(["accepted-anchor", "best-photo"]);
+export type SimilarityBasis = typeof SimilarityBasis.Type;
+
+/** The fields of an accepted photo compared with the other accepted photos. */
+export const comparedSimilarity = {
+  similarity: Schema.Finite,
+  similarityTo: Schema.Literal("accepted-anchor"),
+};
+/** The fields of an accepted photo that is the only one: nothing to compare with. */
+export const aloneSimilarity = { similarity: Schema.Null, similarityTo: Schema.Null };
+
+/** An accepted photo's similarity to the others, or none when it is the only one. */
+export const AcceptedSimilarity = Schema.Union([
+  Schema.Struct(comparedSimilarity),
+  Schema.Struct(aloneSimilarity),
+]);
+export type AcceptedSimilarity = typeof AcceptedSimilarity.Type;
+
 export type PhotoVerdict =
   | { verdict: "rejected"; reason: "no-face" }
   | { verdict: "choice-required"; faces: readonly DetectedFace[] }
-  /** `similarity` is null when no other photo was accepted to compare against. */
-  | { verdict: "accepted"; face: DetectedFace; similarity: number | null }
+  | ({ verdict: "accepted"; face: DetectedFace } & AcceptedSimilarity)
   /**
    * `similarity` is against the anchor of the accepted photos. When none was
    * accepted, it is the photo's best similarity to any single other photo with
    * a face (for two photos, their similarity to each other); no pair reached
-   * the Gate, so it is always below it.
+   * the Gate, so it is always below it. `similarityTo` says which.
    */
-  | { verdict: "flagged"; reason: "not-the-same-person"; face: DetectedFace; similarity: number };
+  | {
+      verdict: "flagged";
+      reason: "not-the-same-person";
+      face: DetectedFace;
+      similarity: number;
+      similarityTo: SimilarityBasis;
+    };
+
+/** Consumers branch on `code`; `message` is for people and may change. */
+export const ReferencePhotoWarning = Schema.Struct({
+  code: Schema.Literals(["few-photos", "none-accepted", "ceiling-below-gate"]),
+  message: Schema.String,
+});
+export type ReferencePhotoWarning = typeof ReferencePhotoWarning.Type;
+export type ReferencePhotoWarningCode = ReferencePhotoWarning["code"];
 
 export interface ReferencePhotoAssessment {
   /** One verdict per input photo, in input order. */
   photos: PhotoVerdict[];
   /** Absent when no photo was accepted. */
   identity?: { anchor: Embedding; ceiling: IdentityCeiling; accepted: number[] };
-  warnings: string[];
+  warnings: ReferencePhotoWarning[];
 }
 
 /**
@@ -198,22 +236,27 @@ export function assessReferencePhotos(
         reason: "not-the-same-person",
         face: photo.face,
         similarity: flaggedSimilarity(index),
+        similarityTo: candidates.size > 0 ? "accepted-anchor" : "best-photo",
       };
     }
-    return {
-      verdict: "accepted",
-      face: photo.face,
-      similarity: accepted.length > 1 ? againstOthers(index) : null,
-    };
+    const similarity: AcceptedSimilarity =
+      accepted.length > 1
+        ? { similarity: againstOthers(index), similarityTo: "accepted-anchor" }
+        : { similarity: null, similarityTo: null };
+    return { verdict: "accepted", face: photo.face, ...similarity };
   });
 
-  const warnings: string[] = [];
+  const warnings: ReferencePhotoWarning[] = [];
   if (accepted.length === 0) {
-    warnings.push("No Reference Photo was accepted, so there is no Identity Anchor");
+    warnings.push({
+      code: "none-accepted",
+      message: "No Reference Photo was accepted, so there is no Identity Anchor",
+    });
   } else if (accepted.length < RECOMMENDED_REFERENCE_PHOTOS) {
-    warnings.push(
-      `Only ${accepted.length} accepted Reference Photo${accepted.length === 1 ? "" : "s"}; Likeness is less reliable below ${RECOMMENDED_REFERENCE_PHOTOS}`,
-    );
+    warnings.push({
+      code: "few-photos",
+      message: `Only ${accepted.length} accepted Reference Photo${accepted.length === 1 ? "" : "s"}; Likeness is less reliable below ${RECOMMENDED_REFERENCE_PHOTOS}`,
+    });
   }
   const acceptedEmbeddings = accepted.map(embeddingOf);
   const identity =
@@ -225,9 +268,11 @@ export function assessReferencePhotos(
         }
       : undefined;
   if (identity && identity.ceiling.value < identityGate) {
-    warnings.push(
-      "Identity Ceiling below the Identity Gate: the accepted photos barely agree with each other",
-    );
+    warnings.push({
+      code: "ceiling-below-gate",
+      message:
+        "Identity Ceiling below the Identity Gate: the accepted photos barely agree with each other",
+    });
   }
   return { photos: verdicts, ...(identity && { identity }), warnings };
 }

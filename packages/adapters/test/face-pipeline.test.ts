@@ -6,6 +6,7 @@ import {
   type DetectedFace,
   FaceEmbedder,
   FaceModelError,
+  likeness,
   type Point,
 } from "@iconograph/domain";
 import { Effect, Layer, ManagedRuntime } from "effect";
@@ -23,14 +24,14 @@ const temporaryDirectory = temporaryDirectories("faces");
 
 const validate = async (names: string[], faceChoices?: Map<number, number>) => {
   const dataDirectory = await temporaryDirectory();
-  const report = await runtime.runPromise(
+  const { report, accepted } = await runtime.runPromise(
     validateReferencePhotos({
       paths: names.map(fixture),
       dataDirectory,
       ...(faceChoices && { faceChoices }),
     }),
   );
-  return { report, dataDirectory };
+  return { report, accepted, dataDirectory };
 };
 
 /** The error `validateReferencePhotos` fails with, for paths (not fixture names). */
@@ -148,7 +149,7 @@ describe("YuNet + SFace on licence-clear fixtures", () => {
 
 describe("Reference Photo validation", () => {
   test("reports each verdict: accepted, flagged, rejected with no face, choice required", async () => {
-    const { report, dataDirectory } = await validate([
+    const { report, accepted, dataDirectory } = await validate([
       "biden-2022.jpg",
       "biden-2013-gps-rotated.jpg",
       "biden-2021.jpg",
@@ -168,6 +169,7 @@ describe("Reference Photo validation", () => {
     expect(flagged.verdict === "flagged" && flagged.similarity).toBeLessThan(
       sfaceConfig.thresholds.identityGate,
     );
+    expect(flagged).toMatchObject({ similarityTo: "accepted-anchor" });
     const group = report.photos[5]!;
     expect(group.verdict === "choice-required" && group.faces.map(({ face }) => face)).toEqual([
       1, 2,
@@ -177,10 +179,17 @@ describe("Reference Photo validation", () => {
     expect(report.identity?.ceiling.source).toBe("median-pairwise");
     expect(report.identity!.ceiling.value).toBeGreaterThan(sfaceConfig.thresholds.identityGate);
     expect(report.warnings).toEqual([]);
+    // The Run gets each accepted photo's full face and embedding, matching the report.
+    expect(accepted.map(({ photo }) => photo)).toEqual([1, 2, 3]);
     // Only the three accepted photos were stored, and none carries the upload's metadata.
     const stored = report.photos.flatMap((photo) =>
       photo.verdict === "accepted" ? [photo.stored] : [],
     );
+    expect(accepted.map((photo) => photo.stored)).toEqual(stored);
+    for (const photo of accepted) {
+      expect(photo.embedding).toHaveLength(128);
+      expect(photo.face.landmarks).toHaveLength(5);
+    }
     expect((await readdir(join(dataDirectory, "images"))).sort()).toEqual(
       stored.map(({ sha256 }) => `${sha256}.jpg`).sort(),
     );
@@ -202,9 +211,7 @@ describe("Reference Photo validation", () => {
     expect(subject.report.photos.map(({ verdict }) => verdict)).toEqual(["accepted", "accepted"]);
     const chosen = subject.report.photos[1]!;
     expect(chosen.verdict === "accepted" && chosen.face.face).toBe(subjectFace);
-    expect(subject.report.warnings).toEqual([
-      "Only 2 accepted Reference Photos; Likeness is less reliable below 3",
-    ]);
+    expect(subject.report.warnings.map(({ code }) => code)).toEqual(["few-photos"]);
 
     const someoneElse = await validate(
       ["biden-2022.jpg", "biden-2021.jpg", "obama-biden-2015.jpg"],
@@ -217,13 +224,23 @@ describe("Reference Photo validation", () => {
     ]);
   });
 
-  test("a single photo uses the face model's default Identity Ceiling", async () => {
+  test("a single photo uses the face model's default Identity Ceiling, the top of its Likeness scale", async () => {
     const { report } = await validate(["biden-2021.jpg"]);
+    const { identityGate, singlePhotoCeiling } = sfaceConfig.thresholds;
     expect(report.identity?.ceiling).toEqual({
-      value: sfaceConfig.thresholds.singlePhotoCeiling,
+      value: singlePhotoCeiling,
       source: "single-photo-default",
     });
-    expect(report.photos[0]).toMatchObject({ verdict: "accepted", similarity: null });
+    expect(report.photos[0]).toMatchObject({
+      verdict: "accepted",
+      similarity: null,
+      similarityTo: null,
+    });
+    // Likeness on SFace's real thresholds: 0 at the Gate, 10 at the default Ceiling, linear between.
+    const scale = { gate: identityGate, ceiling: report.identity!.ceiling.value };
+    expect(likeness(identityGate, scale)).toBeCloseTo(0, 10);
+    expect(likeness(singlePhotoCeiling, scale)).toBeCloseTo(10, 10);
+    expect(likeness((identityGate + singlePhotoCeiling) / 2, scale)).toBeCloseTo(5, 10);
   });
 
   test("a face choice must name a detected face and a given photo", async () => {

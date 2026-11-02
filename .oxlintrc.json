@@ -33,7 +33,7 @@
                 "message": "Enterprise ee entrypoints are prohibited."
               },
               {
-                "regex": "^(@mastra/|@libsql/|libsql($|/)|node:|@iconograph/(adapters|server|eval-harness)($|/))",
+                "regex": "^(@mastra/|@libsql/|libsql($|/)|node:|@iconograph/(adapters|server)($|/))",
                 "message": "The domain package is pure Effect schemas, not infrastructure."
               }
             ]

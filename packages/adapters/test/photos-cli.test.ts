@@ -88,6 +88,7 @@ describe("photos:validate in-process", () => {
     );
     const group = first.photos[0]!;
     if (group.verdict !== "choice-required") throw new Error("expected a choice to be required");
+    expect(first.warnings).toEqual([{ code: "none-accepted", message: expect.any(String) }]);
     const report: ReferencePhotoReport = JSON.parse(
       await run([
         "--data-dir",
@@ -109,6 +110,9 @@ describe("photos:validate in-process", () => {
       { photo: 5, verdict: "accepted" },
     ]);
     expect(report.identity?.photos).toEqual([1, 4, 5]);
+    expect(report.photos[2]).toMatchObject({ similarityTo: "accepted-anchor" });
+    expect(report.photos[0]).toMatchObject({ similarityTo: "accepted-anchor" });
+    expect(report.warnings).toEqual([]);
     // What the command stored is the stripped re-encode, not the upload.
     const stored = report.photos.flatMap((photo) =>
       photo.verdict === "accepted" ? [photo.stored.path] : [],

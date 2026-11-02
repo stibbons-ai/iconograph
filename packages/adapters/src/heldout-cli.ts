@@ -10,9 +10,9 @@ import {
   chooseFace,
   decodeReferencePhoto,
   type FaceSummary,
+  faceChoiceMap,
   failure,
   onPhoto,
-  parseFaceChoices,
   pixelKey,
   summarize,
 } from "./reference-photos";
@@ -176,7 +176,7 @@ export async function main(args: string[], dependencies: HeldOutCliDependencies 
   if (candidateFace !== undefined && !/^[1-9]\d*$/.test(candidateFace)) {
     throw new Error(`--candidate-face expects a face number from 1, got ${candidateFace}`);
   }
-  const faceChoices = parseFaceChoices(values.face ?? []);
+  const faceChoices = faceChoiceMap(values.face ?? []);
   const dataDirectory = resolveDataDirectory(values["data-dir"]);
   const report = await Effect.runPromise(
     scoreCandidate({

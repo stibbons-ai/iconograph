@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { FaceModelError } from "@iconograph/domain";
 import { Effect, Logger } from "effect";
-import { errorLine } from "../src/errors";
+import { errorLine, errorMessage, withCleanup } from "../src/errors";
 import { releaseSession } from "../src/face-embedder";
 import { HeicDecoderError, ReferencePhotoError } from "../src/reference-photos";
 
@@ -32,4 +32,27 @@ test("a failed model release is logged as a warning with its real reason, not ra
   expect(JSON.stringify(messages)).toContain(
     "Releasing the face model /models/sface.onnx failed: session busy",
   );
+});
+
+test("withCleanup rethrows the original error with the cleanup failure attached", async () => {
+  const original = new Error("write failed");
+  const failure = await withCleanup(
+    async () => {
+      throw original;
+    },
+    async () => {
+      throw new Error("close failed");
+    },
+  ).catch((error: unknown) => error);
+  expect(failure).toBe(original);
+  expect(errorMessage(failure)).toContain("close failed");
+  // A successful operation whose cleanup fails reports the cleanup failure.
+  await expect(
+    withCleanup(
+      async () => "ok",
+      async () => {
+        throw new Error("close failed");
+      },
+    ),
+  ).rejects.toThrow("close failed");
 });

@@ -60,6 +60,7 @@ export const GeminiImagePricing = Schema.TaggedStruct("GeminiImage", {
   outputPerImage: Usd,
   outputPer2KImage: Usd,
 });
+export type GeminiImagePricing = typeof GeminiImagePricing.Type;
 
 export const Pricing = Schema.Union([LlmPricing, OpenAIImagePricing, GeminiImagePricing]);
 export type Pricing = typeof Pricing.Type;

@@ -1,93 +1,194 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, rm, stat } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { NativeImageModels } from "@iconograph/adapters";
+import { ImageModels } from "@iconograph/domain";
+import { Effect } from "effect";
+import { verifiedModelsDirectory } from "../../adapters/test/face-models";
+import { temporaryDirectories } from "../../adapters/test/temporary-directory";
+import { refreshOnFirstLookup } from "../src/cli";
+import {
+  FAKE_PRICE,
+  faceFixture,
+  type FakeResponse,
+  subjectPhotos,
+} from "./support/fake-image-models";
 
 const cli = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
+const withFakes = fileURLToPath(new URL("./support/run-cli-with-fakes.ts", import.meta.url));
+const temporaryDirectory = temporaryDirectories("cli");
 
-async function invoke(...args: string[]) {
-  const process = Bun.spawn([Bun.which("bun") ?? "bun", cli, ...args], {
-    env: { ...Bun.env, MASTRA_TELEMETRY_DISABLED: "1", DO_NOT_TRACK: "1" },
+async function invoke(
+  entry: string,
+  args: string[],
+  script: FakeResponse[] = [],
+  extraEnv: Record<string, string> = {},
+) {
+  // The real CLI must never see a real key from the developer's shell.
+  const { GEMINI_API_KEY: _, ...env } = Bun.env;
+  const child = Bun.spawn([Bun.which("bun") ?? "bun", entry, ...args], {
+    env: {
+      ...env,
+      MASTRA_TELEMETRY_DISABLED: "1",
+      DO_NOT_TRACK: "1",
+      FAKE_IMAGE_SCRIPT: JSON.stringify(script),
+      ...extraEnv,
+    },
     stdout: "pipe",
     stderr: "pipe",
   });
   const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(process.stdout).text(),
-    new Response(process.stderr).text(),
-    process.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
   ]);
-  return { stdout, stderr, exitCode };
+  const lines = stderr.trim().split("\n").filter(Boolean);
+  return { stdout, lines, exitCode };
 }
 
-// End-to-end walkthrough: start through Bun, exit, reopen the same LibSQL file
-// in another Bun process, then read Mastra's stored snapshot (not cached output).
-test("CLI persists a real Run and reads its snapshot after process restart", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "iconograph-cli-"));
-  const db = join(directory, "runs.db");
-  try {
-    const started = await invoke("run", "--db", db, "--input", '{"message":"hello"}');
-    expect(started.stderr).toBe("");
-    expect(started.exitCode).toBe(0);
-    const run = JSON.parse(started.stdout);
-    expect(run).toMatchObject({
-      workflowId: "run",
-      status: "success",
-      result: { message: "hello", length: 5 },
-    });
-    expect(run.runId).toBeString();
-    expect((await stat(db)).size).toBeGreaterThan(0);
+// End-to-end walkthrough of the operator's command, with the fake Image Model in
+// a real process: estimate on stderr first, one JSON report on stdout, then the
+// same report read back from the database by a second process.
+test("a Run prints its estimate, then a report that read can reproduce", async () => {
+  const directory = await temporaryDirectory();
+  const look = join(directory, "look.json");
+  await writeFile(look, JSON.stringify({ background: "dark navy backdrop" }));
+  const common = ["--db", join(directory, "runs.db"), "--data-dir", join(directory, "data")];
+  const started = await invoke(
+    withFakes,
+    [
+      ...common,
+      "--budget",
+      "0.25",
+      "--candidates",
+      "3",
+      "--look",
+      look,
+      "--pin",
+      "2",
+      ...subjectPhotos,
+    ],
+    ["same", "different"],
+  );
+  expect(started.lines.map((line) => JSON.parse(line))).toEqual([
+    expect.objectContaining({ event: "estimate", estimatedUsd: 0.3, budgetUsd: 0.25 }),
+  ]);
+  expect(started.exitCode).toBe(0);
+  const report = JSON.parse(started.stdout);
+  expect(report.targetLook.background).toBe("dark navy backdrop");
+  expect(report.lanes[0]).toMatchObject({
+    model: "gemini-nano-banana-2.1",
+    stopReason: "budget-exhausted",
+    characterReferences: [2, 1],
+  });
+  expect(report.lanes[0].candidates.map(({ outcome }: { outcome: string }) => outcome)).toEqual([
+    "Scored",
+    "Gated",
+  ]);
+  expect(report.totals.estimatedUsd).toBeLessThanOrEqual(0.25);
 
-    const read = await invoke("read", "--db", db, "--run-id", run.runId);
-    expect(read.stderr).toBe("");
-    expect(read.exitCode).toBe(0);
-    const persisted = JSON.parse(read.stdout);
-    expect(persisted).toMatchObject({
-      runId: run.runId,
-      workflowId: "run",
-      snapshot: {
-        status: "success",
-        result: { message: "hello", length: 5 },
-        context: {
-          input: { message: "hello" },
-          "trace-message": { status: "success", output: { message: "hello", length: 5 } },
-        },
-      },
-    });
-  } finally {
-    await rm(directory, { recursive: true, force: true });
+  const read = await invoke(cli, ["read", ...common, "--run-id", report.runId]);
+  expect(read.lines).toEqual([]);
+  expect(read.exitCode).toBe(0);
+  expect(JSON.parse(read.stdout)).toEqual(report);
+}, 60_000);
+
+test("engine warnings, even while shutting down, are JSON lines on stderr; stdout stays the report", async () => {
+  const directory = await temporaryDirectory();
+  const common = ["--db", join(directory, "runs.db"), "--data-dir", join(directory, "data")];
+  const { stdout, lines, exitCode } = await invoke(
+    withFakes,
+    [...common, "--candidates", "1", ...subjectPhotos],
+    ["same"],
+    { FAKE_RELEASE_WARNING: "Releasing the face backend failed" },
+  );
+  expect(exitCode).toBe(0);
+  expect(JSON.parse(stdout).lanes[0].candidates).toHaveLength(1);
+  expect(lines.map((line) => JSON.parse(line))).toEqual([
+    expect.objectContaining({ event: "estimate" }),
+    { level: "Warn", warning: "Releasing the face backend failed" },
+  ]);
+}, 60_000);
+
+test("help documents the arguments, the Budget and the key", async () => {
+  const { stdout, exitCode } = await invoke(cli, ["--help"]);
+  expect(exitCode).toBe(0);
+  for (const text of [
+    "--budget USD",
+    "--candidates N",
+    "--look FILE",
+    "--pin PHOTO",
+    "GEMINI_API_KEY",
+    "store=false",
+    "read",
+  ]) {
+    expect(stdout).toContain(text);
   }
-}, 30_000);
-
-test("CLI help documents the local database and JSON input", async () => {
-  const result = await invoke("--help");
-  expect(result.exitCode).toBe(0);
-  expect(result.stdout).toContain("--db PATH");
-  expect(result.stdout).toContain("--input JSON");
-  expect(result.stdout).toContain("read");
 });
 
-test("CLI rejects malformed JSON, invalid schemas, missing runs and unknown arguments", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "iconograph-cli-errors-"));
-  const db = join(directory, "runs.db");
-  try {
-    for (const args of [
-      ["--input", "{"],
-      ["--input", '{"message":42}', "--db", db],
-      ["read", "--db", db, "--run-id", "missing"],
-      ["--unknown"],
-      [],
-    ]) {
-      const result = await invoke(...args);
-      expect(result.exitCode).not.toBe(0);
-      expect(result.stdout).toBe("");
-      expect(JSON.parse(result.stderr).error).toBeString();
-      if (args[1] === '{"message":42}') {
-        expect(JSON.parse(result.stderr).error).toContain("message");
-        expect(JSON.parse(result.stderr).error).toContain("string");
-      }
-    }
-  } finally {
-    await rm(directory, { recursive: true, force: true });
+test("errors are one JSON line on stderr with a nonzero exit and nothing on stdout", async () => {
+  const directory = await temporaryDirectory();
+  const common = ["--db", join(directory, "runs.db"), "--data-dir", join(directory, "data")];
+  // The real CLI loads the locked face models from the data volume; link the verified ones.
+  await mkdir(join(directory, "data"), { recursive: true });
+  await symlink(
+    await verifiedModelsDirectory(["yunet", "sface"]),
+    join(directory, "data", "models"),
+  );
+  const cases: [string, string[], string][] = [
+    [withFakes, [...common, "--budget", "0", ...subjectPhotos], "budgetUsd"],
+    [withFakes, [...common, "--budget", "0.0000004", ...subjectPhotos], "from $0.000001"],
+    [
+      withFakes,
+      [...common, "--budget", "1.0000005", ...subjectPhotos],
+      "whole number of micro-dollars",
+    ],
+    [withFakes, [...common, "--budget", "abc", ...subjectPhotos], "--budget expects a number"],
+    [withFakes, [...common, "--candidates", "9", ...subjectPhotos], "candidates"],
+    [withFakes, [...common, "--face", "1:1", "--face", "1:2", ...subjectPhotos], "given twice"],
+    [withFakes, [...common], "photos"],
+    [withFakes, [...common, "--look", join(directory, "missing.json"), ...subjectPhotos], "--look"],
+    [withFakes, [...common, faceFixture("earth-apollo17.jpg")], "No Reference Photo was accepted"],
+    // The real CLI, with GEMINI_API_KEY cleared: fails before any call or price refresh.
+    [cli, [...common, ...subjectPhotos], "GEMINI_API_KEY is not set"],
+    [cli, ["read", ...common, "--run-id", "missing"], "Run not found"],
+    [cli, ["read", "--db", join(directory, "typo.db"), "--run-id", "x"], "no such database file"],
+    [cli, ["--unknown"], "Unknown option"],
+  ];
+  for (const [entry, args, message] of cases) {
+    const result = await invoke(entry, args);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toBe("");
+    const last = JSON.parse(result.lines.at(-1)!);
+    expect(last.error).toContain(message);
+    // None of these Runs was stored, so none names a runId `read` can't show.
+    expect(last.runId).toBeUndefined();
   }
-}, 30_000);
+}, 60_000);
+
+test("prices refresh once, on the first lookup, and never without a key", async () => {
+  let refreshes = 0;
+  const prices = refreshOnFirstLookup(
+    {
+      ensureFresh: async () => {
+        refreshes++;
+        return { refreshed: true, fetchedAt: new Date() };
+      },
+      lookup: (model) => Effect.succeed({ ...FAKE_PRICE, model }),
+    },
+    () => {},
+  );
+  const get = (env: Record<string, string>) =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        return yield* (yield* ImageModels).get("gemini-nano-banana-2.1");
+      }).pipe(Effect.provide(NativeImageModels({ prices, env })), Effect.result),
+    );
+  expect((await get({}))._tag).toBe("Failure");
+  expect(refreshes).toBe(0);
+  const key = { GEMINI_API_KEY: "AIzaFAKEFAKEFAKEFAKEFAKE" };
+  expect((await get(key))._tag).toBe("Success");
+  expect((await get(key))._tag).toBe("Success");
+  expect(refreshes).toBe(1);
+});

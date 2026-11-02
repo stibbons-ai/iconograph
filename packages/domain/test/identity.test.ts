@@ -97,16 +97,21 @@ describe("Reference Photo assessment", () => {
     expect(result.identity?.accepted).toEqual([2]);
   });
 
+  const codes = (result: { warnings: readonly { code: string }[] }) =>
+    result.warnings.map((warning) => warning.code);
+
   test("warns below three accepted photos and not at three", () => {
     const two = assessReferencePhotos([withFace(at(0)), withFace(at(20))], thresholds);
-    expect(two.warnings).toEqual([
-      "Only 2 accepted Reference Photos; Likeness is less reliable below 3",
-    ]);
+    expect(codes(two)).toEqual(["few-photos"]);
     const one = assessReferencePhotos([withFace(at(0)), { kind: "no-face" }], thresholds);
-    expect(one.warnings).toEqual([
-      "Only 1 accepted Reference Photo; Likeness is less reliable below 3",
-    ]);
-    expect(one.photos[0]).toEqual({ verdict: "accepted", face, similarity: null });
+    expect(codes(one)).toEqual(["few-photos"]);
+    expect(one.warnings[0]!.message).toContain("1 accepted Reference Photo");
+    expect(one.photos[0]).toEqual({
+      verdict: "accepted",
+      face,
+      similarity: null,
+      similarityTo: null,
+    });
     expect(one.identity?.ceiling.source).toBe("single-photo-default");
     const three = assessReferencePhotos(
       [withFace(at(0)), withFace(at(20)), withFace(at(40))],
@@ -128,6 +133,7 @@ describe("Reference Photo assessment", () => {
       verdict: "accepted",
       face,
       similarity: expect.closeTo(Math.cos((65 * Math.PI) / 180), 10),
+      similarityTo: "accepted-anchor",
     });
     const flagged = assessReferencePhotos(
       [withFace(at(0)), withFace(at(10)), withFace(at(75))],
@@ -138,6 +144,7 @@ describe("Reference Photo assessment", () => {
       reason: "not-the-same-person",
       face,
       similarity: expect.closeTo(Math.cos((70 * Math.PI) / 180), 10),
+      similarityTo: "accepted-anchor",
     });
     expect(flagged.photos.slice(0, 2).map((photo) => photo.verdict)).toEqual([
       "accepted",
@@ -171,6 +178,7 @@ describe("Reference Photo assessment", () => {
       verdict: "accepted",
       face,
       similarity: expect.closeTo(Math.SQRT1_2, 10),
+      similarityTo: "accepted-anchor",
     });
     expect(result.warnings).toEqual([]);
   });
@@ -179,9 +187,7 @@ describe("Reference Photo assessment", () => {
     const result = assessReferencePhotos([withFace(at(0)), withFace(at(90))], thresholds);
     expect(result.photos.map((photo) => photo.verdict)).toEqual(["flagged", "flagged"]);
     expect(result.identity).toBeUndefined();
-    expect(result.warnings).toEqual([
-      "No Reference Photo was accepted, so there is no Identity Anchor",
-    ]);
+    expect(codes(result)).toEqual(["none-accepted"]);
   });
 
   test("uses the per-model Gate rather than a fixed value", () => {
@@ -248,12 +254,13 @@ describe("Reference Photo assessment", () => {
     }
   });
 
-  test("reports a flagged pair's similarity to each other", () => {
+  test("reports a flagged pair's similarity to each other, with its best-photo basis", () => {
     const result = assessReferencePhotos([withFace(at(0)), withFace(at(80))], thresholds);
     for (const photo of result.photos) {
       expect(photo).toMatchObject({
         verdict: "flagged",
         similarity: expect.closeTo(Math.cos((80 * Math.PI) / 180), 10),
+        similarityTo: "best-photo",
       });
     }
   });
@@ -277,6 +284,8 @@ describe("Reference Photo assessment", () => {
     expect(result.photos[1]).toMatchObject({
       similarity: expect.closeTo(cosineSimilarity(embeddings[1]!, embeddings[2]!), 10),
     });
+    // Once a pair is re-admitted, the flagged photos are measured against its anchor.
+    expect(result.photos[0]).toMatchObject({ similarityTo: "accepted-anchor" });
   });
 
   test("re-admits the most similar pair, not just any pair that reaches the Gate", () => {
@@ -347,9 +356,7 @@ describe("Reference Photo assessment", () => {
       value: expect.closeTo(0.33, 10),
       source: "median-pairwise",
     });
-    expect(result.warnings).toEqual([
-      "Identity Ceiling below the Identity Gate: the accepted photos barely agree with each other",
-    ]);
+    expect(codes(result)).toEqual(["ceiling-below-gate"]);
   });
 });
 
