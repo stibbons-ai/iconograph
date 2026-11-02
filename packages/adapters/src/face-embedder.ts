@@ -36,14 +36,10 @@ export const sfaceConfig = {
   model: "sface",
   detection: yunetDetection,
   thresholds: {
-    /** ADR-0008; to be calibrated on real pairs in Milestone 0 (issue #1). */
+    /** ADR-0008; confirmed by `faces:calibrate` on real pairs (issue #11). */
     identityGate: 0.4,
-    /**
-     * Provisional single-photo Identity Ceiling, between the Gate and typical
-     * same-person SFace similarity on good portraits; to be calibrated with the
-     * Gate in Milestone 0 (issue #1).
-     */
-    singlePhotoCeiling: 0.6,
+    /** Median of the per-Subject Identity Ceilings from `faces:calibrate` (issue #11). */
+    singlePhotoCeiling: 0.66,
   } satisfies IdentityThresholds,
 } as const;
 
