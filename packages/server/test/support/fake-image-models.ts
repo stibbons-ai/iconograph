@@ -4,10 +4,11 @@ import {
   ImageModels,
   type ImageRequest,
   type PriceQuote,
+  pricingSpec,
   Unpriced,
 } from "@iconograph/domain";
 import { Effect, Layer } from "effect";
-import { geminiCapabilities } from "@iconograph/adapters";
+import { geminiCapabilities, openaiCapabilities } from "@iconograph/adapters";
 import { fixture as faceFixture } from "../../../adapters/test/face-models";
 
 /** Licence-clear fixture portraits (see the adapters' fixtures README). */
@@ -53,11 +54,21 @@ export const FAKE_PRICE: PriceQuote = {
   source: { _tag: "override", asOf: "2026-11-01T00:00:00.000Z", ageSeconds: 0 },
 };
 
+/** A request the fake received, with the model it was sent to. */
+export interface FakeRequest extends ImageRequest {
+  readonly model: string;
+}
+
 export interface FakeImageModels {
   layer: Layer.Layer<ImageModels>;
-  /** Every request the fake received, in call order. */
-  requests: ImageRequest[];
+  /** Every request the fake received, in call order, across models. */
+  requests: FakeRequest[];
 }
+
+/** One script for all calls, or one per model id, each answered in that model's call order. */
+export type FakeScript =
+  | readonly FakeResponse[]
+  | Readonly<Record<string, readonly FakeResponse[]>>;
 
 export interface FakeOptions {
   /** Every model is `Unpriced`. */
@@ -66,22 +77,30 @@ export interface FakeOptions {
   transientCost?: number | null;
   /** The MIME type image responses claim (default `image/jpeg`). */
   imageType?: string;
-  /** Runs before each call answers, e.g. to break the image store. */
-  beforeAnswer?: (call: number) => Promise<void>;
+  /** Runs before each call answers, with its index in `requests` and its model. */
+  beforeAnswer?: (call: number, model: string) => Promise<void>;
   /** Runs on each `ImageModels.get`, with the recorded price when one is given. */
   beforeGet?: (price: PriceQuote | undefined) => void;
+  /** What a face image (`same`, `different`, `no-face`) costs; `garbage` keeps `FAKE_ACTUAL_MICROS`. */
+  actualMicros?: number;
+  /** Each call's estimate (default `FAKE_ESTIMATE_MICROS`). */
+  estimateMicros?: (request: ImageRequest) => number;
 }
 
 /**
  * An Image Model that answers from a script, for Run-engine tests. Any model id
- * resolves to it, unless `unpriced` is set. It declares the real Gemini
- * adapter's capabilities, so the engine plans as it would in production.
+ * resolves to it, unless `unpriced` is set. It declares the real adapters'
+ * capabilities (OpenAI's for OpenAI model ids, Gemini's for any other), so the
+ * engine plans as it would in production.
  */
-export function fakeImageModels(
-  script: readonly FakeResponse[],
-  options: FakeOptions = {},
-): FakeImageModels {
-  const requests: ImageRequest[] = [];
+export function fakeImageModels(script: FakeScript, options: FakeOptions = {}): FakeImageModels {
+  const requests: FakeRequest[] = [];
+  /** The scripted response to a model's call, by its index overall and for that model. */
+  const scripted = (id: string, call: number) => {
+    if (Array.isArray(script)) return (script as readonly FakeResponse[])[call];
+    const own = requests.filter(({ model }) => model === id).length - 1;
+    return (script as Readonly<Record<string, readonly FakeResponse[]>>)[id]?.[own];
+  };
   const respond = async (response: FakeResponse | undefined): Promise<CallResult> => {
     const usage = { outputImageTokens: 1680 };
     switch (response) {
@@ -95,7 +114,7 @@ export function fakeImageModels(
             mimeType: options.imageType ?? "image/jpeg",
           },
           usage,
-          costMicros: FAKE_ACTUAL_MICROS,
+          costMicros: options.actualMicros ?? FAKE_ACTUAL_MICROS,
         };
       case "garbage":
         return {
@@ -125,14 +144,19 @@ export function fakeImageModels(
   };
   const model = (id: string, price: PriceQuote | undefined): ImageModel => ({
     model: id,
-    capabilities: geminiCapabilities,
+    capabilities: pricingSpec(id).mode === "OpenAIImage" ? openaiCapabilities : geminiCapabilities,
     price: price ?? { ...FAKE_PRICE, model: id },
-    estimate: () => ({ micros: FAKE_ESTIMATE_MICROS, usage: { outputImageTokens: 1680 } }),
+    estimate: (request) => ({
+      micros: options.estimateMicros?.(request) ?? FAKE_ESTIMATE_MICROS,
+      usage: { outputImageTokens: 1680 },
+    }),
     call: (request) =>
       Effect.promise(async () => {
-        const call = requests.push(request) - 1;
-        await options.beforeAnswer?.(call);
-        return respond(script[call]);
+        const call = requests.push({ ...request, model: id }) - 1;
+        // Picked at once: other calls may arrive while `beforeAnswer` waits.
+        const response = scripted(id, call);
+        await options.beforeAnswer?.(call, id);
+        return respond(response);
       }),
   });
   return {

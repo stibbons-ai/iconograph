@@ -1,0 +1,8 @@
+{
+  "error": {
+    "message": "The model is currently overloaded with other requests. Please try again later.",
+    "type": "service_unavailable_error",
+    "param": null,
+    "code": "server_is_overloaded"
+  }
+}

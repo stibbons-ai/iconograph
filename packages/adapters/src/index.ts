@@ -4,6 +4,7 @@ export { OnnxFaceEmbedder, type OnnxFaceEmbedderOptions } from "./face-embedder"
 export { geminiCapabilities } from "./gemini";
 export { NativeImageModels, type NativeImageModelsOptions } from "./image-models";
 export { imagePath, isStorableImageType, storeImage } from "./image-store";
+export { openaiCapabilities } from "./openai";
 export {
   ensureModels,
   readModelLock,

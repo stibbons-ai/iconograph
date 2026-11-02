@@ -11,7 +11,7 @@ import { refreshOnFirstLookup } from "../src/cli";
 import {
   FAKE_PRICE,
   faceFixture,
-  type FakeResponse,
+  type FakeScript,
   subjectPhotos,
 } from "./support/fake-image-models";
 
@@ -22,11 +22,11 @@ const temporaryDirectory = temporaryDirectories("cli");
 async function invoke(
   entry: string,
   args: string[],
-  script: FakeResponse[] = [],
+  script: FakeScript = [],
   extraEnv: Record<string, string> = {},
 ) {
   // The real CLI must never see a real key from the developer's shell.
-  const { GEMINI_API_KEY: _, ...env } = Bun.env;
+  const { GEMINI_API_KEY: _, OPENAI_API_KEY: __, ...env } = Bun.env;
   const child = Bun.spawn([Bun.which("bun") ?? "bun", entry, ...args], {
     env: {
       ...env,
@@ -111,6 +111,85 @@ test("engine warnings, even while shutting down, are JSON lines on stderr; stdou
   ]);
 }, 60_000);
 
+test("--lane runs a Gemini and an OpenAI Lane, each with its photos and Prompt; output per Lane", async () => {
+  const directory = await temporaryDirectory();
+  const prompt = join(directory, "openai-prompt.txt");
+  await writeFile(prompt, "A studio headshot of the person in the reference photos.\n");
+  const common = ["--db", join(directory, "runs.db"), "--data-dir", join(directory, "data")];
+  const { stdout, lines, exitCode } = await invoke(
+    withFakes,
+    [
+      ...common,
+      "--candidates",
+      "1",
+      "--lane",
+      "gemini",
+      "--lane",
+      `openai:flare,photos=2,prompt=${prompt}`,
+      ...subjectPhotos,
+    ],
+    { "gemini-nano-banana-2.1": ["same"], "gpt-image-2.5-flare": ["different"] },
+  );
+  expect(exitCode).toBe(0);
+  expect(lines.map((line) => JSON.parse(line))).toEqual([
+    expect.objectContaining({
+      event: "estimate",
+      estimatedUsd: 0.2,
+      lanes: [
+        expect.objectContaining({ lane: 0, model: "gemini-nano-banana-2.1", candidates: 1 }),
+        expect.objectContaining({ lane: 1, model: "gpt-image-2.5-flare", candidates: 1 }),
+      ],
+    }),
+  ]);
+  const report = JSON.parse(stdout);
+  expect(report.lanes).toHaveLength(2);
+  expect(report.lanes[0]).toMatchObject({
+    model: "gemini-nano-banana-2.1",
+    stopReason: "iteration-limit",
+    characterReferences: [2, 1],
+    candidates: [expect.objectContaining({ outcome: "Scored" })],
+  });
+  expect(report.lanes[0].initialPrompt).toContain("headshot");
+  expect(report.lanes[1]).toMatchObject({
+    model: "gpt-image-2.5-flare",
+    stopReason: "iteration-limit",
+    initialPrompt: "A studio headshot of the person in the reference photos.",
+    characterReferences: [2],
+    candidates: [expect.objectContaining({ outcome: "Gated" })],
+  });
+}, 60_000);
+
+test("--lane openai and openai:sunburst drive Sunburst; a prompt path may hold commas", async () => {
+  const directory = await temporaryDirectory();
+  const prompt = join(directory, "prompt, for openai.txt");
+  await writeFile(prompt, "A bright studio headshot.");
+  const common = ["--db", join(directory, "runs.db"), "--data-dir", join(directory, "data")];
+  const { stdout, exitCode } = await invoke(
+    withFakes,
+    [
+      ...common,
+      "--candidates",
+      "1",
+      "--lane",
+      `openai,photos=1,prompt=${prompt}`,
+      "--lane",
+      "openai:sunburst",
+      ...subjectPhotos,
+    ],
+    { "gpt-image-2.5-sunburst": ["same", "same"] },
+  );
+  expect(exitCode).toBe(0);
+  const report = JSON.parse(stdout);
+  expect(report.lanes.map(({ model }: { model: string }) => model)).toEqual([
+    "gpt-image-2.5-sunburst",
+    "gpt-image-2.5-sunburst",
+  ]);
+  expect(report.lanes[0]).toMatchObject({
+    initialPrompt: "A bright studio headshot.",
+    characterReferences: [1],
+  });
+}, 60_000);
+
 test("help documents the arguments, the Budget and the key", async () => {
   const { stdout, exitCode } = await invoke(cli, ["--help"]);
   expect(exitCode).toBe(0);
@@ -119,7 +198,11 @@ test("help documents the arguments, the Budget and the key", async () => {
     "--candidates N",
     "--look FILE",
     "--pin PHOTO",
+    "--lane SPEC",
+    "openai:flare",
     "GEMINI_API_KEY",
+    "OPENAI_API_KEY",
+    "30 days",
     "store=false",
     "read",
   ]) {
@@ -152,6 +235,26 @@ test("errors are one JSON line on stderr with a nonzero exit and nothing on stdo
     [withFakes, [...common, faceFixture("earth-apollo17.jpg")], "No Reference Photo was accepted"],
     // The real CLI, with GEMINI_API_KEY cleared: fails before any call or price refresh.
     [cli, [...common, ...subjectPhotos], "GEMINI_API_KEY is not set"],
+    [cli, [...common, "--lane", "openai", ...subjectPhotos], "OPENAI_API_KEY is not set"],
+    [withFakes, [...common, "--lane", "dalle", ...subjectPhotos], "unknown Lane dalle"],
+    [
+      withFakes,
+      [...common, "--lane", "openai,photos=x", ...subjectPhotos],
+      "photos expects a number",
+    ],
+    [withFakes, [...common, "--lane", "openai,photos=3", ...subjectPhotos], "A Lane lists photo 3"],
+    [withFakes, [...common, "--lane", "openai,size=2K", ...subjectPhotos], "expected photos="],
+    [
+      withFakes,
+      [...common, "--lane", `openai,prompt=${join(directory, "missing.txt")}`, ...subjectPhotos],
+      "is not a readable file",
+    ],
+    [
+      withFakes,
+      [...common, "--lane", "openai,prompt=p.txt,photos=1", ...subjectPhotos],
+      "photos= must come before prompt=",
+    ],
+    [cli, ["read", ...common, "--run-id", "x", "--lane", "openai"], "read takes only"],
     [cli, ["read", ...common, "--run-id", "missing"], "Run not found"],
     [cli, ["read", "--db", join(directory, "typo.db"), "--run-id", "x"], "no such database file"],
     [cli, ["--unknown"], "Unknown option"],

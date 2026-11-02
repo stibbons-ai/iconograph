@@ -40,6 +40,24 @@ test("two face choices for one photo are rejected", () => {
   ).toThrow("Two face choices for the same photo");
 });
 
+test("a Lane's photos are distinct photos of the Run; its Prompt is not blank and at most 32,000 characters", () => {
+  const twoPhotos = { ...valid, photos: ["a.jpg", "b.jpg"] };
+  const lane = (fields: object) => ({ ...twoPhotos, lanes: [{ model: "m", ...fields }] });
+  expect(decode(lane({ photos: [2], prompt: "x".repeat(32_000) })).lanes[0]).toEqual({
+    model: "m",
+    photos: [2],
+    prompt: "x".repeat(32_000),
+  });
+  expect(() => decode(lane({ photos: [3] }))).toThrow(
+    "A Lane lists photo 3, but the Run has 2 Reference Photos",
+  );
+  expect(() => decode(lane({ photos: [1, 1] }))).toThrow("A Lane lists the same photo twice");
+  expect(() => decode(lane({ photos: [] }))).toThrow();
+  for (const prompt of ["", "  \n", "x".repeat(32_001)]) {
+    expect(() => decode(lane({ prompt }))).toThrow("A Lane's Prompt must be 1 to 32000 characters");
+  }
+});
+
 test("transient errors are retried twice, after 1 s then 2 s (issue #1)", () => {
   expect(DEFAULT_RETRY_POLICY).toEqual({ maxRetries: 2, baseDelayMs: 1000 });
 });
