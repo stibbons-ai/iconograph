@@ -1,0 +1,25 @@
+{
+  "created": 1793630000,
+  "background": "opaque",
+  "data": [
+    {
+      "b64_json": "/9j/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAAQABADASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAT/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFAEBAAAAAAAAAAAAAAAAAAAABv/EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAMAwEAAhEDEQA/AKQAI2f/2Q=="
+    }
+  ],
+  "output_format": "jpeg",
+  "quality": "high",
+  "size": "1024x1024",
+  "usage": {
+    "input_tokens": 6420,
+    "input_tokens_details": {
+      "text_tokens": 120,
+      "image_tokens": 6300
+    },
+    "output_tokens": 1756,
+    "total_tokens": 8176,
+    "output_tokens_details": {
+      "image_tokens": 1756,
+      "text_tokens": 0
+    }
+  }
+}

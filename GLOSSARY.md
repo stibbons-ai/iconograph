@@ -50,7 +50,7 @@ How a Candidate ended: **Refused** (the Image Model declined), **Failed** (error
 _Avoid_: Status, state
 
 **Character Reference**:
-One of the accepted Reference Photos sent to an Image Model so it keeps the Subject's identity; an Image Model takes only a few (4 for Gemini), chosen per Lane.
+One of the accepted Reference Photos sent to an Image Model so it keeps the Subject's identity; an Image Model takes a limited number, declared per Image Model (Gemini 4, OpenAI 16), chosen per Lane.
 _Avoid_: Reference image, input image
 
 **Pick**:

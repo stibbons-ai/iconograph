@@ -16,9 +16,43 @@ export const MAX_BUDGET_USD = 1_000_000;
 
 /** The Image Model of the M0 Gemini Lane. */
 export const GEMINI_IMAGE_MODEL = "gemini-nano-banana-2.1";
+/** The default Image Model of an OpenAI Lane. */
+export const OPENAI_IMAGE_MODEL = "gpt-image-2.5-sunburst";
+/** The faster OpenAI Image Model, selectable per Lane. */
+export const OPENAI_FLARE_IMAGE_MODEL = "gpt-image-2.5-flare";
+
+/** The longest Prompt a Lane takes: OpenAI's image edit limit (32,000 characters). */
+export const MAX_PROMPT_LENGTH = 32_000;
 
 /** A number from 1, as photos and faces are numbered in the Reference Photo report. */
 const Ordinal = Schema.Int.check(Schema.isGreaterThanOrEqualTo(1));
+
+/**
+ * One Lane of a Run: its Image Model, and optionally the Reference Photos it
+ * may send (photo numbers; default all) and its initial Prompt (default the
+ * one built from the frozen Target Look).
+ */
+export const LaneRequest = Schema.Struct({
+  model: Schema.String,
+  photos: Schema.optionalKey(
+    Schema.Array(Ordinal).check(
+      Schema.isMinLength(1),
+      Schema.makeFilter((photos: readonly number[]) =>
+        new Set(photos).size === photos.length ? true : "A Lane lists the same photo twice",
+      ),
+    ),
+  ),
+  prompt: Schema.optionalKey(
+    Schema.String.check(
+      Schema.makeFilter((prompt: string) =>
+        prompt.trim() !== "" && prompt.length <= MAX_PROMPT_LENGTH
+          ? true
+          : `A Lane's Prompt must be 1 to ${MAX_PROMPT_LENGTH} characters and not blank`,
+      ),
+    ),
+  ),
+});
+export type LaneRequest = typeof LaneRequest.Type;
 
 /** Everything a Run starts from; stored with the Run and never changed. */
 export const RunRequest = Schema.Struct({
@@ -51,9 +85,20 @@ export const RunRequest = Schema.Struct({
   ),
   /** Candidates per Iteration in each Lane. */
   candidates: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: MAX_CANDIDATES })),
-  /** One Lane per Image Model. */
-  lanes: Schema.Array(Schema.Struct({ model: Schema.String })).check(Schema.isMinLength(1)),
-});
+  /** One or more Lanes, each driving one Image Model; a Lane's photos must be among the Run's. */
+  lanes: Schema.Array(LaneRequest).check(Schema.isMinLength(1)),
+}).check(
+  Schema.makeFilter(
+    ({ photos, lanes }: { photos: readonly string[]; lanes: readonly LaneRequest[] }) => {
+      const outside = lanes
+        .flatMap(({ photos: own = [] }) => own)
+        .find((photo) => photo > photos.length);
+      return outside === undefined
+        ? true
+        : `A Lane lists photo ${outside}, but the Run has ${photos.length} Reference Photo${photos.length === 1 ? "" : "s"}`;
+    },
+  ),
+);
 export type RunRequest = typeof RunRequest.Type;
 
 /**

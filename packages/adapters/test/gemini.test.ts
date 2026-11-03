@@ -1,12 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
-  type CallGate,
-  type CallResult,
-  generateCandidate,
-  ImageModels,
-  type ImageRequest,
-  toMicros,
-} from "@iconograph/domain";
+import { ImageModels, type ImageRequest, toMicros } from "@iconograph/domain";
 import { Duration, Effect } from "effect";
 import {
   GEMINI_API_REVISION,
@@ -16,29 +9,18 @@ import {
 } from "../src/gemini";
 import { NativeImageModels } from "../src/image-models";
 import { geminiTestPrice as price, recordedGemini as recorded } from "./gemini-fixtures";
+import {
+  generateRecorded,
+  hangingFetch,
+  recordedReplies,
+  type Sent,
+  scriptedFetch,
+} from "./scripted-fetch";
 
 const API_KEY = "test-key-NOT-REAL-0123456789";
 const { pricing } = price;
 
-interface Sent {
-  url: string;
-  init: RequestInit;
-}
-
-/** A fetch that answers each call from the next scripted response and records what was sent. */
-function scriptedFetch(responses: readonly (() => Promise<Response>)[]) {
-  const sent: Sent[] = [];
-  const fetch: GeminiFetch = async (url, init) => {
-    sent.push({ url, init });
-    const next = responses[sent.length - 1];
-    if (!next) throw new Error(`Unexpected call ${sent.length}`);
-    return next();
-  };
-  return { fetch, sent };
-}
-
-const reply = (status: number, name: string) => async () =>
-  new Response(await recorded(name), { status, headers: { "content-type": "application/json" } });
+const reply = recordedReplies(recorded);
 
 const reference = (byte: number) => ({
   bytes: new Uint8Array([0xff, 0xd8, 0xff, byte]),
@@ -53,23 +35,7 @@ const request: ImageRequest = {
 const modelWith = (fetch: GeminiFetch) =>
   geminiImageModel({ model: "gemini-nano-banana-2.1", apiKey: API_KEY, price, fetch });
 
-/** Generate one Candidate with retries; every attempt is let through and recorded. */
-async function generate(fetch: GeminiFetch) {
-  const settled: CallResult[] = [];
-  const gate: CallGate = {
-    reserve: () => Effect.void,
-    settle: (_, result) => Effect.sync(() => void settled.push(result)),
-  };
-  const generation = await Effect.runPromise(
-    generateCandidate({
-      model: modelWith(fetch),
-      request,
-      gate,
-      policy: { maxRetries: 2, baseDelayMs: 0 },
-    }),
-  );
-  return { generation, settled };
-}
+const generate = (fetch: GeminiFetch) => generateRecorded(modelWith(fetch), request);
 
 describe("Gemini adapter against recorded responses", () => {
   test("sends one stateless 2K interaction with the prompt and references, key in a header only", async () => {
@@ -408,21 +374,13 @@ describe("Gemini adapter against recorded responses", () => {
   });
 
   test("interrupting a call aborts its request", async () => {
-    let aborted = false;
-    const fetch: GeminiFetch = (_, init) => {
-      const { promise, reject } = Promise.withResolvers<Response>();
-      init.signal?.addEventListener("abort", () => {
-        aborted = true;
-        reject(new Error("aborted"));
-      });
-      return promise;
-    };
+    const { fetch, state } = hangingFetch();
     await Effect.runPromise(
       modelWith(fetch)
         .call(request)
         .pipe(Effect.timeout(Duration.millis(20)), Effect.ignore),
     );
-    expect(aborted).toBe(true);
+    expect(state.aborted).toBe(true);
   });
 
   test("the estimate covers a 2K image and grows with the references", () => {

@@ -39,9 +39,9 @@ export async function withCleanup<A>(
   return result;
 }
 
-/** `error[key]` when `error` is an object that has it. */
-function field(error: unknown, key: string): unknown {
-  return typeof error === "object" && error !== null ? Reflect.get(error, key) : undefined;
+/** `value[key]` when `value` is an object that has it. */
+export function field(value: unknown, key: string): unknown {
+  return typeof value === "object" && value !== null ? Reflect.get(value, key) : undefined;
 }
 
 /**

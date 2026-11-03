@@ -8,6 +8,8 @@ import { LaneGenerated, LaneInput, LaneResult, RunResult, type EstimateEvent } f
 
 export const RUN_WORKFLOW_ID = "run";
 export const LANE_WORKFLOW_ID = "lane";
+/** How many Lanes of a Run run at a time; more wait their turn. */
+export const LANE_CONCURRENCY = 4;
 
 /** `foreach` needs a mutable array type between steps. */
 const Lanes = Schema.mutable(Schema.Array(LaneInput));
@@ -92,7 +94,7 @@ export function createRunWorkflow(runtime: ManagedRuntime.ManagedRuntime<RunServ
       // Mastra types a workflow's `description` and `metadata` as possibly undefined, which a
       // step's optional fields reject under exactOptionalPropertyTypes; runtime is unaffected.
       .foreach(lane as typeof lane & { description: string; metadata: Record<string, never> }, {
-        concurrency: 4,
+        concurrency: LANE_CONCURRENCY,
       })
       .then(finish)
       .commit()

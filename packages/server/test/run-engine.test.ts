@@ -6,21 +6,26 @@ import { errorLine, imagePath, NativeImageModels } from "@iconograph/adapters";
 import {
   DEFAULT_TARGET_LOOK,
   type ImageModels,
+  initialPrompt,
   type PriceQuote,
   type RunRequest,
 } from "@iconograph/domain";
 import { Effect, type Layer } from "effect";
 import { realFaceEmbedder } from "../../adapters/test/face-models";
 import { geminiTestPrice as price, recordedGemini } from "../../adapters/test/gemini-fixtures";
+import {
+  openaiTestPrice as openaiPrice,
+  recordedOpenAI,
+} from "../../adapters/test/openai-fixtures";
 import { tamper } from "../../adapters/test/tamper";
 import { temporaryDirectories } from "../../adapters/test/temporary-directory";
-import { createRunApplication, type RunWarning } from "../src";
+import { createRunApplication, readRunReport, type RunWarning } from "../src";
 import {
   FAKE_ACTUAL_MICROS,
   FAKE_ESTIMATE_MICROS,
   faceFixture,
   type FakeOptions,
-  type FakeResponse,
+  type FakeScript,
   fakeImageModels,
   subjectPhotos,
 } from "./support/fake-image-models";
@@ -62,7 +67,7 @@ async function runApplication(
 
 /** The same, with the fake Image Model. */
 async function setup(
-  script: readonly FakeResponse[],
+  script: FakeScript,
   options: FakeOptions = {},
   warn?: (warning: RunWarning) => void,
 ) {
@@ -595,7 +600,242 @@ describe("Run engine with a fake Image Model", () => {
   );
 });
 
-describe("Run engine with the real Gemini adapter and a scripted network", () => {
+/** Five accepted photos; photo 5 is a group photo whose face 2 is the Subject. */
+const fivePhotos = {
+  photos: [
+    "biden-2022.jpg",
+    "biden-2013.jpg",
+    "biden-2021.jpg",
+    "biden-2021.heic",
+    "obama-biden-2015.jpg",
+  ].map(faceFixture),
+  faceChoices: [{ photo: 5, face: 2 }],
+};
+
+describe("Run engine with two Lanes", () => {
+  const GEMINI = "gemini-nano-banana-2.1";
+  const OPENAI = "gpt-image-2.5-sunburst";
+
+  test("Gemini and OpenAI Lanes run concurrently, each with its own photos, Prompt and reference limit", async () => {
+    // Every call waits until both Lanes have a call in flight: Lanes run one after the
+    // other would never get there, and the test times out.
+    const models = new Set<string>();
+    const overlap = Promise.withResolvers<void>();
+    const { application, fake } = await setup(
+      { [GEMINI]: ["same", "refuse"], [OPENAI]: ["same", "different"] },
+      {
+        beforeAnswer: async (_, model) => {
+          models.add(model);
+          if (models.size === 2) overlap.resolve();
+          await overlap.promise;
+        },
+      },
+    );
+    try {
+      const geminiPrompt = "A studio headshot of the person in the reference photos.";
+      const { runId, lanes } = await application.start(
+        request({
+          ...fivePhotos,
+          candidates: 2,
+          lanes: [{ model: GEMINI, photos: [1, 3], prompt: geminiPrompt }, { model: OPENAI }],
+        }),
+      );
+      expect(lanes).toEqual([
+        { runId, lane: 0, stopReason: "iteration-limit" },
+        { runId, lane: 1, stopReason: "iteration-limit" },
+      ]);
+      const sentTo = (model: string) => fake.requests.filter((sent) => sent.model === model);
+      expect(sentTo(GEMINI)).toHaveLength(2);
+      expect(sentTo(OPENAI)).toHaveLength(2);
+      for (const sent of sentTo(GEMINI)) {
+        expect(sent.prompt).toBe(geminiPrompt);
+        expect(sent.references).toHaveLength(2);
+      }
+      // The OpenAI Lane takes every accepted photo (up to 16) and the Target Look's Prompt.
+      for (const sent of sentTo(OPENAI)) {
+        expect(sent.prompt).toContain(DEFAULT_TARGET_LOOK.clothing);
+        expect(sent.references).toHaveLength(5);
+        expect(sent.size).toBe("1024x1024");
+      }
+
+      const report = await application.report(runId);
+      const [gemini, openai] = report.lanes;
+      expect(gemini).toMatchObject({ model: GEMINI, initialPrompt: geminiPrompt });
+      expect([...gemini!.characterReferences].sort()).toEqual([1, 3]);
+      expect(gemini!.candidates.map(({ outcome }) => outcome)).toEqual(["Scored", "Refused"]);
+      expect(openai).toMatchObject({ model: OPENAI, initialPrompt: sentTo(OPENAI)[0]!.prompt });
+      expect([...openai!.characterReferences].sort()).toEqual([1, 2, 3, 4, 5]);
+      expect(openai!.candidates.map(({ outcome }) => outcome).sort()).toEqual(["Gated", "Scored"]);
+    } finally {
+      await application.close();
+    }
+  }, 60_000);
+
+  test("concurrent Lanes share one Budget and never overspend it; each Lane says why it stopped", async () => {
+    // Each call costs exactly its $0.10 estimate; $0.35 fits three of the four first calls the two
+    // Lanes want. Every call is held until three are in flight: no Lane reserves more than two,
+    // so both Lanes hold reservations at once, and the Budget must count the other Lane's too.
+    const threeInFlight = Promise.withResolvers<void>();
+    const { application, fake } = await setup(
+      { [GEMINI]: ["same", "same"], [OPENAI]: ["same", "same"] },
+      {
+        actualMicros: FAKE_ESTIMATE_MICROS,
+        beforeAnswer: (call) => {
+          if (call >= 2) threeInFlight.resolve();
+          return threeInFlight.promise;
+        },
+      },
+    );
+    try {
+      const { runId, lanes } = await application.start(
+        request({ budgetUsd: 0.35, candidates: 2, lanes: [{ model: GEMINI }, { model: OPENAI }] }),
+      );
+      expect(fake.requests).toHaveLength(3);
+      expect(new Set(fake.requests.map(({ model }) => model))).toEqual(new Set([GEMINI, OPENAI]));
+      const report = await application.report(runId);
+      // What every call commits: its actual cost once known, else its reserved estimate.
+      const committed = [
+        ...report.lanes.flatMap(({ candidates }) => candidates.flatMap(({ calls }) => calls)),
+        ...report.unattributedCalls,
+      ].reduce((sum, call) => sum + (call.actualUsd ?? call.estimatedUsd), 0);
+      expect(committed).toBeLessThanOrEqual(0.35);
+      expect(report.lanes.flatMap(({ candidates }) => candidates)).toHaveLength(3);
+      // A Lane that got fewer than its two Candidates stopped for the Budget.
+      for (const lane of report.lanes) {
+        const stopReason = lane.candidates.length < 2 ? "budget-exhausted" : "iteration-limit";
+        expect(lane.stopReason).toBe(stopReason);
+        expect(lanes[lane.lane]!.stopReason).toBe(stopReason);
+      }
+    } finally {
+      await application.close();
+    }
+  }, 60_000);
+
+  test("two Lanes' retries race for the last Budget slot: exactly the calls that fit are made", async () => {
+    // $0.35 fits three $0.10 calls. Both first calls are held until both are in flight, then fail
+    // transiently at an unknown cost (each counts its $0.10), so the two Lanes' retries race for
+    // the one remaining slot.
+    const bothInFlight = Promise.withResolvers<void>();
+    const { application, fake } = await setup(
+      { [GEMINI]: ["transient", "same"], [OPENAI]: ["transient", "same"] },
+      {
+        transientCost: null,
+        beforeAnswer: (call) => {
+          if (call >= 1) bothInFlight.resolve();
+          return bothInFlight.promise;
+        },
+      },
+    );
+    try {
+      const { runId, lanes } = await application.start(
+        request({ budgetUsd: 0.35, candidates: 1, lanes: [{ model: GEMINI }, { model: OPENAI }] }),
+      );
+      expect(fake.requests).toHaveLength(3);
+      const report = await application.report(runId);
+      const outcomes = report.lanes.map(({ candidates }) => candidates[0]!);
+      expect(outcomes.filter(({ outcome }) => outcome === "Scored")).toHaveLength(1);
+      expect(outcomes.filter(({ outcome }) => outcome === "Failed")).toEqual([
+        expect.objectContaining({
+          reason: expect.stringContaining("retry not made: Budget exhausted"),
+        }),
+      ]);
+      // The Lane whose retry didn't fit stopped for the Budget; the other ran its Iteration.
+      expect(lanes.map(({ stopReason }) => stopReason).sort()).toEqual([
+        "budget-exhausted",
+        "iteration-limit",
+      ]);
+      expect(report.totals.estimatedUsd).toBeLessThanOrEqual(0.35);
+    } finally {
+      await application.close();
+    }
+  }, 60_000);
+
+  test("the estimate prices each Lane's calls with that Lane's own Prompt", async () => {
+    const events: unknown[] = [];
+    // One micro-dollar per Prompt character, so the estimate shows which Prompt was used.
+    const { application } = await setup(["same", "same"], {
+      estimateMicros: ({ prompt }) => prompt.length,
+    });
+    try {
+      const own = "A studio headshot.";
+      await application.start(
+        request({ candidates: 1, lanes: [{ model: GEMINI, prompt: own }, { model: OPENAI }] }),
+        (event) => events.push(event),
+      );
+      const defaultLength = initialPrompt(DEFAULT_TARGET_LOOK).length;
+      expect(events).toEqual([
+        expect.objectContaining({
+          lanes: [
+            expect.objectContaining({ lane: 0, perCallUsd: own.length / 1e6 }),
+            expect.objectContaining({ lane: 1, perCallUsd: defaultLength / 1e6 }),
+          ],
+        }),
+      ]);
+    } finally {
+      await application.close();
+    }
+  }, 60_000);
+
+  test("read shows each Lane's stored Prompt, and null for a Lane that lost its Iteration (died mid-prepare)", async () => {
+    const { application, databasePath, dataDirectory } = await setup([]);
+    try {
+      const own = "A studio headshot.";
+      const look = { ...DEFAULT_TARGET_LOOK, clothing: "a green knitted jumper" };
+      // A Budget below one call: the Run makes no call and has no Candidates.
+      const { runId } = await application.start(
+        request({
+          budgetUsd: 0.05,
+          targetLook: look,
+          lanes: [{ model: GEMINI, prompt: own }, { model: OPENAI }],
+        }),
+      );
+      const stored = (await application.report(runId)).lanes.map(
+        ({ initialPrompt }) => initialPrompt,
+      );
+      expect(stored).toEqual([own, initialPrompt(look)]);
+      // The report reads what was stored (and sent), not a Prompt rebuilt from today's template.
+      await tamper(databasePath, "UPDATE iterations SET prompt = 'as sent' WHERE lane = 1");
+      await tamper(databasePath, "DELETE FROM iterations WHERE lane = 0");
+      const report = await application.report(runId);
+      expect(report.lanes.map(({ initialPrompt }) => initialPrompt)).toEqual([null, "as sent"]);
+      // Any other fault reading a Prompt still fails `read`, rather than showing null. The table is
+      // renamed with the application closed, and `read` opens its own read-only connection (which
+      // creates no tables), so every platform sees the schema change.
+      await application.close();
+      await tamper(databasePath, "ALTER TABLE iterations RENAME TO iterations_moved");
+      await expect(readRunReport(databasePath, dataDirectory, runId)).rejects.toThrow(
+        "Loading the Prompt of Iteration 1 failed",
+      );
+    } finally {
+      await application.close().catch(() => {});
+    }
+  }, 60_000);
+
+  test("a Lane whose photos are all rejected, or a pin outside a Lane's photos, fails the Run before any call", async () => {
+    const { application, fake } = await setup(["same"]);
+    try {
+      const photos = [...subjectPhotos, faceFixture("earth-apollo17.jpg")];
+      await expect(
+        application.start(
+          request({ photos, lanes: [{ model: GEMINI }, { model: OPENAI, photos: [3] }] }),
+        ),
+      ).rejects.toThrow(`None of the photos of Lane 1 (${OPENAI}) (3) was accepted`);
+      await expect(
+        application.start(
+          request({ pins: [2], lanes: [{ model: GEMINI }, { model: OPENAI, photos: [1] }] }),
+        ),
+      ).rejects.toThrow(`Pinned photo 2 is not among the photos of Lane 1 (${OPENAI})`);
+      await expect(
+        application.start(request({ lanes: [{ model: OPENAI, photos: [3] }] })),
+      ).rejects.toThrow("A Lane lists photo 3, but the Run has 2 Reference Photos");
+      expect(fake.requests).toHaveLength(0);
+    } finally {
+      await application.close();
+    }
+  }, 60_000);
+});
+
+describe("Run engine with the real adapters and a scripted network", () => {
   const SENTINEL = "SENTINEL-KEY-0123456789";
 
   test("with 5 accepted photos it sends at most 4 references at 2K and stores the key nowhere", async () => {
@@ -697,6 +937,69 @@ describe("Run engine with the real Gemini adapter and a scripted network", () =>
       });
     } finally {
       await application.close();
+    }
+  }, 60_000);
+
+  test("an OpenAI Lane beside a Gemini Lane sends up to 16 references, costs calls from usage and stores no key", async () => {
+    const OPENAI_SENTINEL = "sk-SENTINEL-KEY-0123456789";
+    const geminiRecorded = await recordedGemini("completed-image.json");
+    const openaiRecorded = await recordedOpenAI("image-with-usage.json");
+    const openaiBodies: string[] = [];
+    const prices: Record<string, PriceQuote> = {
+      [price.model]: price,
+      [openaiPrice.model]: openaiPrice,
+    };
+    const layer = NativeImageModels({
+      prices: { lookup: (model) => Effect.succeed(prices[model]!) },
+      env: { GEMINI_API_KEY: SENTINEL, OPENAI_API_KEY: OPENAI_SENTINEL },
+      geminiFetch: async () => new Response(geminiRecorded, { status: 200 }),
+      openaiFetch: async (_, init) => {
+        openaiBodies.push(String(init.body));
+        return new Response(openaiRecorded, { status: 200 });
+      },
+    });
+    const { application, databasePath } = await runApplication(layer);
+    try {
+      const { runId } = await application.start(
+        request({
+          ...fivePhotos,
+          candidates: 1,
+          lanes: [{ model: price.model }, { model: openaiPrice.model }],
+        }),
+      );
+      const report = await application.report(runId);
+      const [gemini, openai] = report.lanes;
+      expect(gemini!.characterReferences).toHaveLength(4);
+      expect(openai!.characterReferences).toHaveLength(5);
+      expect(openaiBodies).toHaveLength(1);
+      expect(JSON.parse(openaiBodies[0]!)).toMatchObject({
+        model: openaiPrice.model,
+        quality: "high",
+        size: "1024x1024",
+        n: 1,
+        images: Array(5).fill({ image_url: expect.stringMatching(/^data:image\/jpeg;base64,/) }),
+      });
+      // The fixture's usage: 120 text × $5/M + 6300 image × $8/M + 1756 output × $30/M.
+      expect(openai!.candidates[0]!.calls[0]).toMatchObject({
+        result: "image",
+        actualUsd: 0.10368,
+      });
+      expect(openai!.actualUsd).toBe(0.10368);
+      const snapshot = JSON.stringify(await application.snapshot(runId));
+      await application.close();
+      for (const text of [
+        snapshot,
+        JSON.stringify(report),
+        await Bun.file(databasePath).text(),
+        (await Bun.file(`${databasePath}-wal`).exists())
+          ? await Bun.file(`${databasePath}-wal`).text()
+          : "",
+      ]) {
+        expect(text).not.toContain(OPENAI_SENTINEL);
+        expect(text).not.toContain(SENTINEL);
+      }
+    } finally {
+      await application.close().catch(() => {});
     }
   }, 60_000);
 });

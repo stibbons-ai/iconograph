@@ -37,6 +37,14 @@ import {
 } from "@iconograph/domain";
 import { Effect, Schema } from "effect";
 import { errorMessage } from "./errors";
+import {
+  base64Of,
+  Count,
+  encodeOncePerRequest,
+  isTransientStatus,
+  parseJson,
+  promptTokens,
+} from "./vendor-http";
 
 export const GEMINI_INTERACTIONS_URL =
   "https://generativelanguage.googleapis.com/v1beta/interactions";
@@ -87,8 +95,6 @@ export interface GeminiImageModelOptions {
   /** Abort one call (including its body) after this long; default 180 s. */
   timeoutMs?: number;
 }
-
-const Count = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
 
 const GeminiUsage = Schema.Struct({
   total_input_tokens: Schema.optionalKey(Count),
@@ -199,8 +205,6 @@ function geminiCostMicros(usage: Usage, pricing: GeminiImagePricing): number {
   );
 }
 
-const isTransientStatus = (status: number) => status === 408 || status === 429 || status >= 500;
-
 /**
  * Classify a 200 response body. Only a model that answered with text and no
  * image block declined; any other missing image is a parser or shape problem
@@ -282,14 +286,6 @@ function classifyHttpError(status: number, body: unknown): CallResult {
     : { kind: "failed", reason, usage: null, costMicros: 0 };
 }
 
-const parseJson = (text: string): unknown => {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return undefined;
-  }
-};
-
 /**
  * One Gemini Image Model. Each `call` is one interaction with `store: false`
  * and one inline 2K image response; Gemini has no `n`, so N Candidates are N calls.
@@ -302,9 +298,8 @@ export function geminiImageModel(options: GeminiImageModelOptions): ImageModel {
 
   const estimate = (request: ImageRequest): CallEstimate => {
     const usage = {
-      // About 3 characters per token for English text, rounded up: a high estimate.
       inputTokens:
-        request.references.length * INPUT_TOKENS_PER_IMAGE + Math.ceil(request.prompt.length / 3),
+        request.references.length * INPUT_TOKENS_PER_IMAGE + promptTokens(request.prompt),
       outputImageTokens: 0,
       outputTextTokens: TEXT_AND_THINKING_ALLOWANCE,
       thoughtTokens: 0,
@@ -315,33 +310,26 @@ export function geminiImageModel(options: GeminiImageModelOptions): ImageModel {
     };
   };
 
-  // Every Candidate of an Iteration sends the same request: encode its references once.
-  const bodies = new WeakMap<ImageRequest, string>();
-  const bodyOf = (request: ImageRequest) => {
-    let body = bodies.get(request);
-    if (body === undefined) {
-      body = JSON.stringify({
-        model,
-        input: [
-          { type: "text", text: request.prompt },
-          ...request.references.map(({ bytes, mimeType }) => ({
-            type: "image",
-            mime_type: mimeType,
-            data: Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("base64"),
-          })),
-        ],
-        response_format: {
+  const bodyOf = encodeOncePerRequest((request) =>
+    JSON.stringify({
+      model,
+      input: [
+        { type: "text", text: request.prompt },
+        ...request.references.map(({ bytes, mimeType }) => ({
           type: "image",
-          image_size: request.size,
-          mime_type: "image/jpeg",
-          delivery: "inline",
-        },
-        store: false,
-      });
-      bodies.set(request, body);
-    }
-    return body;
-  };
+          mime_type: mimeType,
+          data: base64Of(bytes),
+        })),
+      ],
+      response_format: {
+        type: "image",
+        image_size: request.size,
+        mime_type: "image/jpeg",
+        delivery: "inline",
+      },
+      store: false,
+    }),
+  );
 
   // Interrupting the Effect aborts the request, as does the per-call timeout.
   const call = (request: ImageRequest) =>

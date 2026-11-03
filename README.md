@@ -57,7 +57,7 @@ validation use plain commands; `check` composes the scripts and finishes with `b
 Outside the shell, set both variables when invoking Bun or Mastra directly instead of the scripts.
 
 ```sh
-# Start a Run (see "Runs" below); needs GEMINI_API_KEY.
+# Start a Run (see "Runs" below); needs GEMINI_API_KEY (and OPENAI_API_KEY for an OpenAI Lane).
 bun run run --budget 0.50 me-1.jpg me-2.jpg me-3.jpg
 
 # Print a stored Run again from the database.
@@ -148,10 +148,10 @@ models map to LiteLLM keys explicitly (Gemini uses LiteLLM's Gemini API entry,
 is unpriced if its entry carries image prices. Image prices: Gemini per image, per image token and
 per text/thinking output token, with the 2K price derived from the 1680 image tokens
 [Google lists](https://ai.google.dev/gemini-api/docs/pricing#gemini-nano-banana-2.1) for a 2K image;
-OpenAI image models per input and output image token; LLMs per input and output token. Only
-standard rates are read; cache, batch and long-context tiers are ignored. Vendors may discount
-cached input automatically, so prices are upper bounds; batch calls and contexts over 200k tokens
-are assumed unused.
+OpenAI image models per input text token, input image token and output image token; LLMs per input
+and output token. Only standard rates are read; cache, batch and long-context tiers are ignored.
+Vendors may discount cached input automatically, so prices are upper bounds; batch calls and
+contexts over 200k tokens are assumed unused.
 
 ```sh
 bun run prices claude-sonnet-5-5           # price, source (override|litellm|snapshot) and age as JSON
@@ -359,38 +359,61 @@ bun run faces:calibrate --target-far 0.001 ~/calibration
 ### Runs
 
 `bun run run` starts a Run: it validates the Reference Photos (as `photos:validate` does), generates
-one Iteration of Candidates in one Gemini Lane (`gemini-nano-banana-2.1`), scores each Candidate's
-Likeness and prints the results with their costs.
+one Iteration of Candidates in each Lane, runs the Lanes concurrently (a few at a time, as many as
+`LANE_CONCURRENCY` in `packages/server/src/workflow.ts` allows and `--help` states; more wait their
+turn), scores each Candidate's Likeness and prints the results with their costs. Without `--lane`
+the Run has one Gemini Lane (`gemini-nano-banana-2.1`).
 
 ```sh
 GEMINI_API_KEY="op://Freelancing/Gemini test run key/password" \
   op run --account my.1password.com -- \
   bun run run --budget 0.50 --candidates 3 --look look.json --pin 2 me-1.jpg me-2.heic me-3.jpg
+
+# A Gemini Lane and an OpenAI Lane (Flare) with its own photos and Prompt, in one Run.
+GEMINI_API_KEY="op://Freelancing/Gemini test run key/password" \
+OPENAI_API_KEY="op://Freelancing/OpenAI test run key/password" \
+  op run --account my.1password.com -- \
+  bun run run --budget 0.50 --candidates 1 \
+    --lane gemini --lane openai:flare,photos=1+3,prompt=openai-prompt.txt \
+    me-1.jpg me-2.heic me-3.jpg
 ```
 
-`op run` resolves the 1Password reference into the environment of that one process, so the key is
-never written to disk; any other way of setting `GEMINI_API_KEY` works too. The key is read only
-from the environment and sent only in the request header; it never enters the database, the output
-or an error. A key shorter than 20 characters or with spaces, control or non-ASCII characters (a
-bad paste) is rejected before any call, without echoing it.
+`op run` resolves the 1Password references into the environment of that one process, so no key is
+written to disk; any other way of setting `GEMINI_API_KEY` and `OPENAI_API_KEY` works too. A Run
+needs only the keys of its Lanes' vendors. Keys are read only from the environment and sent only in
+the request header; they never enter the database, the output or an error. In an OpenAI Lane's
+failure reasons, a masked echo of a key in the usual form (a word with three or more asterisks,
+such as `sk-proj-****abcd`) is redacted too, and every reason is cut to about 2000 characters. A
+key shorter than 20 characters or with spaces, control or non-ASCII characters (a bad paste) is
+rejected before its Lane's price lookup and before any billable call, without echoing it.
 
 - **Arguments:** 1 to 8 Reference Photos; `--budget USD` (default 5), `--candidates N` (1 to 8,
-  default 3), `--look FILE`, `--pin PHOTO` (repeatable), `--face PHOTO:FACE` (as for
-  `photos:validate`), `--data-dir PATH` and `--db PATH` (default `./iconograph.db`, whose directory
-  must exist). `bun run run read --run-id ID` prints a stored Run's report again; it refuses a
-  `--db` file that doesn't exist.
+  default 3, per Lane), `--look FILE`, `--lane SPEC` (repeatable, below), `--pin PHOTO`
+  (repeatable), `--face PHOTO:FACE` (as for `photos:validate`), `--data-dir PATH` and `--db PATH`
+  (default `./iconograph.db`, whose directory must exist). `bun run run read --run-id ID` prints a
+  stored Run's report again; it refuses a `--db` file that doesn't exist.
+- **Lanes:** each `--lane NAME[,photos=N+N...][,prompt=FILE]` adds one Lane. `NAME` is `gemini`
+  (`gemini-nano-banana-2.1`), `openai` or `openai:sunburst` (`gpt-image-2.5-sunburst`), or
+  `openai:flare` (`gpt-image-2.5-flare`). `photos=1+3` limits the Lane to those Reference Photos
+  (numbered from 1; default all); a Lane none of whose photos is accepted fails the Run before any
+  call. `prompt=FILE` replaces the Lane's initial Prompt (default: built from the Target Look) with
+  the file's text, trimmed, up to 32,000 characters; it comes last, and everything after `prompt=`
+  is the path, commas included. The Identity Anchor always comes from all accepted photos, and one
+  Budget covers every Lane.
 - **Target Look:** a JSON file with any of the facets `pose`, `background`, `lighting` (lighting
   and colour), `hairstyle`, `clothing` and `framing`, each a text of up to 500 characters, e.g.
   `{"background": "dark navy backdrop", "clothing": "grey suit"}`. Missing facets take defaults (a
   neutral corporate headshot); `hairstyle` defaults to "as in the Reference Photos". Unknown facets
   are rejected, and so is text with leading or trailing spaces. The look is frozen with the Run, and
   the first Prompt is built from it.
-- **Character references:** Gemini keeps a character's identity from at most 4 reference images,
-  chosen from the accepted photos: pinned photos first (more than 4 pins is an error); without pins
-  the first pick is the largest, most frontal face (frontality × √area); each further pick is the
-  photo farthest in face embedding from those already chosen, so near-duplicates lose to different
-  angles or light. Only these photos, as the stripped stored copies (downscaled to 2048 px on the
-  longest side when larger), and the Prompt are sent to Google.
+- **Character references:** each Image Model keeps a character's identity from a limited number of
+  reference images (Gemini 4, OpenAI 16), chosen from the Lane's accepted photos: pinned photos
+  first (pins apply to every Lane, must be among each Lane's photos, and more than the model takes
+  is an error); without pins the first pick is the largest, most frontal face (frontality ×
+  √area); each further pick is the photo farthest in face embedding from those already chosen, so
+  near-duplicates lose to different angles or light. Only these photos, as the stripped stored
+  copies (downscaled to 2048 px on the longest side when larger), and the Lane's Prompt are sent to
+  its vendor.
 - **Gemini:** the native Interactions API (`v1beta`, `Api-Revision: 2026-05-20`; v1 rejects image
   input), one inline 2K JPEG per call, `store=false`, so Google doesn't keep the interaction for
   later retrieval (stored interactions are otherwise retained 55 days on the paid tier); Google's
@@ -401,17 +424,33 @@ bad paste) is rejected before any call, without echoing it.
   Google's reason and not retried; 408, 429 and 5xx responses and network failures are retried with
   exponential backoff (1 s, 2 s) up to twice, then Failed; other errors, and a response without a
   usable image, are Failed at once.
+- **OpenAI:** the native Images API edits endpoint (`POST /v1/images/edits`, JSON with the
+  references as base64 data URLs), `quality: high`, a square `1024x1024` JPEG, `n: 1`, so N
+  Candidates are N parallel calls. OpenAI keeps the inputs and outputs of `/v1/images/edits` for
+  up to 30 days in its abuse-monitoring logs (not used for training; Zero Data Retention needs
+  OpenAI's approval): see [your data](https://developers.openai.com/api/docs/guides/your-data). A
+  moderation block (`moderation_blocked`) is Refused with OpenAI's message, stage and categories
+  and not retried; 408, 429 rate limits and 5xx responses and network failures are retried with
+  exponential backoff (1 s, 2 s) up to twice, then Failed; quota, credit and spend-limit 429s,
+  other errors, and a response without a usable image are Failed at once.
 - **Budget:** every billable call, retries included, is checked against the remaining Budget
   (Budget − actual cost so far − estimates of calls in flight) before it is made. All N first calls
   are reserved in order before any is launched, so parallel calls can't overspend; a call that
-  doesn't fit isn't made and the Lane stops with `budget-exhausted`. The estimate assumes 1120
-  input tokens per reference plus the Prompt (about 3 characters per token), the 2K image price
-  and 4000 tokens of text and thinking; the actual cost comes from the response's usage at the
-  price recorded for the Lane when the Run started (stdout shows its source, age and whether the
-  LiteLLM data was stale). Every HTTP error status is booked at $0 (Google's billing page: failed
-  400 and 500 requests aren't charged); a response without complete usage data (input, output and
-  thought totals, an output split by modality that adds up, and an image-token count whenever the
-  response holds an image), or a call interrupted mid-flight, counts at its estimate. A
+  doesn't fit isn't made and the Lane stops with `budget-exhausted`. Concurrent Lanes reserve
+  against the same Budget, so together they can't overspend it either. Gemini's estimate assumes
+  1120 input tokens per reference plus the Prompt (about 3 characters per token), the 2K image
+  price and 4000 tokens of text and thinking. OpenAI's assumes the Prompt (3 characters per token),
+  6144 image tokens per reference (OpenAI doesn't document GPT Image 2.5's input tokenization; this
+  is 1.5× the 32 px patches covering a 2048 px square, not yet calibrated) and the 1756 output
+  image tokens OpenAI's calculator gives for a high-quality 1024x1024 image. The actual cost comes
+  from the response's usage at the price recorded for the Lane when the Run started (stdout shows
+  its source, age and whether the LiteLLM data was stale). Gemini's HTTP errors are booked at $0
+  (Google's billing page: failed 400 and 500 requests aren't charged); OpenAI doesn't document
+  whether errors are billed, and a moderation block can come after the image was generated, so
+  every OpenAI HTTP error counts at its estimate. A response without complete usage data (Gemini:
+  input, output and thought totals, an output split by modality that adds up, and an image-token
+  count whenever the response holds an image; OpenAI: input total with a text/image split that adds
+  up, and the output total), or a call interrupted mid-flight, counts at its estimate. A
   reservation is booked at $0 when the engine knows its call wasn't sent; otherwise a call whose
   result couldn't be recorded stays unsettled (`settled: false`) and counts at its estimate,
   usually with a `{"warning": …}` line on stderr naming the Run, Lane, Iteration and Candidate.
@@ -420,18 +459,21 @@ bad paste) is rejected before any call, without echoing it.
   that difference on calls already in flight. A Run with an unpriced model doesn't start. The
   Budget is in whole micro-dollars: at most 6 decimals, from $0.000001 to $1,000,000.
 - **Output:** first, before any Candidate is generated, one JSON line on stderr with the estimated
-  cost (`{"event":"estimate", …}`). Then one JSON object on stdout: per Candidate its Outcome —
-  `Refused` or `Failed` with a reason, `Gated` (`no-face` or `below-gate`, with the best face's
-  similarity) or `Scored` with its Likeness (similarity to the Identity Anchor scaled linearly from
-  the Gate, 0, to the Identity Ceiling, 10, and clamped; with a Ceiling at or below the Gate,
-  anything at the Gate scores 10) — its stored image path and SHA-256, and its estimated and actual
-  cost per call; the Lane's stop reason (`budget-exhausted` or `iteration-limit`); totals over
-  every billable call of the Run and the remaining Budget; the Reference Photo warnings. `actualUsd`
-  counts calls of unknown cost (`unknownCostCalls`) as $0, while the remaining Budget counts them at
-  their estimate, so `budgetUsd − actualUsd` can exceed `remainingUsd`. Calls whose Candidate was
-  never saved (the Run failed mid-way) are listed in `unattributedCalls` and still counted. With
-  several faces in a Candidate, the best match to the Identity Anchor counts. A Run that fails after
-  it started prints its `runId` in the stderr error, so `read` can show what it spent.
+  cost per Lane and in total (`{"event":"estimate", …}`). Then one JSON object on stdout, with one
+  entry per Lane (its model, `initialPrompt` — null if the Run died before storing it — character
+  references and price source): per Candidate its Outcome — `Refused` or `Failed` with a reason,
+  `Gated` (`no-face` or `below-gate`, with the best face's similarity) or `Scored` with its Likeness
+  (similarity to the Identity Anchor scaled linearly from the Gate, 0, to the Identity Ceiling, 10,
+  and clamped; with a Ceiling at or below the Gate, anything at the Gate scores 10) — its stored
+  image path and SHA-256, and its estimated and actual cost per call; each Lane's stop reason
+  (`budget-exhausted` or `iteration-limit`);
+  totals over every billable call of the Run and the remaining Budget; the Reference Photo
+  warnings. `actualUsd` counts calls of unknown cost (`unknownCostCalls`) as $0, while the
+  remaining Budget counts them at their estimate, so `budgetUsd − actualUsd` can exceed
+  `remainingUsd`. Calls whose Candidate was never saved (the Run failed mid-way) are listed in
+  `unattributedCalls` and still counted. With several faces in a Candidate, the best match to the
+  Identity Anchor counts. A Run that fails after it started prints its `runId` in the stderr error,
+  so `read` can show what it spent.
 - **Storage:** Candidates are content-addressed files in `<data dir>/images` (JPEG or PNG; other
   types fail the Candidate). The `--db` file holds Mastra's workflow snapshots (no image data or
   embeddings; the Run request is the workflow input) and the tables `runs` (request with the frozen

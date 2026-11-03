@@ -1,7 +1,7 @@
 import { type CallRecord, candidateKeyOf, imagePath, RunStore } from "@iconograph/adapters";
 import { type CandidateOutcome, type PriceQuote, remainingMicros, toUsd } from "@iconograph/domain";
 import { Effect } from "effect";
-import { RunConfig } from "./run-steps";
+import { ITERATION, RunConfig } from "./run-steps";
 
 /** Estimated and actual USD of some calls; `unknownCostCalls` count at their estimate in the Budget. */
 function costs(calls: readonly CallRecord[]) {
@@ -46,7 +46,7 @@ const priceView = ({ _tag, ...age }: PriceQuote["source"]) => ({ source: _tag, .
 /**
  * Everything the operator needs about a Run, read back from the Run tables:
  * per Candidate its Outcome, Likeness, reason, stored image and costs; per
- * Lane its stop reason; totals against the Budget; the photo report's warnings.
+ * Lane its initial Prompt and stop reason; totals against the Budget; the photo report's warnings.
  * Totals come from every billable call of the Run (the ledger the Budget
  * checks), including calls whose Candidate was never saved because the Run
  * failed; those are listed in `unattributedCalls`.
@@ -57,6 +57,16 @@ export const runReport = (runId: string) =>
     const { dataDirectory } = yield* RunConfig;
     const run = yield* store.loadRun(runId);
     const lanes = yield* store.loadLanes(runId);
+    // The Prompt stored for Iteration 1 (what any of its calls sent; a Run whose Budget fits no
+    // call stores it but sends nothing); null when the Run died before storing it.
+    const prompts = yield* Effect.forEach(lanes, ({ lane }) =>
+      store.loadPrompt({ runId, lane, iteration: ITERATION }).pipe(
+        Effect.catchIf(
+          (error) => error.notFound === true,
+          () => Effect.succeed(null),
+        ),
+      ),
+    );
     const { candidates, calls: ledger } = yield* store.loadRecords(runId);
     const saved = new Set(candidates.map(candidateKeyOf));
     const unattributed = ledger.filter((call) => !saved.has(candidateKeyOf(call)));
@@ -82,12 +92,13 @@ export const runReport = (runId: string) =>
         gate: run.identity.gate,
         ceiling: run.identity.ceiling,
       },
-      lanes: lanes.map((lane) => {
+      lanes: lanes.map((lane, index) => {
         const own = candidates.filter((candidate) => candidate.lane === lane.lane);
         return {
           lane: lane.lane,
           model: lane.model,
           stopReason: lane.stopReason,
+          initialPrompt: prompts[index] ?? null,
           characterReferences: lane.characterReferences,
           price: priceView(lane.price.source),
           candidates: own.map(({ iteration, candidate, outcome, image, calls }) => ({

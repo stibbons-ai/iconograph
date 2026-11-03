@@ -35,7 +35,7 @@ import { Context, Data, Effect } from "effect";
 import type { EstimateEvent, LaneGenerated, LaneInput, LaneResult } from "./schemas";
 
 /** M0 runs one Iteration per Lane; Iterations are numbered from 1. */
-const ITERATION = 1;
+export const ITERATION = 1;
 
 /** Where a Run keeps its files, and how it retries. */
 export class RunConfig extends Context.Service<
@@ -77,8 +77,9 @@ const laneRequest = (
 /**
  * Prepare a Run: get every Lane's Image Model (credentials and price, before
  * anything billable), validate the Reference Photos, freeze the Run with its
- * Identity Anchor and Ceiling, choose each Lane's character references, store
- * the initial Prompt, and announce the estimated cost.
+ * Identity Anchor and Ceiling, choose each Lane's character references from
+ * its own accepted photos, store each Lane's initial Prompt (its own, else the
+ * one built from the Target Look), and announce the estimated cost.
  */
 export const prepareRun = (
   runId: string,
@@ -107,28 +108,47 @@ export const prepareRun = (
       });
     }
     const lanes = yield* Effect.forEach(models, (model, lane) =>
-      selectCharacterReferences(accepted, {
-        max: model.capabilities.maxCharacterReferences,
-        pinned: request.pins,
-      }).pipe(
-        Effect.map((characterReferences) => ({
-          lane,
-          model: model.model,
-          price: model.price,
-          characterReferences,
-        })),
-      ),
+      Effect.gen(function* () {
+        const label = `Lane ${lane} (${model.model})`;
+        // Without its own photo list, a Lane may send any accepted photo.
+        let eligible = accepted;
+        const own = request.lanes[lane]!.photos;
+        if (own) {
+          const outside = request.pins.find((photo) => !own.includes(photo));
+          if (outside !== undefined) {
+            return yield* new RunError({
+              message: `Pinned photo ${outside} is not among the photos of ${label}`,
+            });
+          }
+          eligible = accepted.filter(({ photo }) => own.includes(photo));
+          if (eligible.length === 0) {
+            return yield* new RunError({
+              message: `None of the photos of ${label} (${own.join(", ")}) was accepted; see photos:validate`,
+            });
+          }
+        }
+        const characterReferences = yield* selectCharacterReferences(eligible, {
+          max: model.capabilities.maxCharacterReferences,
+          pinned: request.pins,
+        });
+        return { lane, model: model.model, price: model.price, characterReferences };
+      }),
     );
 
     yield* store.createRun({ id: runId, request, photoReport: { ...report, identity } });
-    const prompt = initialPrompt(request.targetLook);
+    const defaultPrompt = initialPrompt(request.targetLook);
+    const prompts = request.lanes.map(({ prompt }) => prompt ?? defaultPrompt);
     for (const lane of lanes) {
       yield* store.createLane(runId, lane);
-      yield* store.createIteration({ runId, lane: lane.lane, iteration: ITERATION }, prompt);
+      yield* store.createIteration(
+        { runId, lane: lane.lane, iteration: ITERATION },
+        prompts[lane.lane]!,
+      );
     }
 
     const estimates = yield* Effect.forEach(lanes, ({ lane, characterReferences }) => {
       const model = models[lane]!;
+      const prompt = prompts[lane]!;
       return Effect.map(laneRequest(report, characterReferences, prompt, model), (laneInput) => {
         const perCall = model.estimate(laneInput).micros;
         return { lane, model: model.model, perCall, micros: perCall * request.candidates };

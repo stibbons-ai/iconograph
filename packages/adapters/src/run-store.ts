@@ -22,7 +22,7 @@ import { localDatabaseUrl } from "./storage";
 export class RunStoreError extends Data.TaggedError("RunStoreError")<{
   message: string;
   cause?: unknown;
-  /** The Run looked up doesn't exist (as opposed to a read that failed). */
+  /** The Run or Iteration looked up doesn't exist (as opposed to a read that failed). */
   notFound?: true;
 }> {}
 
@@ -213,6 +213,7 @@ export class RunStore extends Context.Service<
   RunStore,
   {
     readonly createRun: (run: NewRun) => Effect.Effect<void, RunStoreError>;
+    /** Fails with `notFound` when the Run doesn't exist. */
     readonly loadRun: (runId: string) => Effect.Effect<StoredRun, RunStoreError>;
     readonly createLane: (runId: string, lane: NewLane) => Effect.Effect<void, RunStoreError>;
     readonly loadLanes: (runId: string) => Effect.Effect<LaneRecord[], RunStoreError>;
@@ -225,6 +226,7 @@ export class RunStore extends Context.Service<
       key: IterationKey,
       prompt: string,
     ) => Effect.Effect<void, RunStoreError>;
+    /** Fails with `notFound` when the Iteration doesn't exist. */
     readonly loadPrompt: (key: IterationKey) => Effect.Effect<string, RunStoreError>;
     /**
      * Reserve a call's estimate against the Run's Budget and record it in one
@@ -468,9 +470,19 @@ export const LibsqlRunStore = (databasePath: string, options: LibsqlRunStoreOpti
               sql: "SELECT prompt FROM iterations WHERE run_id = ? AND lane = ? AND iteration = ?",
               args: [runId, lane, iteration],
             });
-            if (!rows[0]) throw new Error(`Iteration ${iteration} of Lane ${lane} not found`);
-            return String(rows[0].prompt);
-          }),
+            return rows[0] ? String(rows[0].prompt) : undefined;
+          }).pipe(
+            Effect.flatMap((prompt) =>
+              prompt === undefined
+                ? Effect.fail(
+                    new RunStoreError({
+                      message: `Loading the Prompt of Iteration ${iteration} failed: Iteration ${iteration} of Lane ${lane} not found`,
+                      notFound: true,
+                    }),
+                  )
+                : Effect.succeed(prompt),
+            ),
+          ),
 
         // The insert and the reads that explain a rejection run in one write batch: one
         // transaction, one snapshot, executed without yielding in between. So the domain's

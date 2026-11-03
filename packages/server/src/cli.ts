@@ -19,6 +19,8 @@ import {
   type ImageModels,
   MAX_CANDIDATES,
   MAX_REFERENCE_PHOTOS,
+  OPENAI_FLARE_IMAGE_MODEL,
+  OPENAI_IMAGE_MODEL,
   type RetryPolicy,
   RunRequest,
   TargetLookInput,
@@ -26,8 +28,9 @@ import {
 import { Effect, type Layer, Schema } from "effect";
 import { createRunApplication, readRunReport } from "./index";
 import { jsonLine } from "./warnings";
+import { LANE_CONCURRENCY } from "./workflow";
 
-const help = `Start a Run: one Gemini Lane, one Iteration of Candidates
+const help = `Start a Run: one or more Lanes, up to ${LANE_CONCURRENCY} at a time, one Iteration of Candidates each
 
 Usage:
   bun run run [options] PHOTO...          1 to ${MAX_REFERENCE_PHOTOS} Reference Photos of the Subject
@@ -40,8 +43,22 @@ Options:
                       background, lighting (lighting and colour), hairstyle,
                       clothing, framing; each a text. Missing facets take their
                       defaults; hairstyle defaults to "as in the Reference Photos".
+  --lane SPEC         One Lane per use; repeatable (default: one gemini Lane).
+                      Up to ${LANE_CONCURRENCY} Lanes run at a time; more wait their turn.
+                      SPEC is NAME[,photos=N+N...][,prompt=FILE]:
+                        NAME     gemini (${GEMINI_IMAGE_MODEL}), openai or
+                                 openai:sunburst (${OPENAI_IMAGE_MODEL}), or
+                                 openai:flare (${OPENAI_FLARE_IMAGE_MODEL})
+                        photos   the photo numbers (from 1) this Lane may send,
+                                 e.g. photos=1+3+4 (default: all)
+                        prompt   a text file with this Lane's initial Prompt
+                                 (default: the Prompt built from the Target Look);
+                                 last, since FILE is the rest of SPEC, commas and all
+                      e.g. --lane gemini --lane openai:flare,photos=1+2,prompt=p.txt
   --pin PHOTO         Always send photo PHOTO (numbered from 1) as a character
-                      reference. Repeatable; at most 4 for Gemini.
+                      reference in every Lane; it must be among each Lane's
+                      photos. Repeatable; at most 4 with a Gemini Lane, 16 with
+                      an OpenAI Lane.
   --face PHOTO:FACE   Use face FACE of photo PHOTO when it shows several faces,
                       as in photos:validate. Repeatable.
   --data-dir PATH     Data volume (default: ICONOGRAPH_DATA_DIR, else ./.data):
@@ -51,17 +68,21 @@ Options:
   --run-id ID         With read: the Run to print.
   --help, -h          Show this help.
 
-The Image Model is ${GEMINI_IMAGE_MODEL} through Google's Interactions API, 2K,
-with store=false; it needs GEMINI_API_KEY in the environment (never stored or
-logged). Only the chosen character references (at most 4, stripped of
-metadata) and the Prompt are sent to Google.
+Gemini: Google's Interactions API, 2K, store=false; needs GEMINI_API_KEY.
+At most 4 character references are sent to Google.
+OpenAI: the Images API edits endpoint, 1024x1024 at high quality; needs
+OPENAI_API_KEY. Up to 16 character references are sent to OpenAI, which
+keeps API inputs and outputs up to 30 days for abuse monitoring.
+Keys are read from the environment only, never stored or logged. Each Lane
+sends only its chosen character references (stripped of metadata) and its
+Prompt to its vendor.
 
 Before generating, an estimate prints as one JSON line on stderr. Every
 billable call is checked against the remaining Budget first; a call that
 doesn't fit isn't made and the Lane stops with "budget-exhausted". The result
 is one JSON object on stdout: per Candidate its Outcome (Refused, Failed,
 Gated or Scored), Likeness, reason, stored image and estimated and actual
-cost; the Lane's stop reason; totals; the Reference Photo warnings. read
+cost; each Lane's initial Prompt and stop reason; totals; the Reference Photo warnings. read
 prints the same report for a stored Run. Errors print JSON to stderr (the
 last line) and exit nonzero.
 `;
@@ -147,6 +168,53 @@ async function readLook(path: string | undefined) {
   }
 }
 
+/** Lane names `--lane` takes, by the Image Model each drives. */
+const laneModels: Record<string, string> = {
+  gemini: GEMINI_IMAGE_MODEL,
+  openai: OPENAI_IMAGE_MODEL,
+  "openai:sunburst": OPENAI_IMAGE_MODEL,
+  "openai:flare": OPENAI_FLARE_IMAGE_MODEL,
+};
+
+/**
+ * One `--lane NAME[,photos=N+N...][,prompt=FILE]`; the request schema checks the rest.
+ * `prompt=` comes last: its FILE is the rest of the spec, so a path may hold commas.
+ */
+async function readLane(spec: string) {
+  const promptAt = spec.indexOf(",prompt=");
+  const head = promptAt === -1 ? spec : spec.slice(0, promptAt);
+  const [name = "", ...settings] = head.split(",");
+  if (!Object.hasOwn(laneModels, name)) {
+    throw new Error(
+      `--lane ${spec}: unknown Lane ${name}; use one of ${Object.keys(laneModels).join(", ")}`,
+    );
+  }
+  const lane: { model: string; photos?: number[]; prompt?: string } = {
+    model: laneModels[name]!,
+  };
+  for (const setting of settings) {
+    const [key, value = ""] = setting.split(/=(.*)/s);
+    if (key !== "photos" || lane.photos !== undefined) {
+      throw new Error(
+        `--lane ${spec}: expected photos=N+N... (at most once), then optionally prompt=FILE last`,
+      );
+    }
+    lane.photos = value.split("+").map((photo) => parseNumber(`--lane ${spec} photos`, photo));
+  }
+  if (promptAt !== -1) {
+    const path = spec.slice(promptAt + ",prompt=".length);
+    try {
+      lane.prompt = (await Bun.file(path).text()).trim();
+    } catch (error) {
+      const hint = path.includes(",photos=") ? " (photos= must come before prompt=)" : "";
+      throw new Error(
+        `--lane ${spec}: prompt ${path} is not a readable file${hint}: ${errorMessage(error)}`,
+      );
+    }
+  }
+  return lane;
+}
+
 export async function main(args: string[], dependencies: RunCliDependencies = {}) {
   const {
     imageModels = nativeImageModels,
@@ -162,6 +230,7 @@ export async function main(args: string[], dependencies: RunCliDependencies = {}
       budget: { type: "string" },
       candidates: { type: "string" },
       look: { type: "string" },
+      lane: { type: "string", multiple: true },
       pin: { type: "string", multiple: true },
       face: { type: "string", multiple: true },
       "data-dir": { type: "string" },
@@ -176,7 +245,7 @@ export async function main(args: string[], dependencies: RunCliDependencies = {}
   }
   const reading = positionals[0] === "read";
   if (reading) {
-    const runOptions = ["budget", "candidates", "look", "pin", "face"] as const;
+    const runOptions = ["budget", "candidates", "look", "lane", "pin", "face"] as const;
     if (
       positionals.length > 1 ||
       values["run-id"] === undefined ||
@@ -204,7 +273,10 @@ export async function main(args: string[], dependencies: RunCliDependencies = {}
       values.candidates === undefined
         ? DEFAULT_CANDIDATES
         : parseNumber("--candidates", values.candidates),
-    lanes: [{ model: GEMINI_IMAGE_MODEL }],
+    lanes:
+      values.lane === undefined
+        ? [{ model: GEMINI_IMAGE_MODEL }]
+        : await Promise.all(values.lane.map(readLane)),
   });
   const printLine = (value: unknown) => stderr(jsonLine(value));
   const models = await imageModels(dataDirectory, (warning) => printLine({ warning }));

@@ -45,6 +45,7 @@ export const OpenAIImagePricing = Schema.TaggedStruct("OpenAIImage", {
   inputPerImageToken: Usd,
   outputPerImageToken: Usd,
 });
+export type OpenAIImagePricing = typeof OpenAIImagePricing.Type;
 
 /**
  * A Gemini image model. Input text and images are billed as input tokens;
