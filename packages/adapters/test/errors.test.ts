@@ -1,7 +1,13 @@
 import { expect, test } from "bun:test";
 import { FaceModelError } from "@iconograph/domain";
 import { Effect, Logger } from "effect";
-import { errorLine, errorMessage, withCleanup } from "../src/errors";
+import {
+  attachCleanupError,
+  errorChain,
+  errorLine,
+  errorMessage,
+  withCleanup,
+} from "../src/errors";
 import { releaseSession } from "../src/face-embedder";
 import { HeicDecoderError, ReferencePhotoError } from "../src/reference-photos";
 
@@ -55,4 +61,23 @@ test("withCleanup rethrows the original error with the cleanup failure attached"
       },
     ),
   ).rejects.toThrow("close failed");
+});
+
+test("an error chain keeps every cause and cleanup failure, quoting none twice", () => {
+  const download = new Error("download failed", { cause: new Error("socket closed") });
+  attachCleanupError(download, new Error("rm .partial: EACCES"));
+  const outer = new Error("Model sface failed: download failed", { cause: download });
+  expect(errorChain(outer)).toBe(
+    "Model sface failed: download failed: download failed (cleanup also failed: rm .partial: EACCES): socket closed",
+  );
+  // Non-Error causes with a message (as some Effect errors are) count by their message, and
+  // keep their cleanup failures too.
+  expect(errorChain(new Error("outer", { cause: { message: "inner" } }))).toBe("outer: inner");
+  const effectLike = { message: "inner", cleanupErrors: [new Error("close failed")] };
+  expect(errorChain(new Error("outer", { cause: effectLike }))).toBe(
+    "outer: inner (cleanup also failed: close failed)",
+  );
+  expect(errorChain(new Error("same", { cause: new Error("same") }))).toBe("same");
+  // A null cause ends the chain instead of adding ": null".
+  expect(errorChain(new Error("outer", { cause: null }))).toBe("outer");
 });

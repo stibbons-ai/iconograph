@@ -50,11 +50,49 @@ export function field(value: unknown, key: string): unknown {
  * traceable from the one-line message.
  */
 export function errorMessage(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
+  return withCleanupErrors(error, error instanceof Error ? error.message : String(error));
+}
+
+/** `message` with the cleanup failures attached to `error` appended. */
+function withCleanupErrors(error: unknown, message: string): string {
   const cleanup = field(error, "cleanupErrors" satisfies keyof CleanupErrors);
   return Array.isArray(cleanup) && cleanup.length > 0
     ? `${message} (cleanup also failed: ${cleanup.map(errorMessage).join("; ")})`
     : message;
+}
+
+/** How many links of an error's `cause` chain `errorChain` shows. */
+const MAX_CAUSE_DEPTH = 8;
+
+/**
+ * The error, its `cause`, the cause's `cause`, and so on, up to `depth` links.
+ * The thrown value itself always counts; a `cause` of null or undefined ends the chain.
+ */
+function* causeChain(error: unknown, depth: number): Generator<unknown> {
+  for (let link = error, index = 0; index < depth; index++) {
+    yield link;
+    link = field(link, "cause");
+    if (link === undefined || link === null) return;
+  }
+}
+
+/**
+ * An error as the chain of its messages (error, its `cause`, and so on), each
+ * with its attached cleanup failures (`errorMessage`), without stack traces. A
+ * message already contained in an earlier one (an error quoting its cause) is
+ * left out. Non-`Error` values with a `message` (some Effect errors) count by it.
+ */
+export function errorChain(error: unknown): string {
+  const messages: string[] = [];
+  for (const link of causeChain(error, MAX_CAUSE_DEPTH)) {
+    const own = field(link, "message");
+    const message =
+      link instanceof Error || typeof own !== "string"
+        ? errorMessage(link)
+        : withCleanupErrors(link, own);
+    if (!messages.some((earlier) => earlier.includes(message))) messages.push(message);
+  }
+  return messages.join(": ");
 }
 
 /**
@@ -71,29 +109,23 @@ export function errorLine(error: unknown): string {
   })}\n`;
 }
 
-/** The error, its `cause`, the cause's `cause`, and so on, up to `depth` links. */
-function* causeChain(error: unknown, depth = 4): Generator<object> {
-  for (let link = error, index = 0; index < depth; index++) {
-    if (typeof link !== "object" || link === null) return;
-    yield link;
-    link = "cause" in link ? link.cause : undefined;
-  }
-}
+/** How many links of an error's `cause` chain `statusOf` and `codeOf` search. */
+const LOOKUP_DEPTH = 4;
 
 /** The first integer HTTP `statusCode` on the error or its cause chain; undefined when none. */
 export function statusOf(error: unknown): number | undefined {
-  for (const link of causeChain(error)) {
-    if ("statusCode" in link && Number.isInteger(Number(link.statusCode))) {
-      return Number(link.statusCode);
-    }
+  for (const link of causeChain(error, LOOKUP_DEPTH)) {
+    const status = Number(field(link, "statusCode"));
+    if (Number.isInteger(status)) return status;
   }
   return undefined;
 }
 
 /** The first string `code` on the error or its cause chain (e.g. Bun's `ENOTFOUND`). */
 export function codeOf(error: unknown): string | undefined {
-  for (const link of causeChain(error)) {
-    if ("code" in link && typeof link.code === "string") return link.code;
+  for (const link of causeChain(error, LOOKUP_DEPTH)) {
+    const code = field(link, "code");
+    if (typeof code === "string") return code;
   }
   return undefined;
 }

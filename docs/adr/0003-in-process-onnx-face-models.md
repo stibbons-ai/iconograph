@@ -13,3 +13,4 @@ Face detection and recognition run inside the Bun process with `onnxruntime-node
 - The native addons (`onnxruntime-node`, `sharp`, `libsql`) can't be embedded in a bundle or `bun build --compile` executable (oven-sh/bun#44063); they stay external and ship as the only `node_modules`.
 - Container images must be glibc-based (Debian or distroless `cc`), not Alpine/musl; `onnxruntime-node` also needs `libstdc++`, which `oven/bun`'s distroless image lacks.
 - `onnxruntime-web` (WASM) works under Bun at ~3–5× the latency and is the fallback if a platform's native binary fails.
+- Amended by [ADR-0012](0012-container-binds-all-interfaces-publish-on-loopback.md), which adds `libheif-js` (its LGPL WebAssembly decoder, loaded from its package) as a further external beside the native addons.

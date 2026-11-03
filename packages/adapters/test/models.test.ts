@@ -7,6 +7,7 @@ import { decodeModelLock, type DownloadedWeight, type ModelLock } from "../src/m
 import { main } from "../src/models-cli";
 import { sha256 } from "./sha256";
 import { temporaryDirectories } from "./temporary-directory";
+import { until } from "./until";
 
 // Larger than one stream chunk so streaming to disk is exercised.
 const detector = crypto.getRandomValues(new Uint8Array(200_000));
@@ -43,16 +44,6 @@ const server = Bun.serve({
 });
 
 afterAll(() => server.stop(true));
-
-// Polls observable filesystem state: ensureModels exposes no mid-download signal,
-// and the server cannot tell when the client has opened its temp file.
-async function until(condition: () => Promise<boolean>) {
-  for (let attempt = 0; attempt < 400; attempt++) {
-    if (await condition()) return;
-    await Bun.sleep(5);
-  }
-  throw new Error("Condition not reached within 2 s");
-}
 
 function weight(
   id: string,
@@ -295,6 +286,8 @@ describe("ensureModels", () => {
     try {
       const first = ensureModels({ lock: gated, directory });
       callers.push(first);
+      // Polled: ensureModels exposes no mid-download signal, and the server can't tell when
+      // the client has opened its temp file.
       await until(async () => (await entries()).length === 1);
       expect((await entries())[0]).toEndWith(".partial");
       const second = ensureModels({ lock: gated, directory });

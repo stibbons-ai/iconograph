@@ -4,6 +4,7 @@ import {
   LibsqlRunStore,
   RunStore,
   withCleanup,
+  workflowsStore,
 } from "@iconograph/adapters";
 import type {
   FaceEmbedder,
@@ -16,13 +17,14 @@ import type {
 import { Mastra } from "@mastra/core/mastra";
 import { Effect, Layer, Logger, ManagedRuntime, Schema } from "effect";
 import { runReport } from "./report";
-import { defaultRunConfig, RunConfig } from "./run-steps";
+import { defaultRunConfig, type PhotoPaths, RunConfig } from "./run-steps";
 import { EstimateEvent, type RunResult } from "./schemas";
 import { printWarning, type RunWarning, warningLogger } from "./warnings";
 import { createRunWorkflow, RUN_WORKFLOW_ID } from "./workflow";
 
 export type { EstimateEvent, RunResult } from "./schemas";
 export { RUN_WORKFLOW_ID } from "./workflow";
+export type { PhotoPaths } from "./run-steps";
 export type { RunWarning } from "./warnings";
 
 const decodeEvent = Schema.decodeUnknownOption(EstimateEvent);
@@ -36,6 +38,11 @@ export interface RunApplicationOptions {
   judges: Layer.Layer<Judges>;
   faceEmbedder: Layer.Layer<FaceEmbedder, FaceModelError>;
   retryPolicy?: RetryPolicy;
+  /**
+   * `confined` (default): Reference Photos must be files inside the data volume.
+   * `operator`: any path, for the operator's own CLI.
+   */
+  photoPaths?: PhotoPaths;
   /**
    * Receives the engine's warnings (e.g. a settle that failed after an
    * interrupt) with their log annotations (`runId`, `lane`, `iteration`,
@@ -60,6 +67,7 @@ export async function createRunApplication(options: RunApplicationOptions) {
       Layer.succeed(RunConfig)({
         ...defaultRunConfig(dataDirectory),
         ...(options.retryPolicy && { retryPolicy: options.retryPolicy }),
+        ...(options.photoPaths && { photoPaths: options.photoPaths }),
       }),
       // Provided to the layers too, so logs while building or releasing them are warnings.
     ).pipe(Layer.provideMerge(Logger.layer([warningLogger(options.warn ?? printWarning)]))),
@@ -81,10 +89,11 @@ export async function createRunApplication(options: RunApplicationOptions) {
       workflows: { run: createRunWorkflow(runtime) },
       logger: false,
     });
-    const workflows = await storage.getStore("workflows");
-    if (!workflows) throw new Error("LibSQL workflow storage is unavailable");
+    const workflows = await workflowsStore(storage);
 
     return {
+      /** The Mastra instance, for mounting its HTTP routes. */
+      mastra,
       /**
        * Run the workflow to the end. `onEvent` receives the estimate before any
        * Candidate is generated. A failed Run throws with the step's error.

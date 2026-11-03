@@ -2,8 +2,8 @@
 
 A Bun workspace for the headless Run loop: validate the Subject's Reference Photos with a local face
 pipeline, generate Candidates with an Image Model inside a hard Budget, and score their Likeness.
-Milestone 0 runs one Gemini Lane for one Iteration from the command line; there is no UI or
-production deployment yet.
+Milestone 0 runs one Gemini Lane for one Iteration from the command line or through the HTTP
+server's API (see "Server and container"); there is no UI yet.
 
 ## Requirements and installation
 
@@ -64,6 +64,10 @@ bun run run --budget 0.50 me-1.jpg me-2.jpg me-3.jpg
 # Print a stored Run again from the database.
 bun run run read --run-id RUN_ID
 
+# The HTTP server on 127.0.0.1:4111 (see "Server and container").
+bun run serve
+bun run build:server  # bundle + pruned externals in dist/server, for this machine
+
 bun run test
 bun run format        # write formatting in the authored workspace scope
 bun run format:check
@@ -83,6 +87,9 @@ locked face-model weights (cached by the lock file's hash), explicitly runs `bun
 complete `bun run check` on Linux and macOS. Native optional
 dependencies are therefore audited on both hosts. Formatting commands include the adopted
 `docs/adr` collection, including its template README, but exclude unrelated domain drafts.
+A second job builds the container image on an amd64 and an arm64 runner and runs its smoke test
+and a `/health` boot check on each; pushes to `main` then publish both to GHCR (the only job that
+can write packages).
 
 ### Model weights
 
@@ -466,9 +473,10 @@ rejected before its price lookup and before any billable call, without echoing i
   600 s at `high`, room for the whole output cap at about 30 tokens/s. Calls don't stream, so no
   bytes arrive until the answer is done, and Bun's fetch cuts off a request idle for longer than
   `BUN_CONFIG_HTTP_IDLE_TIMEOUT` (whole seconds, default 300 s, read once from the OS environment
-  when Bun starts; a `.env` file is read too late to count): `bun run run` sets it to 900 s, and
-  a Judge whose timeout it wouldn't exceed refuses to start, naming the fix (run `bun
-  packages/server/src/cli.ts` directly only at `low` effort, or set the variable yourself).
+  when Bun starts; a `.env` file is read too late to count): `bun run run`, `bun run serve` and
+  the container image set it to 900 s, and a Judge whose timeout it wouldn't exceed refuses to
+  start, naming the fix (run `bun packages/server/src/cli.ts` or `server.ts` directly only at
+  `low` effort, or set the variable yourself).
   Anthropic deletes API inputs and outputs within 30 days unless a request is flagged
   under its Usage Policy (then up to 2 years) or a zero-retention agreement applies
   ([Anthropic Privacy Center](https://privacy.claude.com/en/articles/7996866-how-long-do-you-store-my-organization-s-data));
@@ -593,13 +601,142 @@ runs it in CI regardless of local hook installation. Ordinary local hooks can be
 (for example, `git commit --no-verify`); they are an early feedback mechanism, not a security
 boundary or a replacement for the full CI check.
 
+## Server and container
+
+The server ([`packages/server/src/server.ts`](packages/server/src/server.ts)) is a Bun entrypoint
+that mounts, under `/api` through Mastra's Hono adapter, only the Mastra routes a Run needs
+(`MOUNTED_ROUTES` in that file: reading workflows and Runs, creating, starting with `start-async`
+or `stream`, observing and cancelling a Run), and adds `GET /health`. Mastra's fire-and-forget
+`start` (it answers before checking the input), resuming (the Run workflow never suspends),
+deleting Runs, time travel, Mastra's restart routes (the server restarts active Runs itself), its
+internal routes and the legacy streams are not mounted. It listens at once,
+downloads and verifies the face models into the data volume (retrying with backoff from 5 s up
+to 5 minutes while that fails, also for failures only the operator can fix, such as a corrupt
+file: fix the volume and the server picks it up), then restarts the Runs that were active when
+it last stopped. `/health` and every `/api` route answer 503 until the face models are
+verified; both name the failure. `/health` names each check (`database`, `faceModels`,
+`restarts`). `restarts` is `failed` when listing the active Runs failed or when Mastra couldn't
+restart one of them (it names the Run); that reports `"status": "degraded"` but stays 200, since
+new Runs still work. A Run that restarted but then failed (e.g. one interrupted while generating,
+below) shows in its own state, not here.
+
+### Run it with Docker Compose
+
+```sh
+cp .env.example .env   # then set the keys your Runs need; .env is git-ignored and never in the image
+docker compose up -d
+curl http://127.0.0.1:4111/health
+docker compose logs -f # one JSON line per event
+```
+
+The first start downloads YuNet and SFace (38.9 MB) into the named volume `iconograph-data`
+(`/data` in the container); later starts only re-verify them. The image holds no weights, keys or
+data. The volume also holds the Runs database (`iconograph.db`, with Mastra's snapshots),
+content-addressed images (`images/`) and the price cache (`prices.db`). Offline machines can copy
+the locked weights into the volume's `models/` folder first (see "Model weights").
+
+**Keys** come from `.env` only: the Judge's vendor (`ANTHROPIC_API_KEY` for the default
+`anthropic/claude-sonnet-5-5`, `OPENAI_API_KEY` for an `openai/` Judge,
+`GOOGLE_GENERATIVE_AI_API_KEY` for a `google/` one) and every Lane's Image Model
+(`GEMINI_API_KEY`, `OPENAI_API_KEY`). The image sets `BUN_CONFIG_HTTP_IDLE_TIMEOUT=900` in its
+`ENV`, as `bun run serve` does: Bun reads it only from the OS environment when it starts, and below
+the longest Judge call (600 s at `high` effort) the Judge refuses to start (see "Runs").
+
+**Only localhost can reach it.** The server listens on `127.0.0.1` by default; outside a
+container `ICONOGRAPH_HOST` and `ICONOGRAPH_PORT` change that, and any non-loopback address logs a
+warning at boot. Inside the container it must listen on every interface, so `compose.yaml`
+publishes the port as `127.0.0.1:4111:4111` (ADR-0012). `compose.yaml` pins `ICONOGRAPH_HOST`,
+`ICONOGRAPH_PORT`, `ICONOGRAPH_DATA_DIR` and the telemetry opt-outs in `environment:`, which
+Compose gives precedence over `.env`: setting them in `.env` has no effect. To use another host
+port, change the left side of `ports:` (e.g. `127.0.0.1:8080:4111`). There is no authentication
+yet: **never publish it without `127.0.0.1:`** (e.g. `docker run -p 4111:4111`), which would
+expose the server, your Reference Photos and your paid API keys to everyone on your network.
+
+Requests must also be addressed to a loopback name (`localhost`, `127.0.0.1`, `[::1]`), so a web
+page can't reach the server by rebinding its own DNS name to your machine. A request whose
+`Origin` isn't the server as addressed, or that the browser marks cross-site, is refused, and
+requests that change state under `/api` (POST, PUT, PATCH, DELETE) must be `application/json`
+(415 otherwise), so a page on another site can't submit a form that starts a paid Run.
+
+**Upgrading:** images are published from `main` as `ghcr.io/stibbons-ai/iconograph:latest` and
+`:sha-<commit>`, for linux/amd64 and linux/arm64. `docker compose pull && docker compose up -d`
+replaces the container and keeps the volume; Runs that were active restart (except, for now,
+Runs stopped while generating or scoring, below). `docker compose up
+-d --build` builds from your checkout instead.
+
+### Start a Run through the API
+
+Reference Photos must be files inside the data volume, named relative to it (or absolute under
+`/data`); paths with `..`, outside the volume, or symlinks leading out of it are rejected before
+anything else happens. Upload routes don't exist yet, so copy photos in:
+
+```sh
+docker compose exec iconograph /usr/local/bin/bun -e 'require("fs").mkdirSync("/data/photos")'
+docker compose cp me-1.jpg iconograph:/data/photos/me-1.jpg
+```
+
+Mastra's workflow routes start Runs. `start-async` checks the input, then answers when the Run
+ends, with its result or error. `create-run`, then `stream?runId=` answers at once and streams
+the Run's events; `GET /api/workflows/run/runs/RUN_ID` shows its state. A Run starts once:
+starting a `runId` again answers 409 while it runs and after it ended. A start that ran nothing
+can be retried: one refused with 400 (invalid input to `start-async`), or a `stream` whose input
+was refused (it answers 200, and the stream ends with the validation error); retry that one
+with `start-async`, since Mastra streams a `runId` only once. The body's `inputData` is the Run
+request, with every Target Look facet, every Lane and the Judge given (the API applies no
+defaults). A Lane's `photos` are numbers into the Run's `photos` (from 1), so the data-volume
+check covers them too; its `prompt` is the Prompt's text. The Judge's `weights` must name every
+Rubric criterion and sum to 1:
+
+```sh
+curl -X POST http://127.0.0.1:4111/api/workflows/run/start-async \
+  -H 'content-type: application/json' -d '{"inputData": {
+    "photos": ["photos/me-1.jpg", "photos/me-2.jpg"], "faceChoices": [], "pins": [],
+    "budgetUsd": 0.5, "candidates": 2,
+    "lanes": [
+      {"model": "gemini-nano-banana-2.1"},
+      {"model": "gpt-image-2.5-sunburst", "photos": [2], "prompt": "A head-and-shoulders portrait …"}],
+    "judge": {"model": "anthropic/claude-sonnet-5-5", "effort": "low", "weights": {
+      "likeness": 0.3, "resemblance": 0.15, "realism": 0.15, "pose": 0.1, "background": 0.08,
+      "lighting": 0.08, "hairstyle": 0.07, "clothing": 0.05, "framing": 0.02}},
+    "targetLook": {"pose": "…", "background": "…", "lighting": "…",
+      "hairstyle": "as in the Reference Photos", "clothing": "…", "framing": "…"}}}'
+```
+
+A missing key fails the Run with that message before any billable call: the Judge's first, then
+each Lane's in order, each before its own price lookup. A Run
+interrupted while generating or scoring is not resumed yet: Mastra marks the restarted Lane
+failed, and no call is made or billed twice (#35).
+
+The server keeps its Runs in `<data volume>/iconograph.db`, while `bun run run read` defaults to
+`./iconograph.db`; to read a server Run from a checkout, pass the volume's database, e.g.
+`bun run run read --db .data/iconograph.db --data-dir .data --run-id RUN_ID`.
+
+### Without Docker
+
+`bun run serve` runs the server from source on `127.0.0.1:4111` with the data volume
+`ICONOGRAPH_DATA_DIR` (default `./.data`). `bun run build:server` builds what the image ships into
+`dist/server`: `server.js`, `smoke.js` and `healthcheck.js` (sharing code chunks), bundled with `onnxruntime-node`,
+`sharp`, `libsql` and `libheif-js` external; a production install of only those, generated from
+`bun.lock` with their exact versions and integrity hashes and pruned to one platform
+(`--os`, `--cpu`, `--libc`; default this machine); and Mastra's model-capability JSON, which
+Mastra reads beside its own `package.json`. `BUN_CONFIG_HTTP_IDLE_TIMEOUT=900 bun
+dist/server/smoke.js` (or, for an image, `docker run --rm -v "$PWD/.data/models:/data/models:ro"
+--entrypoint /usr/local/bin/bun IMAGE /app/smoke.js`) checks that the capabilities resolve, ONNX
+Runtime loads SFace, `sharp` decodes, LibSQL opens a file, the HEIC decoder loads and Bun's fetch
+idle timeout outlasts the longest Judge call.
+
+The image is `gcr.io/distroless/cc-debian13` (glibc, no shell) as the non-root user, with the
+`bun` binary, the bundle and the pruned externals: about 202 MB for arm64 and 215 MB for amd64
+(measured 2026-11-02), of which the externals are about 66 MB (ADR-0009 estimated ~55 MB before
+`libheif-js` joined them, ADR-0012).
+
 ## Architecture and schema authority
 
 | Package                | Responsibility                                                                                                                                                                                                                             | Dependencies at the boundary                                                               |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------ |
 | `@iconograph/domain`   | Pure Run schemas; Target Look and Prompt; `FaceEmbedder` and `ImageModels` seams; Identity Anchor/Ceiling, photo verdicts, Likeness and Candidate Outcomes; character-reference choice; Budget arithmetic; price precedence and `Unpriced` | Effect only; no Mastra, storage, or infrastructure                                         |
 | `@iconograph/adapters` | Effect-to-Mastra schema helper; LibSQL storage and Run tables; model weights; YuNet/SFace via ONNX; Reference Photo decoding and storage; content-addressed images; LiteLLM price source; Gemini Interactions adapter                      | Effect, Mastra core and LibSQL adapter, libsql client, onnxruntime-node, sharp, libheif-js |
-| `@iconograph/server`   | Run workflow (prepare → Lanes → finish; a Lane generates and scores one Iteration) and the Run CLI                                                                                                                                         | Domain and adapters; Mastra owns durable execution                                         |
+| `@iconograph/server`   | Run workflow (prepare → Lanes → finish; a Lane generates and scores one Iteration), the Run CLI and the HTTP server (Mastra routes via Hono, `/health`)                                                                                    | Domain and adapters; Mastra owns durable execution                                         |
 
 **Effect Schema is the single schema source.** Mastra is the single durable workflow engine; LibSQL
 stores its snapshots. Zod exists transitively in Mastra's dependency graph but is not an independent

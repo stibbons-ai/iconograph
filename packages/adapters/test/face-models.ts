@@ -26,7 +26,7 @@ export const fixture = (name: string) =>
   fileURLToPath(new URL(`./fixtures/faces/${name}`, import.meta.url));
 
 /** Face tests need the real, locked weights: fail with the fix command, never download or skip. */
-const missingWeights: Fetch = async (url) => {
+export const missingWeights: Fetch = async (url) => {
   throw new Error(
     `Face-model weights are missing (${url}); run \`bun run models:fetch\` before the face tests`,
   );

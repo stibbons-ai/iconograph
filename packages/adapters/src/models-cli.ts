@@ -1,7 +1,7 @@
 import { parseArgs } from "node:util";
 import { modelsDirectory, resolveDataDirectory } from "./data-directory";
 import { errorLine } from "./errors";
-import { ensureModels, readModelLock, type ModelLock } from "./models";
+import { downloadableModelIds, ensureModels, readModelLock, type ModelLock } from "./models";
 
 const help = `Fetch and verify every downloadable locked face-model weight file
 
@@ -44,8 +44,7 @@ export async function main(args: string[], dependencies: ModelsCliDependencies =
   if (positionals.length > 0) throw new Error("Unexpected arguments; use --help for usage");
   const directory = modelsDirectory(resolveDataDirectory(values["data-dir"]));
   const lock = dependencies.lock ?? readModelLock();
-  const ids = lock.models.flatMap((model) => (model.url ? [model.id] : []));
-  const models = await ensureModels({ lock, directory, ids });
+  const models = await ensureModels({ lock, directory, ids: downloadableModelIds(lock) });
   stdout(`${JSON.stringify({ directory, models })}\n`);
 }
 

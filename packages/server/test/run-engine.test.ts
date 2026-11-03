@@ -103,6 +103,8 @@ async function runApplication(
     imageModels,
     judges,
     faceEmbedder: realFaceEmbedder(),
+    // The fixture photos live in the repository, outside the data volume.
+    photoPaths: "operator",
     retryPolicy: { maxRetries: 2, baseDelayMs: 0 },
     ...(warn && { warn }),
   });
