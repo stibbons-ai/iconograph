@@ -64,8 +64,8 @@ Options:
                       an OpenAI Lane.
   --face PHOTO:FACE   Use face FACE of photo PHOTO when it shows several faces,
                       as in photos:validate. Repeatable.
-  --judge-model ID    The Judge, as a Mastra model router id: an anthropic/,
-                      openai/ or google/ vision model (default:
+  --judge-model ID    The Judge, as a vendor/model id: an anthropic/, openai/
+                      or google/ vision model (default:
                       ${DEFAULT_JUDGE.model}).
   --judge-effort LEVEL
                       The Judge's reasoning effort: low, medium or high

@@ -30,18 +30,18 @@ import type { TargetLook } from "./target-look";
 export const JudgeEffort = Schema.Literals(["low", "medium", "high"]);
 export type JudgeEffort = typeof JudgeEffort.Type;
 
-/** A Mastra model router id: `vendor/model`, e.g. `anthropic/claude-sonnet-5-5`. */
-const RouterModelId = Schema.String.check(
+/** A Judge model id: `vendor/model`, e.g. `anthropic/claude-sonnet-5-5`. */
+const JudgeModelId = Schema.String.check(
   Schema.makeFilter((id: string) =>
     /^[a-z0-9-]+\/\S+$/.test(id)
       ? true
-      : "Expected a model router id such as anthropic/claude-sonnet-5-5",
+      : "Expected a vendor/model id such as anthropic/claude-sonnet-5-5",
   ),
 );
 
 /** The Judge of a Run: model, effort and Rubric weights, frozen with the Run's request. */
 export const JudgeConfig = Schema.Struct({
-  model: RouterModelId,
+  model: JudgeModelId,
   effort: JudgeEffort,
   weights: RubricWeights,
 });
@@ -61,29 +61,36 @@ export type JudgeVendor = (typeof JUDGE_VENDORS)[number];
 export const isJudgeVendor = (vendor: string): vendor is JudgeVendor =>
   (JUDGE_VENDORS as readonly string[]).includes(vendor);
 
-/** A model router id split at its first `/`: the vendor and the vendor's model id. */
-function parseRouterId(model: string): { readonly vendor: string; readonly id: string } {
+/** A `vendor/model` id split at its first `/`: the vendor and the vendor's model id. */
+function parseModelId(model: string): { readonly vendor: string; readonly id: string } {
   const slash = model.indexOf("/");
   return slash > 0
     ? { vendor: model.slice(0, slash), id: model.slice(slash + 1) }
     : { vendor: "", id: model };
 }
 
-/** A router id's vendor (the part before the first `/`), when it is a Judge vendor. */
+/** A `vendor/model` id as its Judge vendor and the vendor's model id; undefined for any other vendor. */
+export function parseJudgeModel(
+  model: string,
+): { readonly vendor: JudgeVendor; readonly id: string } | undefined {
+  const { vendor, id } = parseModelId(model);
+  return isJudgeVendor(vendor) ? { vendor, id } : undefined;
+}
+
+/** A model id's vendor (the part before the first `/`), when it is a Judge vendor. */
 export function judgeVendor(model: string): JudgeVendor | undefined {
-  const { vendor } = parseRouterId(model);
-  return isJudgeVendor(vendor) ? vendor : undefined;
+  return parseJudgeModel(model)?.vendor;
 }
 
 /**
  * The id a Judge is priced under: LiteLLM's key naming, which the price
  * source, its overrides and its snapshot use. Anthropic and OpenAI models are
  * keyed by their bare id, Gemini Developer API models by `gemini/<id>`; any
- * other vendor by the full router id.
+ * other vendor by the full `vendor/model` id.
  */
 export function judgePriceModel(model: string): string {
   const vendor = judgeVendor(model);
-  const { id } = parseRouterId(model);
+  const { id } = parseModelId(model);
   switch (vendor) {
     case "anthropic":
     case "openai":
@@ -95,7 +102,7 @@ export function judgePriceModel(model: string): string {
   }
 }
 
-/** The router vendor of an Image Model, from how it is billed; undefined when unknown. */
+/** The vendor of an Image Model, from how it is billed; undefined when unknown. */
 function imageModelVendor(model: string): string | undefined {
   switch (pricingSpec(model).mode) {
     case "GeminiImage":
@@ -207,7 +214,7 @@ export type JudgeCallResult =
 
 /** A vision model scoring Candidates against a Rubric (GLOSSARY "Judge"). */
 export interface Judge {
-  /** The model router id. */
+  /** The `vendor/model` id. */
   readonly model: string;
   readonly effort: JudgeEffort;
   /** The price its estimates and actual costs use: the one recorded when the Run started. */
@@ -273,12 +280,12 @@ const imageTokenBounds: { readonly [V in JudgeVendor]: (id: string) => number | 
 };
 
 /**
- * The input tokens one Judge image can cost at most, for this router id;
+ * The input tokens one Judge image can cost at most, for this model id;
  * undefined when no documented bound covers the model (it can't be a Judge).
  */
 export function judgeImageTokens(model: string): number | undefined {
   const vendor = judgeVendor(model);
-  return vendor && imageTokenBounds[vendor](parseRouterId(model).id);
+  return vendor && imageTokenBounds[vendor](parseModelId(model).id);
 }
 
 /**

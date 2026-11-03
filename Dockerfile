@@ -41,14 +41,12 @@ COPY --from=build --chown=nonroot:nonroot /data /data
 WORKDIR /app
 # Listening on every interface is needed inside the container's own network namespace for a
 # published port to reach the server; the host-side exposure is the publish address
-# (compose.yaml: 127.0.0.1 only, ADR-0012). Bun reads BUN_CONFIG_HTTP_IDLE_TIMEOUT only from the
-# OS environment at start: above the longest Judge call (600 s), or the Judge refuses to start.
+# (compose.yaml: 127.0.0.1 only, ADR-0012).
 ENV ICONOGRAPH_HOST=0.0.0.0 \
     ICONOGRAPH_PORT=4111 \
     ICONOGRAPH_DATA_DIR=/data \
     MASTRA_TELEMETRY_DISABLED=1 \
     DO_NOT_TRACK=1 \
-    BUN_CONFIG_HTTP_IDLE_TIMEOUT=900 \
     NODE_ENV=production
 USER nonroot
 VOLUME /data

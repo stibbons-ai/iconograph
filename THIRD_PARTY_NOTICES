@@ -26,6 +26,13 @@ Runtime
   is prohibited by this project's lint policy; package-level Apache metadata
   does not grant rights to enterprise content.
 
+@ai-sdk/anthropic 3.0.133, @ai-sdk/openai 3.0.130, @ai-sdk/google 3.0.135,
+@ai-sdk/provider 3.0.19, @ai-sdk/provider-utils 4.0.61 — Apache-2.0.
+  Upstream: https://github.com/vercel/ai
+  Copyright 2023 Vercel, Inc. The Judge's vendor providers (ADR-0013),
+  bundled into the server. @ai-sdk/provider-utils ships no LICENSE file; its
+  licence is from its package.json.
+
 effect 4.1.1 — MIT.
   Upstream: https://github.com/Effect-TS/effect
   Copyright (c) 2023 Effectful Technologies Inc.

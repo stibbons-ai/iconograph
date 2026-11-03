@@ -14,6 +14,7 @@ import {
   Unpriced,
 } from "@iconograph/domain";
 import { Effect, Layer } from "effect";
+import { JUDGE_BASE_URLS, MastraJudges } from "../../src/judge";
 import { FAKE_PRICE } from "./fake-image-models";
 
 export const FAKE_JUDGE_ESTIMATE_MICROS = 10_000;
@@ -96,7 +97,7 @@ const answer = (response: FakeJudgeResponse | undefined, price: PriceQuote): Jud
 };
 
 /**
- * A Judge that answers from a script, for Run-engine tests: any router id
+ * A Judge that answers from a script, for Run-engine tests: any model id
  * resolves to it (priced as an LLM under `judgePriceModel`), unless `unpriced`.
  */
 export function fakeJudges(
@@ -138,16 +139,48 @@ export function fakeJudges(
           );
         }
         return Effect.succeed(
-          judge(
-            config,
-            recorded ?? {
-              model,
-              pricing: options.lookupPricing?.(lookups++) ?? FAKE_JUDGE_PRICING,
-              source: FAKE_PRICE.source,
-            },
-          ),
+          judge(config, recorded ?? fakeJudgePrice(model, options.lookupPricing?.(lookups++))),
         );
       },
     }),
   };
 }
+
+/** A fresh fake price lookup's quote for `model`. */
+const fakeJudgePrice = (
+  model: string,
+  pricing: PriceQuote["pricing"] = FAKE_JUDGE_PRICING,
+): PriceQuote => ({ model, pricing, source: FAKE_PRICE.source });
+
+/**
+ * The real Judges, priced at `FAKE_JUDGE_PRICING`, with their calls to the
+ * Anthropic API sent to the fake one at `origin`. A request to a loopback
+ * address goes there unchanged, so a local trap sees a misrouted call; any
+ * other request is refused before it leaves, so no test reaches a live vendor.
+ */
+export const judgesOnFakeAnthropic = (origin: string) => {
+  const anthropic = new URL(JUDGE_BASE_URLS.anthropic).origin;
+  return MastraJudges({
+    prices: { lookup: (model) => Effect.succeed(fakeJudgePrice(model)) },
+    fetch: async (input, init) => {
+      const url = new URL(String(input));
+      if (url.origin === anthropic) return fetch(`${origin}${url.pathname}${url.search}`, init);
+      if (["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)) return fetch(url, init);
+      // ERR_INVALID_URL: classified as failed at $0 and not retried, like a local refusal.
+      throw Object.assign(
+        new TypeError(`The fake Anthropic Judge refused a request to ${url.origin}`),
+        { code: "ERR_INVALID_URL" },
+      );
+    },
+  });
+};
+
+/**
+ * The Judges of the test entry points: the real Judges on the fake Anthropic
+ * API at FAKE_ANTHROPIC_ORIGIN when it is set, else the fake Judge answering
+ * from `script`.
+ */
+export const fakeJudgesFromEnv = (script: readonly FakeJudgeResponse[] = []) => {
+  const origin = process.env.FAKE_ANTHROPIC_ORIGIN;
+  return origin ? judgesOnFakeAnthropic(origin) : fakeJudges(script).layer;
+};

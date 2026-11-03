@@ -116,7 +116,7 @@ jobs:
           outputs: type=docker,name=iconograph:ci,rewrite-timestamp=true
           cache-from: type=gha,scope=image-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=image-${{ matrix.arch }}
-      - name: Smoke test the image (Mastra capabilities, ORT loads SFace, sharp, LibSQL, HEIC, Judge idle timeout)
+      - name: Smoke test the image (Mastra capabilities, ORT loads SFace, sharp, LibSQL, HEIC)
         run: >-
           docker run --rm -v "$PWD/.data/models:/data/models:ro"
           --entrypoint /usr/local/bin/bun iconograph:ci /app/smoke.js

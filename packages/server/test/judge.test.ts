@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { fileURLToPath } from "node:url";
 import {
   DEFAULT_TARGET_LOOK,
   type EncodedImage,
@@ -7,7 +8,7 @@ import {
   judgeImageTokens,
   judgeInstructions,
   judgeMessage,
-  judgeTimeoutMs,
+  judgeVendor,
   JudgeVerdict,
   type Judge,
   type JudgeCallResult,
@@ -18,11 +19,13 @@ import {
 } from "@iconograph/domain";
 import type { MastraModelConfig } from "@mastra/core/llm";
 import { MastraLanguageModelV2Mock } from "@mastra/core/test-utils/llm-mock";
-import { Effect } from "effect";
+import { Effect, type Layer } from "effect";
 import { toMastraSchema } from "@iconograph/adapters";
-import { MastraJudges } from "../src/judge";
+import { withEnvironment } from "../../adapters/test/git-environment";
+import { MastraJudges, type MastraJudgesOptions } from "../src/judge";
 import { faceFixture } from "./support/fake-image-models";
-import { FAKE_VERDICT } from "./support/fake-judges";
+import { FAKE_VERDICT, judgesOnFakeAnthropic } from "./support/fake-judges";
+import { fakeVendorServer, vendorAnswer } from "./support/fake-vendors";
 
 const KEY = "SENTINEL-JUDGE-KEY-0123456789";
 
@@ -45,15 +48,36 @@ const answer =
   (text: string, options: Omit<MockAnswer, "text"> = {}) =>
   async (): Promise<MockAnswer> => ({ text, ...options });
 
-/** Every vendor's key, and Bun's idle timeout as `bun run run` sets it. */
+/** Every vendor's key. */
 const allKeys = {
   ANTHROPIC_API_KEY: KEY,
   OPENAI_API_KEY: KEY,
   GOOGLE_GENERATIVE_AI_API_KEY: KEY,
-  BUN_CONFIG_HTTP_IDLE_TIMEOUT: "900",
 };
 
-/** Judges whose model router is replaced by a mock model answering with `respond`. */
+/** Gets a Judge from Judges built by `layer`. */
+const getJudge = (
+  layer: Layer.Layer<Judges>,
+  model = "anthropic/claude-sonnet-5-5",
+  effort: JudgeEffort = "low",
+  recorded?: PriceQuote,
+) =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      return yield* (yield* Judges).get({ model, effort }, recorded);
+    }).pipe(Effect.provide(layer)),
+  );
+
+/** The real provider-built Judges, their network replaced by `network`. */
+const providerJudges = (network: NonNullable<MastraJudgesOptions["fetch"]>, timeoutMs?: number) =>
+  MastraJudges({
+    env: allKeys,
+    ...(timeoutMs !== undefined && { timeoutMs }),
+    prices: { lookup: (priced) => Effect.succeed({ ...sonnetPrice, model: priced }) },
+    fetch: network,
+  });
+
+/** Judges whose language model is replaced by a mock model answering with `respond`. */
 function judges(
   respond: (options: CallOptions) => Promise<MockAnswer>,
   env: Record<string, string | undefined> = allKeys,
@@ -90,16 +114,8 @@ function judges(
       return mock as unknown as MastraModelConfig;
     },
   });
-  const get = (
-    model = "anthropic/claude-sonnet-5-5",
-    effort: JudgeEffort = "low",
-    recorded?: PriceQuote,
-  ) =>
-    Effect.runPromise(
-      Effect.gen(function* () {
-        return yield* (yield* Judges).get({ model, effort }, recorded);
-      }).pipe(Effect.provide(layer)),
-    );
+  const get = (model?: string, effort?: JudgeEffort, recorded?: PriceQuote) =>
+    getJudge(layer, model, effort, recorded);
   return { get, calls, keys, lookups };
 }
 
@@ -173,21 +189,183 @@ describe("Mastra Judge", () => {
   });
 
   test.each([
-    ["anthropic/claude-sonnet-5-5", "low", { anthropic: { effort: "low" } }],
-    ["openai/gpt-5.5", "medium", { openai: { reasoningEffort: "medium" } }],
+    [
+      "anthropic/claude-sonnet-5-5",
+      "low",
+      "ANTHROPIC_BASE_URL",
+      "https://api.anthropic.com/v1/messages",
+      ["x-api-key", KEY],
+      { model: "claude-sonnet-5-5", output_config: { effort: "low" } },
+    ],
+    [
+      "openai/gpt-5.5",
+      "medium",
+      "OPENAI_BASE_URL",
+      "https://api.openai.com/v1/responses",
+      ["authorization", `Bearer ${KEY}`],
+      { model: "gpt-5.5", reasoning: { effort: "medium" } },
+    ],
     [
       "google/gemini-3.1-pro-preview",
       "high",
-      { google: { thinkingConfig: { thinkingLevel: "high" } } },
+      "GOOGLE_BASE_URL",
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent",
+      ["x-goog-api-key", KEY],
+      // The model is in the URL. @ai-sdk/google reads no base-URL variable (only Mastra's router
+      // read GOOGLE_BASE_URL), so this case guards the endpoint rather than an override.
+      { generationConfig: { thinkingConfig: { thinkingLevel: "high" } } },
     ],
   ] as const)(
-    "%s at %s effort sets the vendor's reasoning parameter",
-    async (model, effort, expected) => {
-      const fake = judges(answer(JSON.stringify(FAKE_VERDICT)));
-      await call(await fake.get(model, effort));
-      expect(fake.calls[0]!.providerOptions).toEqual(expected);
+    "%s at %s effort sends its key, photos and reasoning effort only to its vendor's API, whatever %s says",
+    async (model, effort, variable, url, [header, auth], reasoning) => {
+      // The fetch seam is the provider's whole network: every request it sends is seen here.
+      const sent: { url: string; init: BunFetchRequestInit }[] = [];
+      const layer = providerJudges(async (input, init) => {
+        sent.push({ url: String(input), init });
+        return vendorAnswer(judgeVendor(model)!, JSON.stringify(FAKE_VERDICT));
+      });
+      const request = await judgeRequest();
+      const result = await withEnvironment({ [variable]: "https://proxy.example/v1" }, async () =>
+        Effect.runPromise((await getJudge(layer, model, effort)).call(request)),
+      );
+      // $2/M input and $10/M output: 9,000 × 2e-6 + 300 × 1e-5 = $0.021.
+      expect(result).toMatchObject({ kind: "judged", verdict: FAKE_VERDICT, costMicros: 21_000 });
+      expect(sent.map((request) => request.url)).toEqual([url]);
+      const { init } = sent[0]!;
+      expect(new Headers(init.headers).get(header)).toBe(auth);
+      // Bun's fetch idle timeout is off: the per-effort abort is the only deadline.
+      expect(init.timeout).toBe(false);
+      expect(JSON.parse(String(init.body))).toMatchObject(reasoning);
+      expect(String(init.body)).toContain(base64(request.references[0]!));
+      expect(String(init.body)).toContain(base64(request.candidate));
     },
   );
+
+  test.each(["anthropic/claude-sonnet-5-5", "openai/gpt-5.5", "google/gemini-3.1-pro-preview"])(
+    "%s: a call past the timeout aborts the vendor request itself",
+    async (model) => {
+      const signals: (AbortSignal | undefined)[] = [];
+      const layer = providerJudges((_, init) => {
+        // Never answers; fails only when its signal aborts.
+        const { promise, reject } = Promise.withResolvers<Response>();
+        signals.push(init.signal ?? undefined);
+        init.signal?.addEventListener("abort", () => reject(init.signal?.reason));
+        return promise;
+      }, 150);
+      expect(await call(await getJudge(layer, model))).toEqual({
+        kind: "transient",
+        reason: "Judge request timed out after 0.15 s",
+        costMicros: null,
+      });
+      // With the idle timeout off, this signal is all that closes the connection.
+      expect(signals.map((signal) => signal?.aborted)).toEqual([true]);
+    },
+  );
+
+  test.each(["anthropic/claude-sonnet-5-5", "openai/gpt-5.5", "google/gemini-3.1-pro-preview"])(
+    "%s: an answer cut off at the output cap fails the judging at its cost",
+    async (model) => {
+      const layer = providerJudges(async () =>
+        vendorAnswer(judgeVendor(model)!, '{"levels": {"resemblance": 4', true),
+      );
+      expect(await call(await getJudge(layer, model))).toMatchObject({
+        kind: "failed",
+        costMicros: 21_000,
+        reason: `The Judge hit its ${JUDGE_MAX_OUTPUT_TOKENS.low}-token output cap, reasoning included, before finishing its answer`,
+      });
+    },
+  );
+
+  test.each([
+    [
+      "a 429",
+      async () =>
+        Response.json(
+          { type: "error", error: { type: "rate_limit_error", message: `slow down, ${KEY}` } },
+          { status: 429 },
+        ),
+      { kind: "transient", costMicros: 0, reason: expect.stringMatching(/HTTP 429.*\[redacted\]/) },
+    ],
+    [
+      "a refused connection",
+      // Port 1 on loopback: nothing listens, so Bun's fetch fails to connect.
+      (_: unknown, init: BunFetchRequestInit) => fetch("http://127.0.0.1:1/", init),
+      { kind: "transient", costMicros: 0 },
+    ],
+    [
+      "an idle connection cut by a TimeoutError the deadline didn't raise",
+      async () => {
+        throw new DOMException(`The operation timed out (${KEY}).`, "TimeoutError");
+      },
+      {
+        kind: "transient",
+        costMicros: null,
+        reason:
+          "Judge connection idle timeout, not the Judge's 180 s deadline: The operation timed out ([redacted]).",
+      },
+    ],
+  ] as const)(
+    "through the Anthropic provider, %s is classified, the key redacted",
+    async (_, network, expected) => {
+      const result = await call(await getJudge(providerJudges(network)));
+      expect(result).toMatchObject(expected);
+      expect(JSON.stringify(result)).not.toContain(KEY);
+    },
+  );
+
+  test("the fake Anthropic Judge refuses a request to any other vendor before it is sent", async () => {
+    const vendor = fakeVendorServer(() => vendorAnswer("anthropic", JSON.stringify(FAKE_VERDICT)));
+    try {
+      const result = await withEnvironment({ OPENAI_API_KEY: KEY }, async () =>
+        call(await getJudge(judgesOnFakeAnthropic(vendor.origin), "openai/gpt-5.5")),
+      );
+      // Failed at $0 and not retried, so no test can reach a live vendor by accident.
+      expect(result).toMatchObject({ kind: "failed", costMicros: 0 });
+      expect(vendor.requests).toEqual([]);
+    } finally {
+      await vendor.stop();
+    }
+  });
+
+  test("a call outlasting Bun's fetch idle timeout completes, where a plain fetch is cut off", async () => {
+    const script = fileURLToPath(new URL("./support/slow-vendor-judge.ts", import.meta.url));
+    // The script runs with a 1 s idle timeout. The fake Anthropic API never answers its plain
+    // fetch, and answers the Judge only after Bun has cut that fetch off. The two requests must
+    // arrive within a second of each other: Bun's idle sweep is coarse, so a Judge request
+    // arriving seconds later could be answered before its own cut. A real wait: the idle timer
+    // is Bun's native one, which fake timers can't drive (it fires about 8 s in).
+    const { promise: plainCutOff, resolve } = Promise.withResolvers<void>();
+    const arrivedAt: Record<string, number> = {};
+    const vendor = fakeVendorServer(async (request) => {
+      const { pathname } = new URL(request.url);
+      arrivedAt[pathname] = performance.now();
+      if (pathname === "/") {
+        request.signal.addEventListener("abort", () => resolve());
+        return new Promise<Response>(() => {});
+      }
+      await plainCutOff;
+      return vendorAnswer("anthropic", JSON.stringify(FAKE_VERDICT));
+    });
+    const child = Bun.spawn([process.execPath, script, vendor.origin], {
+      env: { ...Bun.env, ANTHROPIC_API_KEY: KEY, BUN_CONFIG_HTTP_IDLE_TIMEOUT: "1" },
+      stderr: "inherit",
+    });
+    try {
+      const [stdout, exitCode] = await Promise.all([
+        new Response(child.stdout).text(),
+        child.exited,
+      ]);
+      expect({ stdout, exitCode }).toEqual({
+        stdout: JSON.stringify({ judge: "judged", plainFetch: "TimeoutError" }),
+        exitCode: 0,
+      });
+      expect(arrivedAt["/v1/messages"]! - arrivedAt["/"]!).toBeLessThan(1_000);
+      expect(vendor.requests.map(({ path }) => path).sort()).toEqual(["/", "/v1/messages"]);
+    } finally {
+      child.kill();
+      await vendor.stop();
+    }
+  }, 30_000);
 
   test("an answer outside the verdict schema fails the judging, says where, and still costs what was billed", async () => {
     const outOfRange = { ...FAKE_VERDICT, levels: { ...FAKE_VERDICT.levels, realism: 7 } };
@@ -389,48 +567,6 @@ describe("Mastra Judge", () => {
     );
     expect(result).toMatchObject({ kind: "transient", reason: "Judge HTTP 500: (empty body)" });
   });
-
-  test("a Judge whose calls could outlast Bun's fetch idle timeout is refused, naming the fix", async () => {
-    const { BUN_CONFIG_HTTP_IDLE_TIMEOUT: _, ...bunDefault } = allKeys;
-    // Bun's default idle timeout is 300 s: more than low effort's 180 s, not more than medium's
-    // 300 s or high's 600 s.
-    await expect(judges(answer("{}"), bunDefault).get(undefined, "low")).resolves.toBeDefined();
-    for (const effort of ["medium", "high"] as const) {
-      await expect(judges(answer("{}"), bunDefault).get(undefined, effort)).rejects.toThrow(
-        `before its ${judgeTimeoutMs(effort) / 1000} s timeout`,
-      );
-    }
-    await expect(judges(answer("{}")).get(undefined, "high")).resolves.toBeDefined();
-    // Bun takes whole seconds only: 900.5 leaves its 300 s default.
-    await expect(
-      judges(answer("{}"), { ...bunDefault, BUN_CONFIG_HTTP_IDLE_TIMEOUT: "900.5" }).get(
-        undefined,
-        "high",
-      ),
-    ).rejects.toThrow("OS environment");
-  });
-
-  test.each([
-    ["anthropic/claude-sonnet-5-5", "ANTHROPIC_BASE_URL"],
-    ["openai/gpt-5.5", "OPENAI_BASE_URL"],
-    ["google/gemini-3.1-pro-preview", "GOOGLE_BASE_URL"],
-  ] as const)(
-    "%s is refused while %s is set, even empty: the key and photos would go there",
-    async (model, variable) => {
-      for (const value of ["https://user:secret-token@proxy.example:8443/v1", ""]) {
-        const fake = judges(answer("{}"), { ...allKeys, [variable]: value });
-        const error = await fake.get(model).catch((failure: unknown) => failure as Error);
-        expect(String(error)).toContain(`${variable} is set`);
-        expect(String(error)).not.toContain("secret-token");
-        expect(fake.lookups).toEqual([]);
-      }
-      // Another vendor's variable doesn't block this Judge.
-      const other = variable === "ANTHROPIC_BASE_URL" ? "OPENAI_BASE_URL" : "ANTHROPIC_BASE_URL";
-      await expect(
-        judges(answer("{}"), { ...allKeys, [other]: "https://elsewhere" }).get(model),
-      ).resolves.toBeDefined();
-    },
-  );
 
   test("the estimate counts the instructions, the schema as sent and the message", async () => {
     const judge = await judges(answer("{}")).get();

@@ -12,6 +12,7 @@ export {
   errorChain,
   errorLine,
   errorMessage,
+  hasErrorNamed,
   statusOf,
   withCleanup,
 } from "./errors";

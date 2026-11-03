@@ -1,7 +1,11 @@
+import { createAnthropic } from "@ai-sdk/anthropic";
+import { createGoogleGenerativeAI } from "@ai-sdk/google";
+import { createOpenAI } from "@ai-sdk/openai";
 import {
   apiKeyFromEnv,
   codeOf,
   errorMessage,
+  hasErrorNamed,
   httpErrorResult,
   type PriceSource,
   redactKey,
@@ -24,7 +28,7 @@ import {
   Judges,
   JudgeUnavailable,
   JudgeVerdict,
-  judgeVendor,
+  parseJudgeModel,
   JUDGE_MAX_OUTPUT_TOKENS,
   llmCostMicros,
   Unpriced,
@@ -43,10 +47,56 @@ const judgeKeys: { readonly [V in JudgeVendor]: readonly [string, ...string[]] }
 };
 
 /**
+ * Each vendor's API endpoint: the provider packages' own defaults, set
+ * explicitly so `ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL`, which those
+ * packages read when none is given, can't send the key and the Reference
+ * Photos elsewhere.
+ */
+export const JUDGE_BASE_URLS: { readonly [V in JudgeVendor]: string } = {
+  anthropic: "https://api.anthropic.com/v1",
+  openai: "https://api.openai.com/v1",
+  google: "https://generativelanguage.googleapis.com/v1beta",
+};
+
+/** `fetch` without Bun's `preconnect`: the network a Judge's provider sends through. */
+type JudgeFetch = (input: string | URL | Request, init: BunFetchRequestInit) => Promise<Response>;
+
+/**
+ * The Judge's language model from its vendor's AI SDK provider, called the
+ * way Mastra's model router calls it (OpenAI through the Responses API).
+ * Calls are non-streaming, so no bytes arrive until the answer is done: each
+ * request turns off Bun's fetch idle timeout (300 s by default), leaving the
+ * per-effort abort as the only deadline.
+ */
+function judgeLanguageModel(
+  vendor: JudgeVendor,
+  modelId: string,
+  apiKey: string,
+  network: JudgeFetch,
+): MastraModelConfig {
+  const settings = {
+    apiKey,
+    baseURL: JUDGE_BASE_URLS[vendor],
+    fetch: Object.assign(
+      (input: string | URL | Request, init?: RequestInit) =>
+        network(input, { ...init, timeout: false }),
+      { preconnect: fetch.preconnect },
+    ),
+  };
+  switch (vendor) {
+    case "anthropic":
+      return createAnthropic(settings).languageModel(modelId);
+    case "openai":
+      return createOpenAI(settings).responses(modelId);
+    case "google":
+      return createGoogleGenerativeAI(settings).chat(modelId);
+  }
+}
+
+/**
  * The provider options setting a role's effort through each vendor's reasoning
- * parameter, as Mastra's model router passes them on (checked against Mastra
- * 1.80's provider options): Anthropic `effort`, OpenAI `reasoningEffort`,
- * Gemini `thinkingConfig.thinkingLevel`.
+ * parameter (checked against the pinned AI SDK providers): Anthropic `effort`,
+ * OpenAI `reasoningEffort`, Gemini `thinkingConfig.thinkingLevel`.
  */
 function reasoningOptions(vendor: JudgeVendor, effort: JudgeEffort) {
   switch (vendor) {
@@ -65,10 +115,16 @@ export interface MastraJudgesOptions {
   /** Where API keys are read from; defaults to the process environment. Keys are never stored. */
   env?: Record<string, string | undefined>;
   /**
-   * Replaces the model router's network model (recorded-response tests). Given
-   * the router id and the API key it would have been called with.
+   * Replaces the Judge's language model (recorded-response tests), bypassing
+   * the vendor's provider, its base URL and `fetch`. Given the `vendor/model`
+   * id and the API key it would have been called with.
    */
   languageModel?: (model: string, apiKey: string) => MastraModelConfig;
+  /**
+   * The network under the vendor's provider (fake-vendor tests); defaults to
+   * `fetch`. Each request arrives with Bun's idle timeout already turned off.
+   */
+  fetch?: JudgeFetch;
   /** A call still running after this long is aborted (default per effort, `JUDGE_TIMEOUT_MS`). */
   timeoutMs?: number;
 }
@@ -88,20 +144,6 @@ const instructions = judgeInstructions(rubric);
 const prompt =
   instructions +
   JSON.stringify(verdictSchema["~standard"].jsonSchema.input({ target: "draft-07" }));
-
-/** Bun's default fetch idle timeout when `BUN_CONFIG_HTTP_IDLE_TIMEOUT` isn't set: 5 minutes. */
-const BUN_DEFAULT_IDLE_TIMEOUT_S = 300;
-
-/**
- * Bun's fetch idle timeout for this process. Bun reads the variable once, from
- * the OS environment at start (not from a `.env` file), as whole seconds; any
- * other value leaves the default. Calls are non-streaming, so no bytes arrive
- * until the answer is done, and a call running longer than this is cut off.
- */
-export function bunIdleTimeoutMs(env: Record<string, string | undefined>): number {
-  const value = env.BUN_CONFIG_HTTP_IDLE_TIMEOUT?.trim() ?? "";
-  return (/^[1-9]\d*$/.test(value) ? Number(value) : BUN_DEFAULT_IDLE_TIMEOUT_S) * 1000;
-}
 
 /** The token counts of a usage report that are numbers, as stored. */
 function usageOf(usage: Record<string, unknown> | undefined): Usage | null {
@@ -136,16 +178,6 @@ const NOT_SENT_CODES = new Set(["ENOTFOUND", "EAI_AGAIN", "ConnectionRefused", "
  */
 const LOCAL_CODE = /^ERR_(INVALID_|.*_ARGS?(_|$))/;
 const NOT_SENT_LOCAL_CODES = new Set(["ERR_INVALID_URL"]);
-
-/** A URL's origin for messages: no path, query or userinfo (which may hold a token). */
-function originOf(url: string): string {
-  if (url === "") return "empty";
-  try {
-    return new URL(url).origin;
-  } catch {
-    return "not a URL";
-  }
-}
 
 /** An error's message, or a marker when the vendor sent an empty body. */
 const messageOf = (error: unknown) => errorMessage(error) || "(empty body)";
@@ -247,48 +279,30 @@ function classifyResult(
 }
 
 /**
- * The Judges behind Mastra agents on the model router, selected by router id
- * (`vendor/model`). Getting one checks the vendor, its API key and its LLM
+ * The Judges behind Mastra agents on their vendor's AI SDK provider, selected
+ * by `vendor/model` id. Getting one checks the vendor, its API key and its LLM
  * price first, so a Run fails before any billable call. Each call is one
  * structured-output generation with the vendor's reasoning effort and an
  * output cap; Mastra's own retries are off, since the engine retries each
  * attempt as a reserved, billed call. Only the Rubric, the Reference Photos,
- * the Candidate and the Target Look are sent; nothing is stored by Mastra.
+ * the Candidate and the Target Look are sent, to the vendor's own API
+ * endpoint; nothing is stored by Mastra.
  */
 export const MastraJudges = (options: MastraJudgesOptions) =>
   Layer.succeed(Judges)({
     get: ({ model, effort }, recorded) =>
       Effect.gen(function* () {
-        const vendor = judgeVendor(model);
-        if (vendor === undefined) {
+        const judgeModel = parseJudgeModel(model);
+        if (judgeModel === undefined) {
           return yield* new JudgeUnavailable({
             model,
-            message: `No Judge for "${model}"; the Judge is an anthropic/, openai/ or google/ model router id`,
+            message: `No Judge for "${model}"; the Judge is an anthropic/, openai/ or google/ model`,
           });
         }
-        const env = options.env ?? process.env;
-        const read = apiKeyFromEnv(env, judgeKeys[vendor], model);
+        const { vendor } = judgeModel;
+        const read = apiKeyFromEnv(options.env ?? process.env, judgeKeys[vendor], model);
         if ("problem" in read) return yield* new JudgeUnavailable({ model, message: read.problem });
         const apiKey = read.key;
-        // Mastra's router sends a vendor's calls to `<VENDOR>_BASE_URL` when it is set: the key and
-        // the Reference Photos would go there instead of the vendor.
-        const baseUrlVariable = `${vendor.toUpperCase()}_BASE_URL`;
-        // Set at all, even empty: an empty value becomes an invalid relative base URL.
-        const baseUrl = env[baseUrlVariable];
-        if (baseUrl !== undefined) {
-          return yield* new JudgeUnavailable({
-            model,
-            message: `${baseUrlVariable} is set (${originOf(baseUrl)}); the Judge would send its key and the Reference Photos there instead of ${vendor}. Unset it (even an empty value counts) to run the Judge`,
-          });
-        }
-        const timeoutMs = options.timeoutMs ?? judgeTimeoutMs(effort);
-        const idleMs = bunIdleTimeoutMs(env);
-        if (idleMs <= timeoutMs) {
-          return yield* new JudgeUnavailable({
-            model,
-            message: `Bun's fetch idle timeout (BUN_CONFIG_HTTP_IDLE_TIMEOUT, ${idleMs / 1000} s) would cut off a ${effort}-effort Judge call before its ${timeoutMs / 1000} s timeout; start with \`bun run run\` or \`bun run serve\`, or start Bun with BUN_CONFIG_HTTP_IDLE_TIMEOUT above ${timeoutMs / 1000} (whole seconds) in the OS environment; a .env file is read too late`,
-          });
-        }
         const imageTokens = judgeImageTokens(model);
         if (imageTokens === undefined) {
           return yield* new JudgeUnavailable({
@@ -317,13 +331,13 @@ export const MastraJudges = (options: MastraJudgesOptions) =>
           return yield* new Unpriced({ model, reason: `priced as ${pricing._tag}, not as an LLM` });
         }
 
-        // Any router id: the vendor was checked above; the model router resolves the rest.
-        const routed: MastraModelConfig = { id: model as `${string}/${string}`, apiKey };
         const agent = new Agent({
           id: "judge",
           name: "Judge",
           instructions,
-          model: options.languageModel?.(model, apiKey) ?? routed,
+          model:
+            options.languageModel?.(model, apiKey) ??
+            judgeLanguageModel(vendor, judgeModel.id, apiKey, options.fetch ?? fetch),
           // The engine retries: each attempt is reserved against the Budget first.
           errorProcessorDefaults: false,
         });
@@ -331,6 +345,7 @@ export const MastraJudges = (options: MastraJudgesOptions) =>
         const providerOptions = reasoningOptions(vendor, effort);
         const redact = redactKey(apiKey);
         const outputCap = JUDGE_MAX_OUTPUT_TOKENS[effort];
+        const timeoutMs = options.timeoutMs ?? judgeTimeoutMs(effort);
         const timedOut: JudgeCallResult = {
           kind: "transient",
           reason: `Judge request timed out after ${timeoutMs / 1000} s`,
@@ -367,10 +382,29 @@ export const MastraJudges = (options: MastraJudgesOptions) =>
               catch: (error) => error,
             }).pipe(
               Effect.match({
-                // Mastra resolves an aborted generation with an empty result instead of failing.
+                // Mastra resolves an aborted generation with an empty result.
                 onSuccess: (result) =>
                   timeout.aborted ? timedOut : classifyResult(result, pricing, outputCap),
-                onFailure: (error) => classifyError(error, redact),
+                onFailure: (error): JudgeCallResult => {
+                  const abortLike =
+                    hasErrorNamed(error, "TimeoutError") || hasErrorNamed(error, "AbortError");
+                  // Defensive, for a Mastra that rejects on abort instead of resolving: past the
+                  // deadline, an abort error is the deadline's; a vendor answer still classifies.
+                  if (timeout.aborted && abortLike) return timedOut;
+                  // A TimeoutError our deadline didn't raise is a cut idle connection (Bun's
+                  // fetch idle timeout, which the Judge turns off): name it, so it isn't taken
+                  // for the deadline.
+                  if (hasErrorNamed(error, "TimeoutError")) {
+                    return {
+                      kind: "transient",
+                      reason: redact(
+                        `Judge connection idle timeout, not the Judge's ${timeoutMs / 1000} s deadline: ${messageOf(error)}`,
+                      ),
+                      costMicros: null,
+                    };
+                  }
+                  return classifyError(error, redact);
+                },
               }),
             );
           });
