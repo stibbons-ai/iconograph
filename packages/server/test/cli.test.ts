@@ -14,6 +14,8 @@ import {
   type FakeScript,
   subjectPhotos,
 } from "./support/fake-image-models";
+import { FAKE_VERDICT } from "./support/fake-judges";
+import { fakeVendorServer, vendorAnswer } from "./support/fake-vendors";
 
 const cli = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const withFakes = fileURLToPath(new URL("./support/run-cli-with-fakes.ts", import.meta.url));
@@ -104,6 +106,52 @@ test("a Run prints its estimate, then a report that read can reproduce", async (
   expect(read.lines).toEqual([]);
   expect(read.exitCode).toBe(0);
   expect(JSON.parse(read.stdout)).toEqual(report);
+}, 60_000);
+
+// End-to-end through the real Judge on a fake Anthropic API; nothing sets Bun's fetch idle timeout.
+test("a Run's Judge sends its key and the photos to the Anthropic API, whatever ANTHROPIC_BASE_URL says", async () => {
+  const key = "SENTINEL-JUDGE-KEY-0123456789";
+  const vendor = fakeVendorServer(() => vendorAnswer("anthropic", JSON.stringify(FAKE_VERDICT)));
+  const trap = fakeVendorServer(() => new Response("{}", { status: 500 }));
+  try {
+    const directory = await temporaryDirectory();
+    const common = ["--db", join(directory, "runs.db"), "--data-dir", join(directory, "data")];
+    const { stdout, exitCode } = await invoke(
+      withFakes,
+      [...common, "--candidates", "1", ...subjectPhotos],
+      ["same"],
+      {
+        FAKE_ANTHROPIC_ORIGIN: vendor.origin,
+        ANTHROPIC_API_KEY: key,
+        ANTHROPIC_BASE_URL: trap.origin,
+      },
+    );
+    expect(exitCode).toBe(0);
+    const report = JSON.parse(stdout);
+    expect(report.lanes[0].candidates[0].judgement).toMatchObject({
+      status: "judged",
+      levels: FAKE_VERDICT.levels,
+      issues: FAKE_VERDICT.issues,
+    });
+    // One $0.08 image and the Judge's 9,000 input and 300 output tokens at the fake's price.
+    expect(report.totals.actualUsd).toBe(0.084875);
+    expect(trap.requests).toEqual([]);
+    expect(vendor.requests).toHaveLength(1);
+    const [sent] = vendor.requests;
+    expect(sent!.path).toBe("/v1/messages");
+    expect(sent!.headers.get("x-api-key")).toBe(key);
+    const body = JSON.parse(sent!.body);
+    expect(body).toMatchObject({ model: "claude-sonnet-5-5", output_config: { effort: "low" } });
+    // A Reference Photo, then (after the other photos) the Candidate, each as an inline image.
+    const parts: { type: string; text?: string }[] = body.messages[0].content;
+    const candidate = parts.findIndex((part) => part.text === "Candidate:");
+    expect(parts[0]!.text).toStartWith("Reference Photo 1 of ");
+    expect([parts[1]!.type, parts[candidate + 1]!.type]).toEqual(["image", "image"]);
+    const read = await invoke(cli, ["read", ...common, "--run-id", report.runId]);
+    expect(JSON.parse(read.stdout)).toEqual(report);
+  } finally {
+    await Promise.all([vendor.stop(), trap.stop()]);
+  }
 }, 60_000);
 
 test("engine warnings, even while shutting down, are JSON lines on stderr; stdout stays the report", async () => {
@@ -293,7 +341,7 @@ test("errors are one JSON line on stderr with a nonzero exit and nothing on stdo
     ],
     [cli, ["read", ...common, "--run-id", "x", "--lane", "openai"], "read takes only"],
     [withFakes, [...common, "--judge-effort", "extreme", ...subjectPhotos], "effort"],
-    [withFakes, [...common, "--judge-model", "sonnet", ...subjectPhotos], "model router id"],
+    [withFakes, [...common, "--judge-model", "sonnet", ...subjectPhotos], "vendor/model id"],
     [
       cli,
       ["read", ...common, "--run-id", "x", "--judge-model", "openai/gpt-5.5"],

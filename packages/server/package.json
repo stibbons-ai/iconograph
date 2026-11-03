@@ -8,6 +8,9 @@
     "run": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun src/cli.ts"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "catalog:",
+    "@ai-sdk/google": "catalog:",
+    "@ai-sdk/openai": "catalog:",
     "@iconograph/domain": "workspace:*",
     "@iconograph/adapters": "workspace:*",
     "@mastra/core": "catalog:",

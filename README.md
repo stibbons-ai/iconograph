@@ -445,20 +445,22 @@ rejected before its price lookup and before any billable call, without echoing i
   and not retried; 408, 429 rate limits and 5xx responses and network failures are retried with
   exponential backoff (1 s, 2 s) up to twice, then Failed; quota, credit and spend-limit 429s,
   other errors, and a response without a usable image are Failed at once.
-- **Judge:** a Mastra agent with structured output, called through Mastra's model router; by
+- **Judge:** a Mastra agent with structured output, on its vendor's AI SDK provider
+  (`@ai-sdk/anthropic`, `@ai-sdk/openai` through the Responses API, `@ai-sdk/google`); by
   default Claude Sonnet 5.5 (`anthropic/claude-sonnet-5-5`) at `low` effort. `--judge-model` takes
-  any `anthropic/`, `openai/` or `google/` vision model router id; `--judge-effort` takes `low`,
-  `medium` or `high`, passed as the vendor's reasoning parameter (Anthropic `effort`, OpenAI
-  `reasoningEffort`, Gemini `thinkingConfig.thinkingLevel`). Its key comes from the environment
-  only: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GOOGLE_GENERATIVE_AI_API_KEY` (or
-  `GOOGLE_API_KEY`). The Judge is checked first, before any billable call: its key, then its
-  price lookup; a Run without the Judge's key fails before any price is looked up, while the
-  Image Models' keys are checked after the Judge's price. Mastra's model router sends a vendor's
-  calls to `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL` or `GOOGLE_BASE_URL` when that variable is set,
-  so the Judge refuses to start while its vendor's variable is set at all, even empty (an empty
-  value makes every call fail): the key and the Reference Photos would go there instead. The
-  message shows only the URL's origin, never userinfo or a token. Some agent shells set
-  `ANTHROPIC_BASE_URL`; run with `env -u ANTHROPIC_BASE_URL …`.
+  any `anthropic/`, `openai/` or `google/` vision model as a `vendor/model` id; any other vendor is
+  refused before any billable call. `--judge-effort` takes `low`, `medium` or `high`, passed as
+  the vendor's reasoning parameter (Anthropic `effort`, OpenAI `reasoningEffort`, Gemini
+  `thinkingConfig.thinkingLevel`). Its key comes from the environment only: `ANTHROPIC_API_KEY`,
+  `OPENAI_API_KEY`, or `GOOGLE_GENERATIVE_AI_API_KEY` (or `GOOGLE_API_KEY`). The Judge is checked
+  first, before any billable call: its key, then its price lookup; a Run without the Judge's key
+  fails before any price is looked up, while the Image Models' keys are checked after the Judge's
+  price. The key and the Reference Photos go only to the vendor's own API
+  (`https://api.anthropic.com/v1`, `https://api.openai.com/v1`,
+  `https://generativelanguage.googleapis.com/v1beta`), set explicitly: the base-URL variables
+  `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL` and `GOOGLE_BASE_URL` have no effect on the Judge. A
+  proxy set by `HTTPS_PROXY` (or `ALL_PROXY`) still carries the connection, tunnelled with TLS to
+  the vendor unless certificate checks are relaxed.
   Gated, Refused and Failed Candidates are never judged. Each Judge call sees the Rubric, then at
   most 3 representative Reference Photos of the Run, then the Candidate, then the Target Look
   (each facet quoted as a JSON string, and the Judge told never to follow it as an instruction);
@@ -471,12 +473,8 @@ rejected before its price lookup and before any billable call, without echoing i
   realism and the look, and it bounds what each image costs. Images go inline with every call (no
   vendor file reuse yet). A call is aborted after 180 s at `low` effort, 300 s at `medium` and
   600 s at `high`, room for the whole output cap at about 30 tokens/s. Calls don't stream, so no
-  bytes arrive until the answer is done, and Bun's fetch cuts off a request idle for longer than
-  `BUN_CONFIG_HTTP_IDLE_TIMEOUT` (whole seconds, default 300 s, read once from the OS environment
-  when Bun starts; a `.env` file is read too late to count): `bun run run`, `bun run serve` and
-  the container image set it to 900 s, and a Judge whose timeout it wouldn't exceed refuses to
-  start, naming the fix (run `bun packages/server/src/cli.ts` or `server.ts` directly only at
-  `low` effort, or set the variable yourself).
+  bytes arrive until the answer is done: the Judge's requests turn off Bun's fetch idle timeout
+  (300 s by default), leaving that abort as their only deadline.
   Anthropic deletes API inputs and outputs within 30 days unless a request is flagged
   under its Usage Policy (then up to 2 years) or a zero-retention agreement applies
   ([Anthropic Privacy Center](https://privacy.claude.com/en/articles/7996866-how-long-do-you-store-my-organization-s-data));
@@ -638,9 +636,7 @@ the locked weights into the volume's `models/` folder first (see "Model weights"
 **Keys** come from `.env` only: the Judge's vendor (`ANTHROPIC_API_KEY` for the default
 `anthropic/claude-sonnet-5-5`, `OPENAI_API_KEY` for an `openai/` Judge,
 `GOOGLE_GENERATIVE_AI_API_KEY` for a `google/` one) and every Lane's Image Model
-(`GEMINI_API_KEY`, `OPENAI_API_KEY`). The image sets `BUN_CONFIG_HTTP_IDLE_TIMEOUT=900` in its
-`ENV`, as `bun run serve` does: Bun reads it only from the OS environment when it starts, and below
-the longest Judge call (600 s at `high` effort) the Judge refuses to start (see "Runs").
+(`GEMINI_API_KEY`, `OPENAI_API_KEY`).
 
 **Only localhost can reach it.** The server listens on `127.0.0.1` by default; outside a
 container `ICONOGRAPH_HOST` and `ICONOGRAPH_PORT` change that, and any non-loopback address logs a
@@ -719,11 +715,10 @@ The server keeps its Runs in `<data volume>/iconograph.db`, while `bun run run r
 `sharp`, `libsql` and `libheif-js` external; a production install of only those, generated from
 `bun.lock` with their exact versions and integrity hashes and pruned to one platform
 (`--os`, `--cpu`, `--libc`; default this machine); and Mastra's model-capability JSON, which
-Mastra reads beside its own `package.json`. `BUN_CONFIG_HTTP_IDLE_TIMEOUT=900 bun
-dist/server/smoke.js` (or, for an image, `docker run --rm -v "$PWD/.data/models:/data/models:ro"
---entrypoint /usr/local/bin/bun IMAGE /app/smoke.js`) checks that the capabilities resolve, ONNX
-Runtime loads SFace, `sharp` decodes, LibSQL opens a file, the HEIC decoder loads and Bun's fetch
-idle timeout outlasts the longest Judge call.
+Mastra reads beside its own `package.json`. `bun dist/server/smoke.js` (or, for an image,
+`docker run --rm -v "$PWD/.data/models:/data/models:ro" --entrypoint /usr/local/bin/bun IMAGE
+/app/smoke.js`) checks that the capabilities resolve, ONNX Runtime loads SFace, `sharp` decodes,
+LibSQL opens a file and the HEIC decoder loads.
 
 The image is `gcr.io/distroless/cc-debian13` (glibc, no shell) as the non-root user, with the
 `bun` binary, the bundle and the pruned externals: about 202 MB for arm64 and 215 MB for amd64

@@ -38,7 +38,8 @@ import {
 } from "../src/server";
 import { MastraJudges } from "../src/judge";
 import { faceFixture, fakeImageModels, subjectPhotos } from "./support/fake-image-models";
-import { fakeJudges } from "./support/fake-judges";
+import { FAKE_VERDICT, fakeJudges } from "./support/fake-judges";
+import { fakeVendorServer, vendorAnswer } from "./support/fake-vendors";
 
 const temporaryDirectory = temporaryDirectories("server");
 const SFACE_IDS = ["yunet", "sface"];
@@ -983,7 +984,7 @@ test("a Run without a vendor key fails cleanly before any billable call or price
   });
   // The Judge's key is checked first.
   const native = await serve(await volumeWithPhotos(), layer, {
-    judges: MastraJudges({ prices: noPriceLookup, env: { BUN_CONFIG_HTTP_IDLE_TIMEOUT: "900" } }),
+    judges: MastraJudges({ prices: noPriceLookup, env: {} }),
   });
   await native.server.booted;
   const withoutJudgeKey = await startRun(native.server.url, runInput());
@@ -1120,6 +1121,40 @@ describe("server process", () => {
       expect(report.totals.actualUsd).toBe(0.17);
     } finally {
       crashed.child.kill("SIGKILL");
+    }
+  }, 60_000);
+
+  // End-to-end through the real Judge on a fake Anthropic API; nothing sets Bun's fetch idle
+  // timeout.
+  test("a Run's Judge sends its key to the Anthropic API, whatever ANTHROPIC_BASE_URL says", async () => {
+    const key = "SENTINEL-JUDGE-KEY-0123456789";
+    const vendor = fakeVendorServer(() => vendorAnswer("anthropic", JSON.stringify(FAKE_VERDICT)));
+    const trap = fakeVendorServer(() => new Response("{}", { status: 500 }));
+    const data = await volumeWithPhotos();
+    const server = spawnServer(data, {
+      FAKE_IMAGE_SCRIPT: JSON.stringify(["same"]),
+      FAKE_ANTHROPIC_ORIGIN: vendor.origin,
+      ANTHROPIC_API_KEY: key,
+      ANTHROPIC_BASE_URL: trap.origin,
+    });
+    try {
+      const { url } = await server.line((value) => value.event === "listening");
+      await server.line((value) => value.event === "face-models-verified");
+      const started = await startRun(new URL(String(url)), runInput({ candidates: 1 }));
+      expect(started.status).toBe("success");
+      const report = await readRunReport(runsDatabase(data), data, started.result!.runId);
+      expect(report.lanes[0]!.candidates[0]!.judgement).toMatchObject({
+        status: "judged",
+        levels: FAKE_VERDICT.levels,
+      });
+      expect(trap.requests).toEqual([]);
+      expect(vendor.requests).toHaveLength(1);
+      const [sent] = vendor.requests;
+      expect(sent!.path).toBe("/v1/messages");
+      expect(sent!.headers.get("x-api-key")).toBe(key);
+    } finally {
+      server.child.kill("SIGKILL");
+      await Promise.all([vendor.stop(), trap.stop()]);
     }
   }, 60_000);
 

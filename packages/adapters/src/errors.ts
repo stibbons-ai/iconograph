@@ -109,7 +109,7 @@ export function errorLine(error: unknown): string {
   })}\n`;
 }
 
-/** How many links of an error's `cause` chain `statusOf` and `codeOf` search. */
+/** How many links of an error's `cause` chain `statusOf`, `codeOf` and `hasErrorNamed` search. */
 const LOOKUP_DEPTH = 4;
 
 /** The first integer HTTP `statusCode` on the error or its cause chain; undefined when none. */
@@ -128,4 +128,12 @@ export function codeOf(error: unknown): string | undefined {
     if (typeof code === "string") return code;
   }
   return undefined;
+}
+
+/** Whether the error or its cause chain holds an error named `name` (e.g. fetch's `TimeoutError`). */
+export function hasErrorNamed(error: unknown, name: string): boolean {
+  for (const link of causeChain(error, LOOKUP_DEPTH)) {
+    if (field(link, "name") === name) return true;
+  }
+  return false;
 }

@@ -16,11 +16,10 @@ import {
   withCleanup,
   workflowsStore,
 } from "@iconograph/adapters";
-import { FaceEmbedder, judgeTimeoutMs } from "@iconograph/domain";
+import { FaceEmbedder } from "@iconograph/domain";
 import { modelSupportsStructuredOutput } from "@mastra/core/llm";
 import { Effect } from "effect";
 import sharp from "sharp";
-import { bunIdleTimeoutMs } from "./judge";
 import { jsonLine } from "./warnings";
 
 const checks: Record<string, () => Promise<object>> = {
@@ -80,18 +79,6 @@ const checks: Record<string, () => Promise<object>> = {
   "heic-decoder-loads": async () => {
     await loadHeicDecoder();
     return {};
-  },
-  // Bun reads BUN_CONFIG_HTTP_IDLE_TIMEOUT only from the OS environment at start (the image's
-  // ENV); below the longest Judge timeout, the Judge refuses to start.
-  "judge-idle-timeout": async () => {
-    const idleMs = bunIdleTimeoutMs(process.env);
-    const highMs = judgeTimeoutMs("high");
-    if (idleMs <= highMs) {
-      throw new Error(
-        `BUN_CONFIG_HTTP_IDLE_TIMEOUT gives ${idleMs / 1000} s, not above the high-effort Judge timeout of ${highMs / 1000} s`,
-      );
-    }
-    return { idleSeconds: idleMs / 1000 };
   },
 };
 

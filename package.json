@@ -9,7 +9,7 @@
     "packages/*"
   ],
   "scripts": {
-    "run": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 BUN_CONFIG_HTTP_IDLE_TIMEOUT=900 bun packages/server/src/cli.ts",
+    "run": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun packages/server/src/cli.ts",
     "models:fetch": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun packages/adapters/src/models-cli.ts",
     "models:export-facenet": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun packages/adapters/src/models-export-cli.ts",
     "faces:calibrate": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun packages/adapters/src/calibrate-cli.ts",
@@ -17,7 +17,7 @@
     "photos:validate": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun packages/adapters/src/photos-cli.ts",
     "prices": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun packages/adapters/src/prices-cli.ts",
     "prices:snapshot": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun scripts/update-price-snapshot.ts",
-    "serve": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 BUN_CONFIG_HTTP_IDLE_TIMEOUT=900 bun packages/server/src/server.ts",
+    "serve": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun packages/server/src/server.ts",
     "build:server": "bun scripts/build-server.ts",
     "test": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun test",
     "format": "oxfmt --write package.json tsconfig.json .oxfmtrc.json .oxlintrc.json packages scripts .github docs/adr README.md",
@@ -30,6 +30,9 @@
     "check": "bun run format:check && bun run lint && bun run typecheck && bun run licenses && bun run adrs:check && bun run test"
   },
   "catalog": {
+    "@ai-sdk/anthropic": "3.0.133",
+    "@ai-sdk/google": "3.0.135",
+    "@ai-sdk/openai": "3.0.130",
     "@libsql/client": "0.18.0",
     "@mastra/core": "1.80.0",
     "@mastra/hono": "1.7.22",
