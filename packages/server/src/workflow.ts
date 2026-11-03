@@ -2,7 +2,7 @@ import { errorMessage, toMastraSchema } from "@iconograph/adapters";
 import { RunRequest } from "@iconograph/domain";
 import { createStep, createWorkflow } from "@mastra/core/workflows";
 import { Effect, type ManagedRuntime, Schema } from "effect";
-import { generateIteration, prepareRun, scoreIteration } from "./run-steps";
+import { generateIteration, judgeIteration, prepareRun, scoreIteration } from "./run-steps";
 import type { RunServices } from "./runtime";
 import { LaneGenerated, LaneInput, LaneResult, RunResult, type EstimateEvent } from "./schemas";
 
@@ -18,7 +18,7 @@ const LaneResults = Schema.mutable(Schema.Array(LaneResult));
 /**
  * The Run workflow (ADR-0001, ADR-0006): prepare → one Lane per Image Model,
  * concurrently → finish. A Lane is a nested workflow running one Iteration:
- * generate (parallel calls) → score. Every step body is an Effect program on
+ * generate (parallel calls) → score (Likeness) → judge (Rubric). Every step body is an Effect program on
  * the shared runtime and decodes its own output, since Mastra doesn't validate
  * step output.
  */
@@ -60,19 +60,29 @@ export function createRunWorkflow(runtime: ManagedRuntime.ManagedRuntime<RunServ
   const score = createStep({
     id: "score",
     inputSchema: toMastraSchema(LaneGenerated),
+    outputSchema: toMastraSchema(LaneGenerated),
+    execute: ({ inputData, abortSignal }) =>
+      run(LaneGenerated, scoreIteration(inputData), abortSignal),
+  });
+
+  const judge = createStep({
+    id: "judge",
+    inputSchema: toMastraSchema(LaneGenerated),
     outputSchema: toMastraSchema(LaneResult),
     execute: ({ inputData, abortSignal }) =>
-      run(LaneResult, scoreIteration(inputData), abortSignal),
+      run(LaneResult, judgeIteration(inputData), abortSignal),
   });
 
   const lane = createWorkflow({
     id: LANE_WORKFLOW_ID,
-    description: "One Lane: generate an Iteration's Candidates, then score them",
+    description:
+      "One Lane: generate an Iteration's Candidates, score their Likeness, then judge them",
     inputSchema: toMastraSchema(LaneInput),
     outputSchema: toMastraSchema(LaneResult),
   })
     .then(generate)
     .then(score)
+    .then(judge)
     .commit();
 
   const finish = createStep({

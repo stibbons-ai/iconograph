@@ -9,6 +9,7 @@ import type {
   FaceEmbedder,
   FaceModelError,
   ImageModels,
+  Judges,
   RetryPolicy,
   RunRequest,
 } from "@iconograph/domain";
@@ -32,6 +33,7 @@ export interface RunApplicationOptions {
   /** The data volume: images and face-model weights. */
   dataDirectory: string;
   imageModels: Layer.Layer<ImageModels>;
+  judges: Layer.Layer<Judges>;
   faceEmbedder: Layer.Layer<FaceEmbedder, FaceModelError>;
   retryPolicy?: RetryPolicy;
   /**
@@ -44,7 +46,7 @@ export interface RunApplicationOptions {
 
 /**
  * The Mastra instance with the Run workflow on one shared Effect runtime that
- * provides the Image Models, face backend, Run tables and config.
+ * provides the Image Models, the Judges, face backend, Run tables and config.
  */
 export async function createRunApplication(options: RunApplicationOptions) {
   const { databasePath, dataDirectory } = options;
@@ -53,6 +55,7 @@ export async function createRunApplication(options: RunApplicationOptions) {
     Layer.mergeAll(
       options.faceEmbedder,
       options.imageModels,
+      options.judges,
       LibsqlRunStore(databasePath),
       Layer.succeed(RunConfig)({
         ...defaultRunConfig(dataDirectory),

@@ -1,17 +1,27 @@
 import { describe, expect, test } from "bun:test";
-import { watch } from "node:fs";
 import { chmod, readFile } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
-import { errorLine, imagePath, NativeImageModels } from "@iconograph/adapters";
+import { basename, join } from "node:path";
 import {
+  errorLine,
+  imagePath,
+  LibsqlRunStore,
+  NativeImageModels,
+  readImageAtMost,
+} from "@iconograph/adapters";
+import {
+  DEFAULT_JUDGE,
   DEFAULT_TARGET_LOOK,
+  type EncodedImage,
   type ImageModels,
   initialPrompt,
+  JUDGE_IMAGE_MAX_SIDE,
+  type Judges,
   type PriceQuote,
   type RunRequest,
 } from "@iconograph/domain";
-import { Effect, type Layer } from "effect";
+import { Effect, Layer, ManagedRuntime } from "effect";
 import { realFaceEmbedder } from "../../adapters/test/face-models";
+import { enlargedFixture, imageSize } from "../../adapters/test/large-images";
 import { geminiTestPrice as price, recordedGemini } from "../../adapters/test/gemini-fixtures";
 import {
   openaiTestPrice as openaiPrice,
@@ -20,6 +30,8 @@ import {
 import { tamper } from "../../adapters/test/tamper";
 import { temporaryDirectories } from "../../adapters/test/temporary-directory";
 import { createRunApplication, readRunReport, type RunWarning } from "../src";
+import { runReport } from "../src/report";
+import { defaultRunConfig, judgeIteration, RunConfig } from "../src/run-steps";
 import {
   FAKE_ACTUAL_MICROS,
   FAKE_ESTIMATE_MICROS,
@@ -29,6 +41,15 @@ import {
   fakeImageModels,
   subjectPhotos,
 } from "./support/fake-image-models";
+import {
+  FAKE_JUDGE_ACTUAL_MICROS,
+  FAKE_JUDGE_ESTIMATE_MICROS,
+  type FakeJudgeOptions,
+  type FakeJudgeResponse,
+  FAKE_JUDGE_PRICING,
+  fakeJudges,
+  levels,
+} from "./support/fake-judges";
 
 const temporaryDirectory = temporaryDirectories("run");
 
@@ -40,8 +61,29 @@ const request = (overrides: Partial<RunRequest> = {}): RunRequest => ({
   budgetUsd: 5,
   candidates: 3,
   lanes: [{ model: "gemini-nano-banana-2.1" }],
+  judge: DEFAULT_JUDGE,
   ...overrides,
 });
+
+type Report = Awaited<
+  ReturnType<Awaited<ReturnType<typeof runApplication>>["application"]["report"]>
+>;
+
+/**
+ * What a Run's calls commit against its Budget: each call's actual cost once
+ * known, else its estimate (as the ledger counts them).
+ */
+const committedUsd = (report: Report) =>
+  report.lanes
+    .flatMap((lane) =>
+      lane.candidates.flatMap((candidate) => [...candidate.calls, ...candidate.judgeCost.calls]),
+    )
+    .concat(report.unattributedCalls)
+    .reduce(
+      (sum, call) =>
+        sum + (call.settled && call.actualUsd !== null ? call.actualUsd : call.estimatedUsd),
+      0,
+    );
 
 /** Root reads and writes through any permission, so chmod-based faults can't be staged. */
 const asRoot = process.getuid?.() === 0;
@@ -50,6 +92,7 @@ const asRoot = process.getuid?.() === 0;
 async function runApplication(
   imageModels: Layer.Layer<ImageModels>,
   warn?: (warning: RunWarning) => void,
+  judges: Layer.Layer<Judges> = fakeJudges().layer,
 ) {
   const directory = await temporaryDirectory();
   const dataDirectory = join(directory, "data");
@@ -58,6 +101,7 @@ async function runApplication(
     databasePath,
     dataDirectory,
     imageModels,
+    judges,
     faceEmbedder: realFaceEmbedder(),
     retryPolicy: { maxRetries: 2, baseDelayMs: 0 },
     ...(warn && { warn }),
@@ -65,14 +109,17 @@ async function runApplication(
   return { application: app, dataDirectory, databasePath };
 }
 
-/** The same, with the fake Image Model. */
+/** The same, with the fake Image Model and the fake Judge. */
 async function setup(
   script: FakeScript,
   options: FakeOptions = {},
   warn?: (warning: RunWarning) => void,
+  judgeScript: readonly FakeJudgeResponse[] = [],
+  judgeOptions: FakeJudgeOptions = {},
 ) {
   const fake = fakeImageModels(script, options);
-  return { ...(await runApplication(fake.layer, warn)), fake };
+  const judge = fakeJudges(judgeScript, judgeOptions);
+  return { ...(await runApplication(fake.layer, warn, judge.layer)), fake, judge };
 }
 
 describe("Run engine with a fake Image Model", () => {
@@ -86,9 +133,19 @@ describe("Run engine with a fake Image Model", () => {
       expect(result.lanes).toEqual([
         { runId: result.runId, lane: 0, stopReason: "iteration-limit" },
       ]);
-      // The estimate came before any call: N first calls at the per-call estimate.
+      // The estimate came before any call: N first calls at the per-call estimate, and a
+      // Judge call for each of them.
       expect(events).toEqual([
-        expect.objectContaining({ event: "estimate", estimatedUsd: 0.5, budgetUsd: 5 }),
+        expect.objectContaining({
+          event: "estimate",
+          estimatedUsd: 0.55,
+          budgetUsd: 5,
+          judge: expect.objectContaining({
+            model: DEFAULT_JUDGE.model,
+            calls: 5,
+            perCallUsd: 0.01,
+          }),
+        }),
       ]);
       expect(fake.requests).toHaveLength(5);
       // Every call carried the frozen Target Look's Prompt and both accepted photos as references.
@@ -134,11 +191,13 @@ describe("Run engine with a fake Image Model", () => {
       }
       expect(byIndex[0]!.calls[0]!.actualUsd).toBe(FAKE_ACTUAL_MICROS / 1e6);
       expect(byIndex[3]!.calls[0]!).toMatchObject({ result: "refused", actualUsd: 0 });
+      // Only the Scored Candidate was judged; the totals count its Judge call too.
+      const spent = 3 * FAKE_ACTUAL_MICROS + FAKE_JUDGE_ACTUAL_MICROS;
       expect(report.totals).toMatchObject({
-        estimatedUsd: 0.5,
-        actualUsd: (3 * FAKE_ACTUAL_MICROS) / 1e6,
+        estimatedUsd: (5 * FAKE_ESTIMATE_MICROS + FAKE_JUDGE_ESTIMATE_MICROS) / 1e6,
+        actualUsd: spent / 1e6,
         unknownCostCalls: 0,
-        remainingUsd: 5 - (3 * FAKE_ACTUAL_MICROS) / 1e6,
+        remainingUsd: 5 - spent / 1e6,
       });
       expect(report.referencePhotos.warnings.map(({ code }) => code)).toEqual(["few-photos"]);
       expect([...lane!.characterReferences].sort()).toEqual([1, 2]);
@@ -271,7 +330,7 @@ describe("Run engine with a fake Image Model", () => {
       expect(fake.requests).toHaveLength(4);
       expect(lanes[0]!.stopReason).toBe("budget-exhausted");
       const report = await application.report(runId);
-      expect(report.totals.estimatedUsd).toBeLessThanOrEqual(0.4);
+      expect(committedUsd(report)).toBeLessThanOrEqual(0.4);
       expect(report.lanes[0]!.candidates.map(({ outcome }) => outcome).sort()).toEqual([
         "Failed",
         "Failed",
@@ -567,18 +626,8 @@ describe("Run engine with a fake Image Model", () => {
           const bytes = await Bun.file(faceFixture("biden-2013.jpg")).bytes();
           const sha256 = Bun.CryptoHasher.hash("sha256", bytes, "hex");
           unreadable = imagePath(dataDirectory, sha256, "image/jpeg");
-          await new Promise<void>((resolve) => {
-            const resolveOnceStored = () =>
-              void Bun.file(unreadable)
-                .exists()
-                .then((stored) => {
-                  if (!stored) return;
-                  watcher.close();
-                  resolve();
-                });
-            const watcher = watch(dirname(unreadable), resolveOnceStored);
-            resolveOnceStored();
-          });
+          // Polled, not watched: a watch on a directory the store hasn't created yet can miss it.
+          while (!(await Bun.file(unreadable).exists())) await Bun.sleep(5);
           await chmod(unreadable, 0o000);
         },
       });
@@ -811,6 +860,102 @@ describe("Run engine with two Lanes", () => {
     }
   }, 60_000);
 
+  test("the Judge scores both Lanes' Scored Candidates, and one Budget counts both Lanes' generate and judge calls", async () => {
+    const { application, judge } = await setup({
+      [GEMINI]: ["same", "different"],
+      [OPENAI]: ["same", "same"],
+    });
+    try {
+      const { runId } = await application.start(
+        request({ candidates: 2, lanes: [{ model: GEMINI }, { model: OPENAI }] }),
+      );
+      const report = await application.report(runId);
+      const [gemini, openai] = report.lanes;
+      expect(gemini!.candidates.map(({ outcome }) => outcome)).toEqual(["Scored", "Gated"]);
+      expect(openai!.candidates.map(({ outcome }) => outcome)).toEqual(["Scored", "Scored"]);
+      // Every Scored Candidate of either Lane is judged once; the Gated one never.
+      expect(judge.requests).toHaveLength(3);
+      for (const { outcome, judgement, judgeCost } of [
+        ...gemini!.candidates,
+        ...openai!.candidates,
+      ]) {
+        expect(judgement?.status ?? null).toBe(outcome === "Scored" ? "judged" : null);
+        expect(judgeCost.calls).toHaveLength(outcome === "Scored" ? 1 : 0);
+      }
+      const spentMicros = 4 * FAKE_ACTUAL_MICROS + 3 * FAKE_JUDGE_ACTUAL_MICROS;
+      expect(report.totals.actualUsd).toBeCloseTo(spentMicros / 1e6, 10);
+      expect(report.totals.remainingUsd).toBeCloseTo(5 - spentMicros / 1e6, 10);
+      expect(report.warnings).toEqual([]);
+    } finally {
+      await application.close();
+    }
+  }, 60_000);
+
+  test("one Lane's generation leaves no room for the other Lane's Judge calls", async () => {
+    // $0.22 fits both $0.10 image calls (held until both are in flight, so both are reserved
+    // before any Judge call), settled at their estimate. The $0.02 left fits no $0.03 Judge call,
+    // though a Lane alone would have had $0.12 for it.
+    const bothInFlight = Promise.withResolvers<void>();
+    const { application, fake, judge } = await setup(
+      { [GEMINI]: ["same"], [OPENAI]: ["same"] },
+      {
+        actualMicros: FAKE_ESTIMATE_MICROS,
+        beforeAnswer: (call) => {
+          if (call >= 1) bothInFlight.resolve();
+          return bothInFlight.promise;
+        },
+      },
+      undefined,
+      [],
+      { estimateMicros: 30_000 },
+    );
+    try {
+      const { runId, lanes } = await application.start(
+        request({ budgetUsd: 0.22, candidates: 1, lanes: [{ model: GEMINI }, { model: OPENAI }] }),
+      );
+      expect(fake.requests).toHaveLength(2);
+      expect(judge.requests).toHaveLength(0);
+      expect(lanes.map(({ stopReason }) => stopReason)).toEqual([
+        "budget-exhausted",
+        "budget-exhausted",
+      ]);
+      const report = await application.report(runId);
+      for (const lane of report.lanes) {
+        expect(lane.candidates).toEqual([
+          expect.objectContaining({
+            outcome: "Scored",
+            judgement: expect.objectContaining({
+              status: "judge-failed",
+              cause: "budget-exhausted",
+            }),
+          }),
+        ]);
+      }
+      expect(committedUsd(report)).toBeLessThanOrEqual(0.22);
+    } finally {
+      await application.close();
+    }
+  }, 60_000);
+
+  test("an openai/ Judge with an OpenAI Lane warns judge-same-vendor, naming that Lane only", async () => {
+    const { application } = await setup({ [GEMINI]: ["same"], [OPENAI]: ["same"] });
+    try {
+      const { runId } = await application.start(
+        request({
+          candidates: 1,
+          lanes: [{ model: GEMINI }, { model: OPENAI }],
+          judge: { ...DEFAULT_JUDGE, model: "openai/gpt-5.5" },
+        }),
+      );
+      const report = await application.report(runId);
+      expect(report.warnings).toEqual([
+        { code: "judge-same-vendor", message: expect.any(String), lanes: [1] },
+      ]);
+    } finally {
+      await application.close();
+    }
+  }, 60_000);
+
   test("a Lane whose photos are all rejected, or a pin outside a Lane's photos, fails the Run before any call", async () => {
     const { application, fake } = await setup(["same"]);
     try {
@@ -829,6 +974,428 @@ describe("Run engine with two Lanes", () => {
         application.start(request({ lanes: [{ model: OPENAI, photos: [3] }] })),
       ).rejects.toThrow("A Lane lists photo 3, but the Run has 2 Reference Photos");
       expect(fake.requests).toHaveLength(0);
+    } finally {
+      await application.close();
+    }
+  }, 60_000);
+});
+
+describe("Run engine with a fake Judge", () => {
+  /** Images as the Judge sees them: normalised, at most 1024 px. */
+  const judgeDownscaled = async (images: readonly EncodedImage[]) => {
+    const directory = await temporaryDirectory();
+    return Promise.all(
+      images.map(async (image, index) => {
+        const path = join(directory, `${index}.jpg`);
+        await Bun.write(path, image.bytes);
+        return readImageAtMost(path, image.mimeType, JUDGE_IMAGE_MAX_SIDE, { normalise: true });
+      }),
+    );
+  };
+
+  test("every image the Judge sees is at most 1024 px, while Image Models get up to 2048 px", async () => {
+    const directory = await temporaryDirectory();
+    const largeCandidate = await enlargedFixture("biden-2013.jpg", 2000, 2500, directory);
+    const largePhoto = await enlargedFixture("biden-2022.jpg", 1300, 1600, directory);
+    const { application, fake, judge } = await setup(["same"], { sameImage: largeCandidate });
+    try {
+      await application.start(
+        request({ photos: [largePhoto, faceFixture("biden-2021.jpg")], candidates: 1 }),
+      );
+      expect(judge.requests).toHaveLength(1);
+      const [sent] = judge.requests;
+      for (const image of [...sent!.references, sent!.candidate]) {
+        const { width, height } = await imageSize(image.bytes);
+        expect(Math.max(width, height)).toBeLessThanOrEqual(JUDGE_IMAGE_MAX_SIDE);
+      }
+      // The 1600 px photo reaches the Image Model as stored, and the Judge downscaled.
+      const sizes = await Promise.all(
+        fake.requests[0]!.references.map(async ({ bytes }) => imageSize(bytes)),
+      );
+      expect(sizes.map(({ height }) => height)).toContain(1600);
+      expect(sent!.references).toEqual(await judgeDownscaled(fake.requests[0]!.references));
+    } finally {
+      await application.close();
+    }
+  }, 60_000);
+
+  test("judges only Scored Candidates, with 3 Reference Photos before each, and stores every score", async () => {
+    const { application, fake, judge } = await setup(
+      ["same", "different", "no-face", "refuse", "fail", "same"],
+      {},
+      undefined,
+      [{ levels: { ...levels(4), resemblance: 1 }, issues: ["Eyes look glassy"], promptFixes: [] }],
+    );
+    try {
+      const { runId } = await application.start(request({ ...fivePhotos, candidates: 6 }));
+      const report = await application.report(runId);
+      const [lane] = report.lanes;
+      expect(lane!.candidates.map(({ outcome }) => outcome)).toEqual([
+        "Scored",
+        "Gated",
+        "Gated",
+        "Refused",
+        "Failed",
+        "Scored",
+      ]);
+      // Gated, Refused and Failed Candidates never reach the Judge.
+      expect(judge.requests).toHaveLength(2);
+      for (const { judgement, judgeCost } of lane!.candidates.slice(1, 5)) {
+        expect(judgement).toBeNull();
+        expect(judgeCost.calls).toEqual([]);
+      }
+
+      // The Judge saw the Run's 3 representative photos, in the same order every time: the
+      // first three of the ranking that chose the Lane's 4 character references.
+      expect(report.judge).toMatchObject({
+        model: DEFAULT_JUDGE.model,
+        effort: "low",
+        weights: DEFAULT_JUDGE.weights,
+        rubricVersion: "rubric-v1",
+        referencePhotos: lane!.characterReferences.slice(0, 3),
+      });
+      const sentToImageModel = await judgeDownscaled(fake.requests[0]!.references.slice(0, 3));
+      for (const sent of judge.requests) {
+        expect(sent.references).toEqual(sentToImageModel);
+        expect(sent.targetLook).toEqual(DEFAULT_TARGET_LOOK);
+      }
+      // Each call carried its own Candidate's stored image, as the Judge sees images.
+      for (const [index, sent] of judge.requests.entries()) {
+        const candidate = lane!.candidates.filter(({ outcome }) => outcome === "Scored")[index]!;
+        const stored = await readImageAtMost(
+          candidate.image!.path,
+          "image/jpeg",
+          JUDGE_IMAGE_MAX_SIDE,
+          {
+            normalise: true,
+          },
+        );
+        expect(sent.candidate).toEqual(stored);
+      }
+
+      const judged = lane!.candidates.filter(({ outcome }) => outcome === "Scored");
+      for (const candidate of judged) {
+        if (candidate.outcome !== "Scored" || candidate.judgement?.status !== "judged") {
+          throw new Error("expected a judged Candidate");
+        }
+        const { judgement, likeness } = candidate;
+        // Likeness and Resemblance stay separate; the total weighs both.
+        expect(judgement.scores.likeness).toBe(likeness);
+        expect(judgement.rubricVersion).toBe("rubric-v1");
+        expect(judgement.disputed).toBe(Math.abs(likeness - judgement.resemblance) > 4);
+        expect(judgement.weightedTotal).toBeCloseTo(
+          0.3 * likeness + 0.15 * judgement.resemblance + 0.55 * 7.5,
+          10,
+        );
+        expect(candidate.judgeCost).toMatchObject({
+          estimatedUsd: FAKE_JUDGE_ESTIMATE_MICROS / 1e6,
+          actualUsd: FAKE_JUDGE_ACTUAL_MICROS / 1e6,
+        });
+        expect(candidate.judgeCost.calls).toEqual([
+          expect.objectContaining({ purpose: "judge", attempt: 0, result: "judged" }),
+        ]);
+        expect(candidate.calls.map(({ purpose }) => purpose)).toEqual(["generate"]);
+      }
+      // Resemblance level 1 is 0 points; this Candidate's Likeness is far above 4: Disputed.
+      if (judged[0]?.outcome !== "Scored") throw new Error("expected a Scored Candidate");
+      expect(judged[0].likeness).toBeGreaterThan(4);
+      expect(judged[0]!.judgement).toMatchObject({
+        disputed: true,
+        resemblance: 0,
+        issues: ["Eyes look glassy"],
+        promptFixes: [],
+      });
+      expect(judged[1]!.judgement).toMatchObject({
+        disputed: false,
+        resemblance: 7.5,
+        issues: ["The collar is asymmetric"],
+        promptFixes: ["Make the shirt collar symmetric"],
+      });
+      expect(report.warnings).toEqual([]);
+    } finally {
+      await application.close();
+    }
+  }, 60_000);
+
+  test("the Run's own weights are stored with it and weigh every score", async () => {
+    const weights = { ...DEFAULT_JUDGE.weights, likeness: 0, resemblance: 0.45 };
+    const { application } = await setup(["same"]);
+    try {
+      const { runId } = await application.start(
+        request({ candidates: 1, judge: { ...DEFAULT_JUDGE, weights } }),
+      );
+      const report = await application.report(runId);
+      expect(report.judge.weights).toEqual(weights);
+      const [candidate] = report.lanes[0]!.candidates;
+      if (candidate?.judgement?.status !== "judged") throw new Error("expected a judged Candidate");
+      // Every judged criterion is at 7.5 points; Likeness weighs nothing.
+      expect(candidate.judgement.weightedTotal).toBeCloseTo(7.5, 10);
+    } finally {
+      await application.close();
+    }
+  }, 60_000);
+
+  test("a Judge call that doesn't fit is not made: the Lane stops and its Candidate is judge-failed", async () => {
+    // $0.20 fits both $0.10 image reservations; they settle at $0.08 each, leaving $0.04:
+    // one $0.03 Judge call fits, the second doesn't.
+    const { application, judge } = await setup(["same", "same"], {}, undefined, [], {
+      estimateMicros: 30_000,
+    });
+    try {
+      const { runId, lanes } = await application.start(request({ candidates: 2, budgetUsd: 0.2 }));
+      expect(judge.requests).toHaveLength(1);
+      expect(lanes[0]!.stopReason).toBe("budget-exhausted");
+      const report = await application.report(runId);
+      const [first, second] = report.lanes[0]!.candidates;
+      expect(first!.judgement?.status).toBe("judged");
+      expect(second).toMatchObject({
+        outcome: "Scored",
+        likeness: expect.any(Number),
+        judgement: {
+          status: "judge-failed",
+          rubricVersion: "rubric-v1",
+          cause: "budget-exhausted",
+          reason: expect.stringContaining("didn't fit the Budget"),
+        },
+        judgeCost: { calls: [] },
+      });
+      expect(committedUsd(report)).toBeLessThanOrEqual(0.2);
+    } finally {
+      await application.close();
+    }
+  }, 60_000);
+
+  test.each([
+    [
+      "transient errors are retried, then the Candidate is judge-failed",
+      ["transient", "transient", "transient"],
+      3,
+      "gave-up",
+      "gave up after 3 attempts",
+    ],
+    ["a failure is not retried", ["fail"], 1, "failed", "fake Judge HTTP 400"],
+    ["a refusal is not retried", ["refuse"], 1, "refused", "The Judge refused: fake: declined"],
+  ] as const)(
+    "%s; it keeps its Likeness and gets no Rubric score",
+    async (_, script, calls, cause, reason) => {
+      const { application, judge } = await setup(["same"], {}, undefined, script);
+      try {
+        const { runId, lanes } = await application.start(request({ candidates: 1 }));
+        expect(lanes[0]!.stopReason).toBe("iteration-limit");
+        expect(judge.requests).toHaveLength(calls);
+        const [candidate] = (await application.report(runId)).lanes[0]!.candidates;
+        expect(candidate).toMatchObject({
+          outcome: "Scored",
+          likeness: expect.any(Number),
+          judgement: {
+            status: "judge-failed",
+            cause,
+            reason: expect.stringContaining(reason),
+          },
+        });
+        expect(candidate!.judgeCost.calls.map(({ attempt }) => attempt)).toEqual(
+          Array.from({ length: calls }, (_, attempt) => attempt),
+        );
+      } finally {
+        await application.close();
+      }
+    },
+    60_000,
+  );
+
+  test("a re-executed judge step finds the stored judgements and calls the Judge no more", async () => {
+    const { application, databasePath, dataDirectory } = await setup(["same", "same"]);
+    try {
+      const { runId } = await application.start(request({ candidates: 2 }));
+      const before = await application.report(runId);
+      await application.close();
+
+      const again = fakeJudges();
+      const runtime = ManagedRuntime.make(
+        Layer.mergeAll(
+          again.layer,
+          LibsqlRunStore(databasePath),
+          Layer.succeed(RunConfig)(defaultRunConfig(dataDirectory)),
+        ),
+      );
+      try {
+        const result = await runtime.runPromise(
+          judgeIteration({ runId, lane: 0, stopReason: null }),
+        );
+        expect(result).toEqual({ runId, lane: 0, stopReason: "iteration-limit" });
+        expect(again.requests).toHaveLength(0);
+        const after = await runtime.runPromise(runReport(runId));
+        expect(after.lanes).toEqual(before.lanes);
+        expect(after.totals).toEqual(before.totals);
+      } finally {
+        await runtime.dispose();
+      }
+    } finally {
+      await application.close().catch(() => {});
+    }
+  }, 60_000);
+
+  test("a Judge retry that doesn't fit is not made: the Lane stops and the Candidate is judge-failed", async () => {
+    // $0.12: the $0.10 image reservation fits and settles at $0.08, leaving $0.04. The first
+    // $0.03 Judge call fits; it fails at unknown cost, so it keeps its $0.03 and the retry
+    // doesn't fit the $0.01 left.
+    const { application, judge } = await setup(
+      ["same"],
+      {},
+      undefined,
+      ["transient-unknown-cost"],
+      {
+        estimateMicros: 30_000,
+      },
+    );
+    try {
+      const { runId, lanes } = await application.start(request({ candidates: 1, budgetUsd: 0.12 }));
+      expect(judge.requests).toHaveLength(1);
+      expect(lanes[0]!.stopReason).toBe("budget-exhausted");
+      const report = await application.report(runId);
+      const [candidate] = report.lanes[0]!.candidates;
+      expect(candidate).toMatchObject({
+        outcome: "Scored",
+        judgement: {
+          status: "judge-failed",
+          cause: "budget-exhausted",
+          reason: expect.stringContaining("retry not made: Budget exhausted"),
+        },
+        judgeCost: { unknownCostCalls: 1 },
+      });
+      expect(committedUsd(report)).toBeLessThanOrEqual(0.12);
+    } finally {
+      await application.close();
+    }
+  }, 60_000);
+
+  test("a judged call without a usage report counts at its estimate", async () => {
+    const { application } = await setup(["same"], {}, undefined, ["unknown-cost"]);
+    try {
+      const { runId } = await application.start(request({ candidates: 1 }));
+      const report = await application.report(runId);
+      const [candidate] = report.lanes[0]!.candidates;
+      expect(candidate!.judgement?.status).toBe("judged");
+      expect(candidate!.judgeCost).toMatchObject({ actualUsd: 0, unknownCostCalls: 1 });
+      expect(report.totals.remainingUsd).toBeCloseTo(
+        5 - (FAKE_ACTUAL_MICROS + FAKE_JUDGE_ESTIMATE_MICROS) / 1e6,
+        10,
+      );
+    } finally {
+      await application.close();
+    }
+  }, 60_000);
+
+  test("Judge calls are priced at the Judge's price recorded at Run start, not a later lookup", async () => {
+    // Only the lookup at Run start gets the real price; any later one is 10× dearer.
+    const { application, judge } = await setup(["same"], {}, undefined, [], {
+      lookupPricing: (lookup) =>
+        lookup === 0
+          ? FAKE_JUDGE_PRICING
+          : { _tag: "Llm", inputPerToken: 5e-6, outputPerToken: 1.25e-5 },
+    });
+    try {
+      const { runId } = await application.start(request({ candidates: 1 }));
+      const [candidate] = (await application.report(runId)).lanes[0]!.candidates;
+      expect(candidate!.judgeCost.actualUsd).toBe(FAKE_JUDGE_ACTUAL_MICROS / 1e6);
+      expect(judge.gets.map(({ price }) => price?.pricing)).toEqual([
+        undefined,
+        FAKE_JUDGE_PRICING,
+      ]);
+    } finally {
+      await application.close();
+    }
+  }, 60_000);
+
+  /** A Run tool on an existing database: the judge step alone, with a fresh fake Judge. */
+  const judgeStepOn = (databasePath: string, dataDirectory: string) => {
+    const again = fakeJudges();
+    const runtime = ManagedRuntime.make(
+      Layer.mergeAll(
+        again.layer,
+        LibsqlRunStore(databasePath),
+        Layer.succeed(RunConfig)(defaultRunConfig(dataDirectory)),
+      ),
+    );
+    return { again, runtime };
+  };
+
+  test("a re-executed judge step after a call whose judgement was lost judges only that Candidate, numbering on", async () => {
+    const { application, databasePath, dataDirectory } = await setup(["same", "same"]);
+    const { runId } = await application.start(request({ candidates: 2 }));
+    await application.close();
+    // Candidate 1's Judge call was sent but the process died: no result, no judgement.
+    tamper(databasePath, "DELETE FROM judgements WHERE candidate = 1");
+    tamper(
+      databasePath,
+      `UPDATE cost_records SET settled = 0, actual_micros = NULL, usage = NULL, result = NULL
+       WHERE candidate = 1 AND purpose = 'judge'`,
+    );
+    const { again, runtime } = judgeStepOn(databasePath, dataDirectory);
+    try {
+      await runtime.runPromise(judgeIteration({ runId, lane: 0, stopReason: null }));
+      expect(again.requests).toHaveLength(1);
+      const report = await runtime.runPromise(runReport(runId));
+      const [first, second] = report.lanes[0]!.candidates;
+      expect(first!.judgeCost.calls.map(({ attempt }) => attempt)).toEqual([0]);
+      expect(second!.judgement?.status).toBe("judged");
+      expect(second!.judgeCost.calls.map(({ attempt, settled }) => [attempt, settled])).toEqual([
+        [0, false],
+        [1, true],
+      ]);
+      // The lost call still counts at its estimate.
+      const spent =
+        2 * FAKE_ACTUAL_MICROS + 2 * FAKE_JUDGE_ACTUAL_MICROS + FAKE_JUDGE_ESTIMATE_MICROS;
+      expect(report.totals.remainingUsd).toBeCloseTo(5 - spent / 1e6, 10);
+    } finally {
+      await runtime.dispose();
+    }
+  }, 60_000);
+
+  test("a judge step re-executed with a different Rubric version fails instead of mixing versions", async () => {
+    const { application, databasePath, dataDirectory } = await setup(["same"]);
+    const { runId } = await application.start(request({ candidates: 1 }));
+    await application.close();
+    tamper(databasePath, "UPDATE judges SET rubric_version = 'rubric-v0'");
+    const { again, runtime } = judgeStepOn(databasePath, dataDirectory);
+    try {
+      await expect(
+        runtime.runPromise(judgeIteration({ runId, lane: 0, stopReason: null })),
+      ).rejects.toThrow("is judged with rubric-v0, but this build has only rubric-v1");
+      expect(again.requests).toHaveLength(0);
+    } finally {
+      await runtime.dispose();
+    }
+  }, 60_000);
+
+  test("an unpriced Judge fails the Run before any call", async () => {
+    const { application, fake, judge } = await setup(["same"], {}, undefined, [], {
+      unpriced: true,
+    });
+    try {
+      await expect(application.start(request())).rejects.toThrow(
+        "No price for model claude-sonnet-5-5",
+      );
+      expect(fake.requests).toHaveLength(0);
+      expect(judge.requests).toHaveLength(0);
+    } finally {
+      await application.close();
+    }
+  }, 60_000);
+
+  test("a Judge from a Lane's Image Model vendor is a coded warning in the report", async () => {
+    const { application } = await setup(["same"]);
+    try {
+      const { runId } = await application.start(
+        request({
+          candidates: 1,
+          judge: { ...DEFAULT_JUDGE, model: "google/gemini-3.1-pro-preview" },
+        }),
+      );
+      const report = await application.report(runId);
+      expect(report.warnings).toEqual([
+        { code: "judge-same-vendor", message: expect.any(String), lanes: [0] },
+      ]);
     } finally {
       await application.close();
     }

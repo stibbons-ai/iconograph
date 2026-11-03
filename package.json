@@ -9,7 +9,7 @@
     "packages/*"
   ],
   "scripts": {
-    "run": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun packages/server/src/cli.ts",
+    "run": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 BUN_CONFIG_HTTP_IDLE_TIMEOUT=900 bun packages/server/src/cli.ts",
     "models:fetch": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun packages/adapters/src/models-cli.ts",
     "models:export-facenet": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun packages/adapters/src/models-export-cli.ts",
     "faces:calibrate": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun packages/adapters/src/calibrate-cli.ts",

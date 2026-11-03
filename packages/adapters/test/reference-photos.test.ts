@@ -7,12 +7,14 @@ import {
   decodeReferencePhoto,
   encodeReferencePhoto,
   HeicDecoderError,
+  loadCharacterReference,
   MAX_PHOTO_BYTES,
   MAX_PHOTO_PIXELS,
   ReferencePhotoError,
   storeReferencePhoto,
 } from "../src/reference-photos";
 import { fixture } from "./face-models";
+import { enlargedFixture, imageSize, solidImage } from "./large-images";
 import { expectFullMetadata, expectStripped } from "./metadata";
 import { temporaryDirectories } from "./temporary-directory";
 
@@ -156,15 +158,8 @@ describe("decoding Reference Photos", () => {
   });
 
   /** A uniform-grey image of the given size: a few KB on disk however large. */
-  async function solid(name: string, width: number, height: number) {
-    const path = join(await temporaryDirectory(), name);
-    const image = sharp({
-      create: { width, height, channels: 3, background: "#808080" },
-      limitInputPixels: false,
-    });
-    await (name.endsWith(".png") ? image.png() : image.jpeg()).toFile(path);
-    return path;
-  }
+  const solid = async (name: string, width: number, height: number) =>
+    solidImage(join(await temporaryDirectory(), name), { width, height });
 
   test.each([
     ["PNG", "huge.png"],
@@ -242,5 +237,21 @@ describe("storing Reference Photos", () => {
     const again = await Effect.runPromise(storeReferencePhoto(source, reencoded, data));
     expect(again).toEqual(stored);
     expect(await readdir(join(data, "images"))).toEqual([`${stored.sha256}.jpg`]);
+  });
+});
+
+describe("character references", () => {
+  test("are sent as stored up to 2048 px, and downscaled to 2048 px beyond", async () => {
+    const directory = await temporaryDirectory();
+    const within = await enlargedFixture("biden-2013.jpg", 1200, 1500, directory);
+    const sent = await Effect.runPromise(loadCharacterReference({ path: within, sha256: "x" }));
+    expect(sent).toEqual({ bytes: await Bun.file(within).bytes(), mimeType: "image/jpeg" });
+
+    const beyond = await enlargedFixture("biden-2013.jpg", 2400, 3000, directory);
+    const downscaled = await Effect.runPromise(
+      loadCharacterReference({ path: beyond, sha256: "y" }),
+    );
+    expect(downscaled.mimeType).toBe("image/jpeg");
+    expect(await imageSize(downscaled.bytes)).toEqual({ width: 1638, height: 2048 });
   });
 });

@@ -46,7 +46,7 @@ One attempt by an Image Model, within an Iteration, to produce a headshot; it en
 _Avoid_: Output, result, sample
 
 **Candidate Outcome**:
-How a Candidate ended: **Refused** (the Image Model declined), **Failed** (errored after retries, or its image was unusable), **Gated** (no face, or below the Identity Gate) or **Scored** (judged against the Rubric; until the Judge exists, M0 uses Scored for "passed the Identity Gate and has a Likeness").
+How a Candidate ended: **Refused** (the Image Model declined), **Failed** (errored after retries, or its image was unusable), **Gated** (no face, or below the Identity Gate) or **Scored** (passed the Identity Gate and has a Likeness; the Judge then scores it against the Rubric, and a judging that fails is recorded with it, never replaced by a made-up score).
 _Avoid_: Status, state
 
 **Character Reference**:

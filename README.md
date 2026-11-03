@@ -57,7 +57,8 @@ validation use plain commands; `check` composes the scripts and finishes with `b
 Outside the shell, set both variables when invoking Bun or Mastra directly instead of the scripts.
 
 ```sh
-# Start a Run (see "Runs" below); needs GEMINI_API_KEY (and OPENAI_API_KEY for an OpenAI Lane).
+# Start a Run (see "Runs" below); needs GEMINI_API_KEY (and OPENAI_API_KEY for an OpenAI Lane) and
+# the Judge's key (ANTHROPIC_API_KEY).
 bun run run --budget 0.50 me-1.jpg me-2.jpg me-3.jpg
 
 # Print a stored Run again from the database.
@@ -361,17 +362,20 @@ bun run faces:calibrate --target-far 0.001 ~/calibration
 `bun run run` starts a Run: it validates the Reference Photos (as `photos:validate` does), generates
 one Iteration of Candidates in each Lane, runs the Lanes concurrently (a few at a time, as many as
 `LANE_CONCURRENCY` in `packages/server/src/workflow.ts` allows and `--help` states; more wait their
-turn), scores each Candidate's Likeness and prints the results with their costs. Without `--lane`
-the Run has one Gemini Lane (`gemini-nano-banana-2.1`).
+turn), scores each Candidate's Likeness, has the Judge score every Candidate that passed the
+Identity Gate against the Rubric, and prints the results with their costs. Without `--lane` the
+Run has one Gemini Lane (`gemini-nano-banana-2.1`).
 
 ```sh
 GEMINI_API_KEY="op://Freelancing/Gemini test run key/password" \
+ANTHROPIC_API_KEY="op://VAULT/ITEM/credential" \
   op run --account my.1password.com -- \
   bun run run --budget 0.50 --candidates 3 --look look.json --pin 2 me-1.jpg me-2.heic me-3.jpg
 
 # A Gemini Lane and an OpenAI Lane (Flare) with its own photos and Prompt, in one Run.
 GEMINI_API_KEY="op://Freelancing/Gemini test run key/password" \
 OPENAI_API_KEY="op://Freelancing/OpenAI test run key/password" \
+ANTHROPIC_API_KEY="op://VAULT/ITEM/credential" \
   op run --account my.1password.com -- \
   bun run run --budget 0.50 --candidates 1 \
     --lane gemini --lane openai:flare,photos=1+3,prompt=openai-prompt.txt \
@@ -379,27 +383,28 @@ OPENAI_API_KEY="op://Freelancing/OpenAI test run key/password" \
 ```
 
 `op run` resolves the 1Password references into the environment of that one process, so no key is
-written to disk; any other way of setting `GEMINI_API_KEY` and `OPENAI_API_KEY` works too. A Run
-needs only the keys of its Lanes' vendors. Keys are read only from the environment and sent only in
-the request header; they never enter the database, the output or an error. In an OpenAI Lane's
+written to disk; any other way of setting the variables works too. A Run needs only the keys of its
+Lanes' vendors and its Judge's vendor. Keys are read only from the environment and sent only in
+request headers; they never enter the database, the output or an error. In an OpenAI Lane's
 failure reasons, a masked echo of a key in the usual form (a word with three or more asterisks,
 such as `sk-proj-****abcd`) is redacted too, and every reason is cut to about 2000 characters. A
 key shorter than 20 characters or with spaces, control or non-ASCII characters (a bad paste) is
-rejected before its Lane's price lookup and before any billable call, without echoing it.
+rejected before its price lookup and before any billable call, without echoing it.
 
 - **Arguments:** 1 to 8 Reference Photos; `--budget USD` (default 5), `--candidates N` (1 to 8,
   default 3, per Lane), `--look FILE`, `--lane SPEC` (repeatable, below), `--pin PHOTO`
-  (repeatable), `--face PHOTO:FACE` (as for `photos:validate`), `--data-dir PATH` and `--db PATH`
-  (default `./iconograph.db`, whose directory must exist). `bun run run read --run-id ID` prints a
-  stored Run's report again; it refuses a `--db` file that doesn't exist.
+  (repeatable), `--face PHOTO:FACE` (as for `photos:validate`), `--judge-model ID` and
+  `--judge-effort LEVEL` (see "Judge" below), `--data-dir PATH` and `--db PATH` (default
+  `./iconograph.db`, whose directory must exist). `bun run run read --run-id ID` prints a stored
+  Run's report again; it refuses a `--db` file that doesn't exist.
 - **Lanes:** each `--lane NAME[,photos=N+N...][,prompt=FILE]` adds one Lane. `NAME` is `gemini`
   (`gemini-nano-banana-2.1`), `openai` or `openai:sunburst` (`gpt-image-2.5-sunburst`), or
   `openai:flare` (`gpt-image-2.5-flare`). `photos=1+3` limits the Lane to those Reference Photos
   (numbered from 1; default all); a Lane none of whose photos is accepted fails the Run before any
   call. `prompt=FILE` replaces the Lane's initial Prompt (default: built from the Target Look) with
   the file's text, trimmed, up to 32,000 characters; it comes last, and everything after `prompt=`
-  is the path, commas included. The Identity Anchor always comes from all accepted photos, and one
-  Budget covers every Lane.
+  is the path, commas included. The Identity Anchor and the Judge's Reference Photos always come
+  from all accepted photos, and one Budget covers every Lane and the Judge.
 - **Target Look:** a JSON file with any of the facets `pose`, `background`, `lighting` (lighting
   and colour), `hairstyle`, `clothing` and `framing`, each a text of up to 500 characters, e.g.
   `{"background": "dark navy backdrop", "clothing": "grey suit"}`. Missing facets take defaults (a
@@ -433,6 +438,69 @@ rejected before its Lane's price lookup and before any billable call, without ec
   and not retried; 408, 429 rate limits and 5xx responses and network failures are retried with
   exponential backoff (1 s, 2 s) up to twice, then Failed; quota, credit and spend-limit 429s,
   other errors, and a response without a usable image are Failed at once.
+- **Judge:** a Mastra agent with structured output, called through Mastra's model router; by
+  default Claude Sonnet 5.5 (`anthropic/claude-sonnet-5-5`) at `low` effort. `--judge-model` takes
+  any `anthropic/`, `openai/` or `google/` vision model router id; `--judge-effort` takes `low`,
+  `medium` or `high`, passed as the vendor's reasoning parameter (Anthropic `effort`, OpenAI
+  `reasoningEffort`, Gemini `thinkingConfig.thinkingLevel`). Its key comes from the environment
+  only: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GOOGLE_GENERATIVE_AI_API_KEY` (or
+  `GOOGLE_API_KEY`). The Judge is checked first, before any billable call: its key, then its
+  price lookup; a Run without the Judge's key fails before any price is looked up, while the
+  Image Models' keys are checked after the Judge's price. Mastra's model router sends a vendor's
+  calls to `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL` or `GOOGLE_BASE_URL` when that variable is set,
+  so the Judge refuses to start while its vendor's variable is set at all, even empty (an empty
+  value makes every call fail): the key and the Reference Photos would go there instead. The
+  message shows only the URL's origin, never userinfo or a token. Some agent shells set
+  `ANTHROPIC_BASE_URL`; run with `env -u ANTHROPIC_BASE_URL …`.
+  Gated, Refused and Failed Candidates are never judged. Each Judge call sees the Rubric, then at
+  most 3 representative Reference Photos of the Run, then the Candidate, then the Target Look
+  (each facet quoted as a JSON string, and the Judge told never to follow it as an instruction);
+  nothing else leaves the machine. The photos are chosen once per Run from all accepted photos,
+  whatever photos a Lane is limited to, by the character-reference ranking without pins (best face
+  first, then each photo most unlike those chosen) and sent in that order for every Candidate of
+  every Lane. Every image the Judge sees, photos and Candidate, is the stored (stripped)
+  copy normalised (upright, flattened onto white, JPEG) and downscaled (never enlarged) to at most 1024 px on its
+  longest side: a head-and-shoulders face then spans about 400 px, enough to judge identity,
+  realism and the look, and it bounds what each image costs. Images go inline with every call (no
+  vendor file reuse yet). A call is aborted after 180 s at `low` effort, 300 s at `medium` and
+  600 s at `high`, room for the whole output cap at about 30 tokens/s. Calls don't stream, so no
+  bytes arrive until the answer is done, and Bun's fetch cuts off a request idle for longer than
+  `BUN_CONFIG_HTTP_IDLE_TIMEOUT` (whole seconds, default 300 s, read once from the OS environment
+  when Bun starts; a `.env` file is read too late to count): `bun run run` sets it to 900 s, and
+  a Judge whose timeout it wouldn't exceed refuses to start, naming the fix (run `bun
+  packages/server/src/cli.ts` directly only at `low` effort, or set the variable yourself).
+  Anthropic deletes API inputs and outputs within 30 days unless a request is flagged
+  under its Usage Policy (then up to 2 years) or a zero-retention agreement applies
+  ([Anthropic Privacy Center](https://privacy.claude.com/en/articles/7996866-how-long-do-you-store-my-organization-s-data));
+  OpenAI and Google apply their own API terms. When the Judge's vendor also makes a Lane's Image
+  Model (e.g. a `google/` Judge with a Gemini Lane, or an `openai/` Judge with an OpenAI Lane),
+  the report carries the warning code `judge-same-vendor`, naming those Lanes: a Judge may favour
+  its own vendor's images.
+- **Rubric v1:** the Judge rates Resemblance (is it unmistakably the Subject?), Realism, and how
+  well Pose, Background, Lighting (and colour), Hairstyle, Clothing and Framing match the Target
+  Look, each on an anchored level 1–5 with a written anchor per level, mapped linearly to 0–10
+  (1 → 0, 5 → 10). It also lists the visible issues and suggested Prompt fixes (at most 10 each);
+  an answer outside that schema fails the judging. Likeness comes from the face model and is never
+  blended with Resemblance; a Candidate is **Disputed** when they differ by more than 4 points
+  (exactly 4 is not). The weighted total uses the Run's weights, frozen with its request: by
+  default Likeness 0.30, Resemblance 0.15, Realism 0.15, Pose 0.10, Background 0.08, Lighting 0.08,
+  Hairstyle 0.07, Clothing 0.05 and Framing 0.02 (they must be non-negative and sum to 1, and an
+  unknown criterion fails the request). The total is rounded to 9 decimals. Every judgement
+  records its Rubric version (`rubric-v1`).
+- **Judge failures:** a rate limit, server error or overload (408, 429, 5xx), a network failure
+  (a coded error such as DNS, TLS or a reset, and a 2xx response whose body broke off) or a call
+  past its timeout is retried like an Image Model call (1 s, 2 s, up to twice); a refusal,
+  another HTTP error (400 and up), a local programming error (a TypeError, SyntaxError or
+  RangeError with no code or a Bun/Node argument code such as `ERR_MISSING_ARGS`, booked at its
+  estimate since it may follow a billed response; only `ERR_INVALID_URL`, thrown before
+  anything is sent, at $0), an empty answer, an answer cut off at the
+  output cap or one outside the schema (the reason names the first problem and where) is not.
+  OpenAI reports a structured-output refusal as an empty answer, which Mastra 1.80 doesn't mark,
+  so it shows as cause `failed` ("empty answer"), not `refused`. Mastra's
+  own retries are off, so every attempt is a reserved, recorded call. A Candidate whose judging
+  failed keeps its Likeness and is marked `judge-failed` with a `cause` (`refused`, `failed`,
+  `gave-up` after transient errors, or `budget-exhausted`) and the reason; it never gets a
+  made-up score.
 - **Budget:** every billable call, retries included, is checked against the remaining Budget
   (Budget − actual cost so far − estimates of calls in flight) before it is made. All N first calls
   are reserved in order before any is launched, so parallel calls can't overspend; a call that
@@ -456,19 +524,45 @@ rejected before its Lane's price lookup and before any billable call, without ec
   usually with a `{"warning": …}` line on stderr naming the Run, Lane, Iteration and Candidate.
   A process killed mid-call leaves the call unsettled without a warning; `read` still shows it.
   A call can cost more than its estimate, so the actual total can exceed the Budget by at most
-  that difference on calls already in flight. A Run with an unpriced model doesn't start. The
-  Budget is in whole micro-dollars: at most 6 decimals, from $0.000001 to $1,000,000.
+  that difference on calls already in flight. Judge calls count against the same Budget: each
+  Lane's Judge calls are reserved in Candidate order after its Candidates are scored; one that
+  doesn't fit, or a retry that doesn't, isn't made, its Candidate is `judge-failed` with cause
+  `budget-exhausted`, and the Lane stops with `budget-exhausted`. A Judge call's estimate is an
+  upper bound: the instructions, Rubric, verdict schema (as sent) and Target Look with ASCII at
+  2.5 characters per token (Anthropic's current tokenizer averages about that) and every other
+  UTF-16 code unit at 2 tokens (CJK measures about 0.7, emoji and rare CJK up to about 1.5), each
+  image at its model's documented worst case for 1024 px (Anthropic ⌈w/28⌉·⌈h/28⌉ ≤ 1,369; OpenAI
+  patch models ⌈w/32⌉·⌈h/32⌉ × up to 2.46 ≤ 2,520, which also covers its tile models; Gemini 3
+  and later ≤ 1,120), plus a margin for prompts vendors add unseen (structured output and
+  thinking system prompts): 1,000 input tokens or 10%, whichever is more; and the whole output
+  cap, reasoning included: 4,096 tokens at `low` effort, 8,192 at `medium`, 16,384 at `high`. A
+  model with no documented bound (e.g. `openai/gpt-4o-mini`, whose image tiles cost 5,667 tokens
+  each, or a Gemini model before Gemini 3, whose tiles are unbounded for wide images) can't be the
+  Judge. For Sonnet 5.5 with 3 Reference Photos the estimate is
+  about $0.059, $0.100 or $0.182 per call. Its actual cost comes from the reported
+  input and output tokens (output includes reasoning) at the price recorded for the Judge when the
+  Run started, looked up under LiteLLM's key (`claude-sonnet-5-5`, `gpt-5.5`, `gemini/gemini-…`).
+  HTTP errors (400 and up) and network errors that show nothing was sent (ENOTFOUND, EAI_AGAIN,
+  connection refused) are booked at $0; any other network failure or a timeout has an unknown cost, so it counts at
+  its estimate against the Budget and as $0 in `actualUsd` (`unknownCostCalls`). A Run with an
+  unpriced model or Judge doesn't start. The Budget is in whole
+  micro-dollars: at most 6 decimals, from $0.000001 to $1,000,000.
 - **Output:** first, before any Candidate is generated, one JSON line on stderr with the estimated
-  cost per Lane and in total (`{"event":"estimate", …}`). Then one JSON object on stdout, with one
-  entry per Lane (its model, `initialPrompt` — null if the Run died before storing it — character
-  references and price source): per Candidate its Outcome — `Refused` or `Failed` with a reason,
-  `Gated` (`no-face` or `below-gate`, with the best face's similarity) or `Scored` with its Likeness
-  (similarity to the Identity Anchor scaled linearly from the Gate, 0, to the Identity Ceiling, 10,
-  and clamped; with a Ceiling at or below the Gate, anything at the Gate scores 10) — its stored
-  image path and SHA-256, and its estimated and actual cost per call; each Lane's stop reason
-  (`budget-exhausted` or `iteration-limit`);
-  totals over every billable call of the Run and the remaining Budget; the Reference Photo
-  warnings. `actualUsd` counts calls of unknown cost (`unknownCostCalls`) as $0, while the
+  cost per Lane and in total (`{"event":"estimate", …}`, including one Judge call per Candidate).
+  Then one JSON object on stdout, with one entry per Lane (its model, `initialPrompt` — null if the
+  Run died before storing it — character references and price source): per Candidate its Outcome —
+  `Refused` or `Failed` with a reason, `Gated` (`no-face` or `below-gate`, with the best face's
+  similarity) or `Scored` with its Likeness (similarity to the Identity Anchor scaled linearly from
+  the Gate, 0, to the Identity Ceiling, 10, and clamped; with a Ceiling at or below the Gate,
+  anything at the Gate scores 10) — its stored image path and SHA-256, and its estimated and actual
+  cost per call; its `judgement` — `null` when it wasn't judged, `judged` with `resemblance`,
+  every criterion's `scores` and `levels`, `weightedTotal`, `disputed`, `rubricVersion`, `issues`
+  and `promptFixes`, or `judge-failed` with its `cause` and `reason` — and its `judgeCost` (the
+  Judge's calls and their costs); each Lane's stop reason (`budget-exhausted` or
+  `iteration-limit`); the `judge` (model, effort, weights, Rubric version, its Reference Photos and
+  price source); totals over every billable call of the Run and the remaining Budget; the Run's
+  `warnings` (branch on `code`, e.g. `judge-same-vendor`, never on the message); the Reference
+  Photo warnings. `actualUsd` counts calls of unknown cost (`unknownCostCalls`) as $0, while the
   remaining Budget counts them at their estimate, so `budgetUsd − actualUsd` can exceed
   `remainingUsd`. Calls whose Candidate was never saved (the Run failed mid-way) are listed in
   `unattributedCalls` and still counted. With several faces in a Candidate, the best match to the
@@ -477,9 +571,13 @@ rejected before its Lane's price lookup and before any billable call, without ec
 - **Storage:** Candidates are content-addressed files in `<data dir>/images` (JPEG or PNG; other
   types fail the Candidate). The `--db` file holds Mastra's workflow snapshots (no image data or
   embeddings; the Run request is the workflow input) and the tables `runs` (request with the frozen
-  Target Look and Budget, and the photo report with the Identity Anchor and Ceiling), `lanes`, `iterations`
-  (Prompts), `candidates` and `cost_records` (estimated and actual cost and usage per billable call),
-  all keyed by Run, Lane, Iteration and Candidate.
+  Target Look, Budget and Judge, and the photo report with the Identity Anchor and Ceiling),
+  `lanes`, `iterations` (Prompts), `candidates`, `judges` (the Judge's price, Rubric version and
+  Reference Photos), `judgements` (one per judged Candidate, saved as soon as it exists; a
+  re-executed judge step skips Candidates already judged) and `cost_records` (estimated and actual
+  cost and usage per billable call, by purpose `generate` or `judge`), all keyed by Run, Lane,
+  Iteration and Candidate. A database written before the Judge existed is refused (its cost
+  records have no purpose); use a new `--db` file.
 
 ### ADR validation and commits
 

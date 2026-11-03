@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Schema } from "effect";
-import { DEFAULT_RETRY_POLICY, DEFAULT_TARGET_LOOK, RunRequest } from "../src";
+import { DEFAULT_JUDGE, DEFAULT_RETRY_POLICY, DEFAULT_TARGET_LOOK, RunRequest } from "../src";
 
 const decode = Schema.decodeUnknownSync(RunRequest);
 const valid = {
@@ -11,6 +11,7 @@ const valid = {
   budgetUsd: 1,
   candidates: 3,
   lanes: [{ model: "m" }],
+  judge: DEFAULT_JUDGE,
 };
 
 test("a Budget is whole micro-dollars, from $0.000001 to $1,000,000", () => {

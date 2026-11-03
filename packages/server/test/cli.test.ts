@@ -26,7 +26,14 @@ async function invoke(
   extraEnv: Record<string, string> = {},
 ) {
   // The real CLI must never see a real key from the developer's shell.
-  const { GEMINI_API_KEY: _, OPENAI_API_KEY: __, ...env } = Bun.env;
+  const {
+    GEMINI_API_KEY: _gemini,
+    ANTHROPIC_API_KEY: _anthropic,
+    OPENAI_API_KEY: _openai,
+    GOOGLE_GENERATIVE_AI_API_KEY: _google,
+    GOOGLE_API_KEY: _googleAlias,
+    ...env
+  } = Bun.env;
   const child = Bun.spawn([Bun.which("bun") ?? "bun", entry, ...args], {
     env: {
       ...env,
@@ -72,7 +79,7 @@ test("a Run prints its estimate, then a report that read can reproduce", async (
     ["same", "different"],
   );
   expect(started.lines.map((line) => JSON.parse(line))).toEqual([
-    expect.objectContaining({ event: "estimate", estimatedUsd: 0.3, budgetUsd: 0.25 }),
+    expect.objectContaining({ event: "estimate", estimatedUsd: 0.33, budgetUsd: 0.25 }),
   ]);
   expect(started.exitCode).toBe(0);
   const report = JSON.parse(started.stdout);
@@ -87,6 +94,11 @@ test("a Run prints its estimate, then a report that read can reproduce", async (
     "Gated",
   ]);
   expect(report.totals.estimatedUsd).toBeLessThanOrEqual(0.25);
+  // The Scored Candidate was judged by the default Judge; the Gated one never was.
+  expect(report.judge).toMatchObject({ model: "anthropic/claude-sonnet-5-5", effort: "low" });
+  expect(
+    report.lanes[0].candidates.map(({ judgement }: { judgement: unknown }) => judgement),
+  ).toEqual([expect.objectContaining({ status: "judged", rubricVersion: "rubric-v1" }), null]);
 
   const read = await invoke(cli, ["read", ...common, "--run-id", report.runId]);
   expect(read.lines).toEqual([]);
@@ -134,7 +146,9 @@ test("--lane runs a Gemini and an OpenAI Lane, each with its photos and Prompt; 
   expect(lines.map((line) => JSON.parse(line))).toEqual([
     expect.objectContaining({
       event: "estimate",
-      estimatedUsd: 0.2,
+      // Two $0.10 image calls and one $0.01 Judge call per Candidate.
+      estimatedUsd: 0.22,
+      judge: expect.objectContaining({ calls: 2 }),
       lanes: [
         expect.objectContaining({ lane: 0, model: "gemini-nano-banana-2.1", candidates: 1 }),
         expect.objectContaining({ lane: 1, model: "gpt-image-2.5-flare", candidates: 1 }),
@@ -190,6 +204,29 @@ test("--lane openai and openai:sunburst drive Sunburst; a prompt path may hold c
   });
 }, 60_000);
 
+test("the Judge's model and effort are taken from the command line", async () => {
+  const directory = await temporaryDirectory();
+  const common = ["--db", join(directory, "runs.db"), "--data-dir", join(directory, "data")];
+  const { stdout, exitCode } = await invoke(
+    withFakes,
+    [
+      ...common,
+      "--candidates",
+      "1",
+      "--judge-model",
+      "google/gemini-3.1-pro-preview",
+      "--judge-effort",
+      "high",
+      ...subjectPhotos,
+    ],
+    ["same"],
+  );
+  expect(exitCode).toBe(0);
+  const report = JSON.parse(stdout);
+  expect(report.judge).toMatchObject({ model: "google/gemini-3.1-pro-preview", effort: "high" });
+  expect(report.warnings.map(({ code }: { code: string }) => code)).toEqual(["judge-same-vendor"]);
+}, 60_000);
+
 test("help documents the arguments, the Budget and the key", async () => {
   const { stdout, exitCode } = await invoke(cli, ["--help"]);
   expect(exitCode).toBe(0);
@@ -200,8 +237,11 @@ test("help documents the arguments, the Budget and the key", async () => {
     "--pin PHOTO",
     "--lane SPEC",
     "openai:flare",
+    "--judge-model ID",
+    "--judge-effort LEVEL",
     "GEMINI_API_KEY",
     "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
     "30 days",
     "store=false",
     "read",
@@ -233,9 +273,6 @@ test("errors are one JSON line on stderr with a nonzero exit and nothing on stdo
     [withFakes, [...common], "photos"],
     [withFakes, [...common, "--look", join(directory, "missing.json"), ...subjectPhotos], "--look"],
     [withFakes, [...common, faceFixture("earth-apollo17.jpg")], "No Reference Photo was accepted"],
-    // The real CLI, with GEMINI_API_KEY cleared: fails before any call or price refresh.
-    [cli, [...common, ...subjectPhotos], "GEMINI_API_KEY is not set"],
-    [cli, [...common, "--lane", "openai", ...subjectPhotos], "OPENAI_API_KEY is not set"],
     [withFakes, [...common, "--lane", "dalle", ...subjectPhotos], "unknown Lane dalle"],
     [
       withFakes,
@@ -255,6 +292,16 @@ test("errors are one JSON line on stderr with a nonzero exit and nothing on stdo
       "photos= must come before prompt=",
     ],
     [cli, ["read", ...common, "--run-id", "x", "--lane", "openai"], "read takes only"],
+    [withFakes, [...common, "--judge-effort", "extreme", ...subjectPhotos], "effort"],
+    [withFakes, [...common, "--judge-model", "sonnet", ...subjectPhotos], "model router id"],
+    [
+      cli,
+      ["read", ...common, "--run-id", "x", "--judge-model", "openai/gpt-5.5"],
+      "read takes only",
+    ],
+    // The real CLI, with every key cleared: the Judge's key is checked first, before any call
+    // or price refresh.
+    [cli, [...common, ...subjectPhotos], "ANTHROPIC_API_KEY is not set"],
     [cli, ["read", ...common, "--run-id", "missing"], "Run not found"],
     [cli, ["read", "--db", join(directory, "typo.db"), "--run-id", "x"], "no such database file"],
     [cli, ["--unknown"], "Unknown option"],

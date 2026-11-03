@@ -1,12 +1,21 @@
-import type { ImageRequest } from "@iconograph/domain";
+import type { ImageRequest, UnsuccessfulCall } from "@iconograph/domain";
 import { Schema } from "effect";
 
 /** A non-negative token count in a vendor's usage report. */
 export const Count = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
 
-/** HTTP statuses worth retrying: request timeout, rate limit, server error. */
+/** HTTP statuses worth retrying: request timeout, rate limit, server error (incl. 529 overload). */
 export const isTransientStatus = (status: number) =>
   status === 408 || status === 429 || status >= 500;
+
+/**
+ * A vendor's HTTP error status as a call result, at $0 (vendors don't bill
+ * error responses): transient when retrying can help, else failed.
+ */
+export const httpErrorResult = (status: number, reason: string): UnsuccessfulCall =>
+  isTransientStatus(status)
+    ? { kind: "transient", reason, costMicros: 0 }
+    : { kind: "failed", reason, usage: null, costMicros: 0 };
 
 /** A response body as JSON, or undefined when it isn't JSON. */
 export const parseJson = (text: string): unknown => {

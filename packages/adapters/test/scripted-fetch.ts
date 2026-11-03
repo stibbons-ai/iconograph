@@ -1,9 +1,9 @@
 import {
   type CallGate,
-  type CallResult,
   generateCandidate,
   type ImageModel,
   type ImageRequest,
+  type SettledCall,
 } from "@iconograph/domain";
 import { Effect } from "effect";
 
@@ -45,7 +45,7 @@ export const recordedReplies =
 
 /** Generate one Candidate with retries (no backoff); every attempt is let through and recorded. */
 export async function generateRecorded(model: ImageModel, request: ImageRequest) {
-  const settled: CallResult[] = [];
+  const settled: SettledCall[] = [];
   const gate: CallGate = {
     reserve: () => Effect.void,
     settle: (_, result) => Effect.sync(() => void settled.push(result)),

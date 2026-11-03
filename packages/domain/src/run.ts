@@ -1,6 +1,7 @@
 import { Schema } from "effect";
 import { isWholeMicros, toMicros } from "./budget";
 import { MAX_REFERENCE_PHOTOS } from "./identity";
+import { JudgeConfig } from "./judge";
 import { TargetLook } from "./target-look";
 
 /** Issue #1 defaults: a $5 Budget and 3 Candidates per Iteration. */
@@ -87,6 +88,8 @@ export const RunRequest = Schema.Struct({
   candidates: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: MAX_CANDIDATES })),
   /** One or more Lanes, each driving one Image Model; a Lane's photos must be among the Run's. */
   lanes: Schema.Array(LaneRequest).check(Schema.isMinLength(1)),
+  /** The Judge of every Lane's Candidates, with the Rubric weights frozen for the Run. */
+  judge: JudgeConfig,
 }).check(
   Schema.makeFilter(
     ({ photos, lanes }: { photos: readonly string[]; lanes: readonly LaneRequest[] }) => {

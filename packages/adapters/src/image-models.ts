@@ -6,6 +6,7 @@ import {
   Unpriced,
 } from "@iconograph/domain";
 import { Effect, Layer } from "effect";
+import { apiKeyFromEnv } from "./api-key";
 import { errorMessage } from "./errors";
 import { type GeminiFetch, geminiImageModel } from "./gemini";
 import { type OpenAIFetch, openaiImageModel } from "./openai";
@@ -22,30 +23,13 @@ export interface NativeImageModelsOptions {
   openaiFetch?: OpenAIFetch;
 }
 
-/**
- * The API key in `variable` of `env`, checked before any price lookup or
- * billable call. A header value can't hold control or non-ASCII characters; a
- * runtime rejecting one would quote the value in its error. Real keys are far
- * longer than 20 characters, and a very short one would make redaction garble
- * every reason. Messages never echo the key.
- */
-const apiKey = (env: Record<string, string | undefined>, variable: string, model: string) =>
-  Effect.gen(function* () {
-    const key = env[variable]?.trim();
-    if (!key) {
-      return yield* new ImageModelUnavailable({
-        model,
-        message: `${variable} is not set; ${model} needs its API key in the environment`,
-      });
-    }
-    if (!/^[\x21-\x7e]{20,}$/.test(key)) {
-      return yield* new ImageModelUnavailable({
-        model,
-        message: `${variable} is shorter than 20 characters or contains spaces, control or non-ASCII characters; check how it was set`,
-      });
-    }
-    return key;
-  });
+/** The API key in `variable` of `env`, checked before any price lookup or billable call. */
+const apiKey = (env: Record<string, string | undefined>, variable: string, model: string) => {
+  const read = apiKeyFromEnv(env, [variable], model);
+  return "problem" in read
+    ? Effect.fail(new ImageModelUnavailable({ model, message: read.problem }))
+    : Effect.succeed(read.key);
+};
 
 /**
  * The Image Models with native adapters (ADR-0004), selected by model id.

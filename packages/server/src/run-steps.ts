@@ -1,9 +1,12 @@
 import {
+  type CallPurpose,
   type CandidateKey,
+  type CandidateRecord,
   decodeReferencePhoto,
   errorMessage,
   imagePath,
   isStorableImageType,
+  readImageAtMost,
   loadCharacterReference,
   type ReferencePhotoReport,
   RunStore,
@@ -12,6 +15,7 @@ import {
   validateReferencePhotos,
 } from "@iconograph/adapters";
 import {
+  type CallEstimate,
   type CallGate,
   type CandidateOutcome,
   DEFAULT_RETRY_POLICY,
@@ -23,12 +27,17 @@ import {
   ImageModels,
   type ImageRequest,
   initialPrompt,
+  JUDGE_IMAGE_MAX_SIDE,
+  judgeCandidate,
+  judgeFailed,
+  Judges,
   notSent,
   type RetryPolicy,
   type RgbImage,
   type RunRequest,
   scoreCandidate,
   selectCharacterReferences,
+  selectJudgeReferences,
   toUsd,
 } from "@iconograph/domain";
 import { Context, Data, Effect } from "effect";
@@ -51,10 +60,35 @@ export const defaultRunConfig = (dataDirectory: string) => ({
 /** A Run that can't proceed, for a reason the operator can fix. */
 export class RunError extends Data.TaggedError("RunError")<{ message: string; cause?: unknown }> {}
 
+/** The stored (stripped) copies of the given accepted Reference Photos, in order. */
+const storedPhotos = (photoReport: ReferencePhotoReport, photos: readonly number[]) => {
+  const stored = new Map(
+    photoReport.photos.flatMap((photo) =>
+      photo.verdict === "accepted" ? [[photo.photo, photo.stored] as const] : [],
+    ),
+  );
+  return photos.map((photo) => stored.get(photo)!);
+};
+
+/** Accepted Reference Photos as sent to an Image Model (at most 2048 px), in the given order. */
+const loadReferences = (photoReport: ReferencePhotoReport, photos: readonly number[]) =>
+  Effect.forEach(storedPhotos(photoReport, photos), loadCharacterReference);
+
+/** A stored image as the Judge sees it: normalised (upright, on white, JPEG), at most `JUDGE_IMAGE_MAX_SIDE` px. */
+const forJudge = (path: string, mimeType: string, what: string) =>
+  Effect.tryPromise({
+    try: () => readImageAtMost(path, mimeType, JUDGE_IMAGE_MAX_SIDE, { normalise: true }),
+    catch: (error) =>
+      new RunError({
+        message: `Reading ${what} ${path} failed: ${errorMessage(error)}`,
+        cause: error,
+      }),
+  });
+
 /**
  * The request every Candidate of a Lane's Iteration is generated from: the
- * Prompt, the Lane's character references as sent (stripped, at most 2048 px)
- * and the Lane size, which an adapter lists first among its sizes.
+ * Prompt, the Lane's character references as sent and the Lane size, which an
+ * adapter lists first among its sizes.
  */
 const laneRequest = (
   photoReport: ReferencePhotoReport,
@@ -62,24 +96,72 @@ const laneRequest = (
   prompt: string,
   model: ImageModel,
 ) =>
+  Effect.map(
+    loadReferences(photoReport, characterReferences),
+    (references) =>
+      ({ prompt, references, size: model.capabilities.sizes[0] }) satisfies ImageRequest,
+  );
+
+/** Log annotations naming the Candidate a warning is about. */
+const about = ({ runId, lane, iteration, candidate }: CandidateKey) =>
+  Effect.annotateLogs({ runId, lane, iteration, candidate });
+
+/** The Budget's view of one Candidate's calls for `purpose`, numbering attempts from `offset`. */
+const candidateGate = (
+  store: RunStore["Service"],
+  key: CandidateKey,
+  purpose: CallPurpose,
+  model: string,
+  offset = 0,
+): CallGate<RunStoreError> => ({
+  reserve: (attempt, callEstimate) =>
+    store.reserveCall({ ...key, purpose, attempt: offset + attempt }, model, callEstimate),
+  settle: (attempt, result) =>
+    store.settleCall({ ...key, purpose, attempt: offset + attempt }, result),
+});
+
+/** A Candidate's call to reserve: its key (for logs) and its gate. */
+interface Reservable {
+  readonly key: CandidateKey;
+  readonly gate: CallGate<RunStoreError>;
+}
+
+/**
+ * Reserve each item's first call against the Budget, in order, until one
+ * doesn't fit; returns the items reserved, a prefix of `items`. If reserving
+ * fails or is interrupted partway, the calls already reserved were never
+ * sent: each is booked at $0, and one that can't be booked is logged.
+ */
+const reserveInOrder = <T extends Reservable>(items: readonly T[], estimate: CallEstimate) =>
   Effect.gen(function* () {
-    const storedPhotos = new Map(
-      photoReport.photos.flatMap((photo) =>
-        photo.verdict === "accepted" ? [[photo.photo, photo.stored] as const] : [],
-      ),
+    const reserved: T[] = [];
+    const settleNotSent = Effect.forEach(
+      reserved,
+      ({ key, gate }) =>
+        gate
+          .settle(0, notSent("reserving the Lane's calls failed or was interrupted"))
+          .pipe(
+            Effect.ignore({ log: "Warn", message: "Settling an unsent reservation failed" }),
+            about(key),
+          ),
+      { discard: true },
     );
-    const references = yield* Effect.forEach(characterReferences, (photo) =>
-      loadCharacterReference(storedPhotos.get(photo)!),
-    );
-    return { prompt, references, size: model.capabilities.sizes[0] } satisfies ImageRequest;
+    yield* Effect.gen(function* () {
+      for (const item of items) {
+        if (!(yield* fitsBudget(item.gate.reserve(0, estimate)))) break;
+        reserved.push(item);
+      }
+    }).pipe(Effect.onError(() => settleNotSent));
+    return reserved;
   });
 
 /**
- * Prepare a Run: get every Lane's Image Model (credentials and price, before
- * anything billable), validate the Reference Photos, freeze the Run with its
- * Identity Anchor and Ceiling, choose each Lane's character references from
- * its own accepted photos, store each Lane's initial Prompt (its own, else the
- * one built from the Target Look), and announce the estimated cost.
+ * Prepare a Run: get every Lane's Image Model and the Judge (credentials and
+ * price, before anything billable), validate the Reference Photos, freeze the
+ * Run with its Identity Anchor and Ceiling, choose each Lane's character
+ * references from its own accepted photos and the Judge's Reference Photos,
+ * store each Lane's initial Prompt (its own, else the one built from the
+ * Target Look), and announce the estimated cost.
  */
 export const prepareRun = (
   runId: string,
@@ -90,6 +172,8 @@ export const prepareRun = (
     const store = yield* RunStore;
     const imageModels = yield* ImageModels;
     const { dataDirectory } = yield* RunConfig;
+    // The Judge first: a Run without the Judge's key fails before any price is looked up.
+    const judge = yield* (yield* Judges).get(request.judge);
     const models = yield* Effect.forEach(request.lanes, ({ model }) => imageModels.get(model));
 
     // The request schema already rejects two choices for one photo.
@@ -135,7 +219,14 @@ export const prepareRun = (
       }),
     );
 
+    const judgeReferences = yield* selectJudgeReferences(accepted);
+
     yield* store.createRun({ id: runId, request, photoReport: { ...report, identity } });
+    yield* store.createJudge(runId, {
+      price: judge.price,
+      rubricVersion: judge.rubric.version,
+      referencePhotos: judgeReferences,
+    });
     const defaultPrompt = initialPrompt(request.targetLook);
     const prompts = request.lanes.map(({ prompt }) => prompt ?? defaultPrompt);
     for (const lane of lanes) {
@@ -154,12 +245,19 @@ export const prepareRun = (
         return { lane, model: model.model, perCall, micros: perCall * request.candidates };
       });
     });
+    const judgeCalls = request.candidates * lanes.length;
+    const judgePerCall = judge.estimate({
+      references: judgeReferences.length,
+      targetLook: request.targetLook,
+    }).micros;
+    const imageMicros = estimates.reduce((sum, { micros }) => sum + micros, 0);
+    const judgeMicros = judgePerCall * judgeCalls;
     yield* Effect.promise(() =>
       announce({
         event: "estimate",
         runId,
         budgetUsd: request.budgetUsd,
-        estimatedUsd: toUsd(estimates.reduce((sum, { micros }) => sum + micros, 0)),
+        estimatedUsd: toUsd(imageMicros + judgeMicros),
         lanes: estimates.map(({ lane, model, perCall, micros }) => ({
           lane,
           model,
@@ -167,6 +265,13 @@ export const prepareRun = (
           perCallUsd: toUsd(perCall),
           estimatedUsd: toUsd(micros),
         })),
+        judge: {
+          model: judge.model,
+          effort: judge.effort,
+          calls: judgeCalls,
+          perCallUsd: toUsd(judgePerCall),
+          estimatedUsd: toUsd(judgeMicros),
+        },
       }),
     );
     return lanes.map(({ lane, model }) => ({ runId, lane, model })) satisfies LaneInput[];
@@ -196,36 +301,13 @@ export const generateIteration = (input: LaneInput) =>
     const request = yield* laneRequest(run.photoReport, lane.characterReferences, prompt, model);
     const estimate = model.estimate(request);
 
-    const reserved: CandidateKey[] = [];
-    /** Log annotations naming the Candidate a warning is about. */
-    const about = ({ runId, lane, iteration, candidate }: CandidateKey) =>
-      Effect.annotateLogs({ runId, lane, iteration, candidate });
-    // If reserving fails or is interrupted partway, the calls already reserved were never
-    // sent: book each at $0, and log each one that can't be booked.
-    const settleNotSent = Effect.forEach(
-      reserved,
-      (key) =>
-        store
-          .settleCall(
-            { ...key, attempt: 0 },
-            notSent("reserving the Lane's calls failed or was interrupted"),
-          )
-          .pipe(
-            Effect.ignore({ log: "Warn", message: "Settling an unsent reservation failed" }),
-            about(key),
-          ),
-      { discard: true },
-    );
-    yield* Effect.gen(function* () {
-      for (let candidate = 0; candidate < run.request.candidates; candidate++) {
+    const reserved = yield* reserveInOrder(
+      Array.from({ length: run.request.candidates }, (_, candidate) => {
         const key = { ...iteration, candidate };
-        const fits = yield* fitsBudget(
-          store.reserveCall({ ...key, attempt: 0 }, model.model, estimate),
-        );
-        if (!fits) break;
-        reserved.push(key);
-      }
-    }).pipe(Effect.onError(() => settleNotSent));
+        return { key, gate: candidateGate(store, key, "generate", model.model) };
+      }),
+      estimate,
+    );
 
     /**
      * Store one finished Candidate: its image to score, or its final outcome.
@@ -261,17 +343,11 @@ export const generateIteration = (input: LaneInput) =>
 
     const generations = yield* Effect.forEach(
       reserved,
-      (key) => {
-        const gate: CallGate<RunStoreError> = {
-          reserve: (attempt, callEstimate) =>
-            store.reserveCall({ ...key, attempt }, model.model, callEstimate),
-          settle: (attempt, result) => store.settleCall({ ...key, attempt }, result),
-        };
-        return generateCandidate({ model, request, gate, policy: retryPolicy }).pipe(
+      ({ key, gate }) =>
+        generateCandidate({ model, request, gate, policy: retryPolicy }).pipe(
           about(key),
           Effect.tap((generation) => save(key, generation)),
-        );
-      },
+        ),
       { concurrency: "unbounded" },
     );
     const budgetExhausted =
@@ -286,7 +362,7 @@ export const generateIteration = (input: LaneInput) =>
  * Score the Iteration's generated Candidates against the Identity Gate: no
  * face or below the Gate is Gated, otherwise Scored with its Likeness. An
  * image the face pipeline can't decode is Failed; a face-model fault fails the
- * step.
+ * step. The Lane's stop reason passes on to the judge step.
  */
 export const scoreIteration = (input: LaneGenerated) =>
   Effect.gen(function* () {
@@ -324,7 +400,113 @@ export const scoreIteration = (input: LaneGenerated) =>
       );
       yield* store.setCandidateOutcome(candidate, outcome);
     }
-    const stopReason = input.stopReason ?? "iteration-limit";
-    yield* store.stopLane(input.runId, input.lane, stopReason);
-    return { runId: input.runId, lane: input.lane, stopReason } satisfies LaneResult;
+    return input;
+  });
+
+/** A Scored Candidate with its stored image. */
+type ScoredCandidate = CandidateRecord & {
+  outcome: Extract<CandidateOutcome, { _tag: "Scored" }>;
+  image: NonNullable<CandidateRecord["image"]>;
+};
+
+/**
+ * Judge the Iteration's Scored Candidates; Gated, Refused and Failed ones are
+ * never judged. Each Judge call sees the Run's Reference Photos for the Judge
+ * (at most 3, in their fixed order), then the Candidate. As in generation,
+ * every first call is reserved in Candidate order before any is launched, and
+ * each transient retry is reserved first; a call that doesn't fit isn't made,
+ * its Candidate is marked judge-failed for the Budget, and the Lane stops with
+ * `budget-exhausted`. Every judgement is stored as soon as it exists, with the
+ * Rubric version; a Candidate already judged is skipped, so a re-executed step
+ * doesn't call the Judge again. A failed judging leaves the Candidate's
+ * Likeness, never a made-up score.
+ */
+export const judgeIteration = (input: LaneGenerated) =>
+  Effect.gen(function* () {
+    const store = yield* RunStore;
+    const { dataDirectory, retryPolicy } = yield* RunConfig;
+    const run = yield* store.loadRun(input.runId);
+    const record = yield* store.loadJudge(input.runId);
+    if (!record) return yield* new RunError({ message: `Run ${input.runId} has no Judge` });
+    const judge = yield* (yield* Judges).get(run.request.judge, record.price);
+    if (judge.rubric.version !== record.rubricVersion) {
+      return yield* new RunError({
+        message: `Run ${input.runId} is judged with ${record.rubricVersion}, but this build has only ${judge.rubric.version}`,
+      });
+    }
+    const pending = (yield* store.loadCandidates(input.runId, input.lane)).filter(
+      (candidate): candidate is ScoredCandidate =>
+        candidate.outcome?._tag === "Scored" &&
+        candidate.judgement === null &&
+        candidate.image !== null,
+    );
+    const finish = (budgetExhausted: boolean) =>
+      Effect.gen(function* () {
+        const stopReason =
+          input.stopReason ?? (budgetExhausted ? "budget-exhausted" : "iteration-limit");
+        yield* store.stopLane(input.runId, input.lane, stopReason);
+        return { runId: input.runId, lane: input.lane, stopReason } satisfies LaneResult;
+      });
+    if (pending.length === 0) return yield* finish(false);
+
+    // Everything the calls need is read before any is reserved. A step re-executed after a
+    // Judge call whose judgement wasn't saved numbers its calls on.
+    const references = yield* Effect.forEach(
+      storedPhotos(run.photoReport, record.referencePhotos),
+      (stored) => forJudge(stored.path, "image/jpeg", "Reference Photo"),
+    );
+    const items = yield* Effect.forEach(pending, (candidate) => {
+      const path = imagePath(dataDirectory, candidate.image.sha256, candidate.image.type);
+      return forJudge(path, candidate.image.type, `Candidate ${candidate.candidate}'s image`).pipe(
+        Effect.map((image) => {
+          const earlierCalls = candidate.calls.filter(({ purpose }) => purpose === "judge").length;
+          const { runId, lane, iteration } = candidate;
+          const key = { runId, lane, iteration, candidate: candidate.candidate };
+          const gate = candidateGate(store, key, "judge", judge.model, earlierCalls);
+          return { key, gate, candidate, image };
+        }),
+      );
+    });
+    const estimate = judge.estimate({
+      references: references.length,
+      targetLook: run.request.targetLook,
+    });
+    const reserved = yield* reserveInOrder(items, estimate);
+
+    const judgements = yield* Effect.forEach(
+      reserved,
+      ({ key, candidate, image, gate }) =>
+        judgeCandidate({
+          judge,
+          request: { references, candidate: image, targetLook: run.request.targetLook },
+          estimate,
+          likeness: candidate.outcome.likeness,
+          weights: run.request.judge.weights,
+          gate,
+          policy: retryPolicy,
+        }).pipe(
+          about(key),
+          Effect.tap((judgement) => store.saveJudgement(key, judgement)),
+        ),
+      { concurrency: "unbounded" },
+    );
+    // Reserved in order until one didn't fit: the rest weren't reserved. Saved only after the
+    // reserved calls ran, so no reservation is left unsettled between reserving and launching.
+    const notJudged = items.slice(reserved.length);
+    for (const { key } of notJudged) {
+      yield* store.saveJudgement(
+        key,
+        judgeFailed(
+          judge.rubric,
+          "budget-exhausted",
+          "Not judged: the Judge call didn't fit the Budget",
+        ),
+      );
+    }
+    return yield* finish(
+      notJudged.length > 0 ||
+        judgements.some(
+          (judgement) => judgement._tag === "JudgeFailed" && judgement.cause === "budget-exhausted",
+        ),
+    );
   });

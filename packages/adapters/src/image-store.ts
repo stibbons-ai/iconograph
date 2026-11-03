@@ -1,5 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import type { EncodedImage } from "@iconograph/domain";
+import sharp from "sharp";
 import { imagesDirectory } from "./data-directory";
 import { writeFileAtomically } from "./files";
 
@@ -43,4 +45,31 @@ export async function storeImage(
   await mkdir(imagesDirectory(dataDirectory), { recursive: true });
   await writeFileAtomically(path, (file) => file.writeFile(bytes), { suffix: ".tmp" });
   return { path, sha256 };
+}
+
+/**
+ * A stored image as sent to a vendor, at most `maxSide` pixels on its longest
+ * side. Normalised (upright with EXIF orientation applied, flattened onto
+ * white since JPEG has no alpha, re-encoded as JPEG) when it is larger, or
+ * always with `normalise`; otherwise sent as stored. An image whose
+ * dimensions sharp can't report is treated as too large, never passed on
+ * unbounded.
+ */
+export async function readImageAtMost(
+  path: string,
+  mimeType: string,
+  maxSide: number,
+  { normalise = false }: { readonly normalise?: boolean } = {},
+): Promise<EncodedImage> {
+  const bytes = await Bun.file(path).bytes();
+  const image = sharp(bytes);
+  const { width = Infinity, height = Infinity } = await image.metadata();
+  if (!normalise && Math.max(width, height) <= maxSide) return { bytes, mimeType };
+  const resized = await image
+    .rotate()
+    .resize(maxSide, maxSide, { fit: "inside", withoutEnlargement: true })
+    .flatten({ background: "#ffffff" })
+    .jpeg({ quality: 90 })
+    .toBuffer();
+  return { bytes: resized, mimeType: "image/jpeg" };
 }

@@ -75,6 +75,8 @@ export interface FakeOptions {
   unpriced?: boolean;
   /** The cost a transient error reports: 0 (an unbilled HTTP error, the default) or null (unknown). */
   transientCost?: number | null;
+  /** The file a `same` response returns instead of the fixture, e.g. a larger image. */
+  sameImage?: string;
   /** The MIME type image responses claim (default `image/jpeg`). */
   imageType?: string;
   /** Runs before each call answers, with its index in `requests` and its model. */
@@ -110,7 +112,11 @@ export function fakeImageModels(script: FakeScript, options: FakeOptions = {}): 
         return {
           kind: "image",
           image: {
-            bytes: await Bun.file(faceFixture(images[response])).bytes(),
+            bytes: await Bun.file(
+              response === "same" && options.sameImage
+                ? options.sameImage
+                : faceFixture(images[response]),
+            ).bytes(),
             mimeType: options.imageType ?? "image/jpeg",
           },
           usage,

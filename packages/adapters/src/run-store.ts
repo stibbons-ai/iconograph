@@ -2,14 +2,16 @@ import { stat } from "node:fs/promises";
 import {
   type BudgetExhausted,
   type CallEstimate,
-  type CallResult,
   CandidateOutcome,
   checkBudget,
+  Judgement,
   IdentityCeiling,
   LaneStopReason,
   type LedgerEntry,
   PriceQuote,
   RunRequest,
+  type SettledCall,
+  SettledCallKind,
   toMicros,
 } from "@iconograph/domain";
 import { type Client, createClient, type InValue, type Row } from "@libsql/client";
@@ -28,9 +30,9 @@ export class RunStoreError extends Data.TaggedError("RunStoreError")<{
 
 /**
  * Our own tables, in the same LibSQL file as Mastra's storage. Every row is
- * keyed by Run, Lane, Iteration and Candidate index (and attempt for calls), so
- * a later restart can find what already exists instead of billing again (not
- * implemented yet). USD amounts are integer micro-dollars; `budget_micros` is
+ * keyed by Run, Lane, Iteration and Candidate index (and purpose and attempt
+ * for calls). A re-executed judge step finds the judgements that already
+ * exist instead of billing again; generation doesn't check yet. USD amounts are integer micro-dollars; `budget_micros` is
  * derived from the stored request when the Run is saved, so the reservation
  * SQL can read it.
  */
@@ -77,6 +79,7 @@ CREATE TABLE IF NOT EXISTS cost_records (
   lane INTEGER NOT NULL,
   iteration INTEGER NOT NULL,
   candidate INTEGER NOT NULL,
+  purpose TEXT NOT NULL CHECK (purpose IN ('generate', 'judge')),
   attempt INTEGER NOT NULL,
   model TEXT NOT NULL,
   created_at INTEGER NOT NULL,
@@ -87,8 +90,24 @@ CREATE TABLE IF NOT EXISTS cost_records (
   usage TEXT,
   result TEXT,
   reason TEXT,
-  PRIMARY KEY (run_id, lane, iteration, candidate, attempt),
+  PRIMARY KEY (run_id, lane, iteration, candidate, purpose, attempt),
   FOREIGN KEY (run_id) REFERENCES runs (id)
+);
+CREATE TABLE IF NOT EXISTS judges (
+  run_id TEXT PRIMARY KEY REFERENCES runs (id),
+  price TEXT NOT NULL,
+  rubric_version TEXT NOT NULL,
+  reference_photos TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS judgements (
+  run_id TEXT NOT NULL,
+  lane INTEGER NOT NULL,
+  iteration INTEGER NOT NULL,
+  candidate INTEGER NOT NULL,
+  judgement TEXT NOT NULL,
+  PRIMARY KEY (run_id, lane, iteration, candidate),
+  FOREIGN KEY (run_id, lane, iteration, candidate)
+    REFERENCES candidates (run_id, lane, iteration, candidate)
 );
 `;
 
@@ -110,7 +129,12 @@ export interface CandidateKey extends IterationKey {
   candidate: number;
 }
 
+/** What a billable call was for: generating the Candidate, or judging it. */
+const CallPurpose = Schema.Literals(["generate", "judge"]);
+export type CallPurpose = typeof CallPurpose.Type;
+
 export interface CallKey extends CandidateKey {
+  purpose: CallPurpose;
   attempt: number;
 }
 
@@ -153,12 +177,20 @@ export interface LaneRecord extends NewLane {
   stopReason: LaneStopReason | null;
 }
 
-const CallResultKind = Schema.Literals(["image", "refused", "transient", "failed"]);
+/** The Run's Judge as frozen at Run start; its model, effort and weights are in the request. */
+export interface JudgeRecord {
+  price: PriceQuote;
+  rubricVersion: string;
+  /** Photo numbers of the Reference Photos the Judge sees, in the order it sees them. */
+  referencePhotos: readonly number[];
+}
+
+const decodePurpose = Schema.decodeUnknownSync(CallPurpose);
 const UsageJson = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Finite));
 
 /** One billable call: its key, its Budget ledger entry and what it returned. */
 export interface CallRecord extends CallKey, LedgerEntry {
-  result: CallResult["kind"] | null;
+  result: typeof SettledCallKind.Type | null;
   reason: string | null;
   usage: Record<string, number> | null;
 }
@@ -178,6 +210,9 @@ export interface CandidateRecord extends CandidateKey {
   /** Null between generating and scoring. */
   outcome: CandidateOutcome | null;
   image: StoredCandidateImage | null;
+  /** Null until the Judge's work on a Scored Candidate ends; always null otherwise. */
+  judgement: Judgement | null;
+  /** Its billable calls, generating and judging, by purpose and attempt. */
   calls: CallRecord[];
 }
 
@@ -187,15 +222,23 @@ const decodePrice = Schema.decodeUnknownSync(Schema.fromJsonString(PriceQuote));
 const decodeReferences = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Array(Schema.Int)));
 const decodeStopReason = Schema.decodeUnknownSync(Schema.NullOr(LaneStopReason));
 const decodeOutcome = Schema.decodeUnknownSync(Schema.fromJsonString(CandidateOutcome));
-const decodeResult = Schema.decodeUnknownSync(Schema.NullOr(CallResultKind));
+const decodeResult = Schema.decodeUnknownSync(Schema.NullOr(SettledCallKind));
 const decodeUsage = Schema.decodeUnknownSync(Schema.NullOr(UsageJson));
+const decodeJudgement = Schema.decodeUnknownSync(Schema.fromJsonString(Judgement));
+const encodeJudgement = Schema.encodeSync(Schema.fromJsonString(Judgement));
 
-/** A `cost_records` row. */
-const callRecord = (row: Row): CallRecord => ({
+/** The Candidate a row of `candidates`, `judgements` or `cost_records` is about. */
+const candidateKeyRow = (row: Row): CandidateKey => ({
   runId: String(row.run_id),
   lane: Number(row.lane),
   iteration: Number(row.iteration),
   candidate: Number(row.candidate),
+});
+
+/** A `cost_records` row. */
+const callRecord = (row: Row): CallRecord => ({
+  ...candidateKeyRow(row),
+  purpose: decodePurpose(row.purpose),
   attempt: Number(row.attempt),
   estimateMicros: Number(row.estimated_micros),
   settled: Number(row.settled) === 1,
@@ -228,6 +271,9 @@ export class RunStore extends Context.Service<
     ) => Effect.Effect<void, RunStoreError>;
     /** Fails with `notFound` when the Iteration doesn't exist. */
     readonly loadPrompt: (key: IterationKey) => Effect.Effect<string, RunStoreError>;
+    readonly createJudge: (runId: string, judge: JudgeRecord) => Effect.Effect<void, RunStoreError>;
+    /** Null when the Run was never given a Judge (it failed while starting). */
+    readonly loadJudge: (runId: string) => Effect.Effect<JudgeRecord | null, RunStoreError>;
     /**
      * Reserve a call's estimate against the Run's Budget and record it in one
      * atomic statement, or fail with `BudgetExhausted` without recording
@@ -239,7 +285,7 @@ export class RunStore extends Context.Service<
       estimate: CallEstimate,
     ) => Effect.Effect<void, BudgetExhausted | RunStoreError>;
     /** Record a reserved call's result and actual cost. */
-    readonly settleCall: (key: CallKey, result: CallResult) => Effect.Effect<void, RunStoreError>;
+    readonly settleCall: (key: CallKey, result: SettledCall) => Effect.Effect<void, RunStoreError>;
     /** Record a Candidate once its calls are done: an image to score, or a final outcome. */
     readonly saveCandidate: (
       key: CandidateKey,
@@ -249,6 +295,11 @@ export class RunStore extends Context.Service<
     readonly setCandidateOutcome: (
       key: CandidateKey,
       outcome: CandidateOutcome,
+    ) => Effect.Effect<void, RunStoreError>;
+    /** Record how the Judge's work on a Candidate ended; once per Candidate. */
+    readonly saveJudgement: (
+      key: CandidateKey,
+      judgement: Judgement,
     ) => Effect.Effect<void, RunStoreError>;
     readonly loadCandidates: (
       runId: string,
@@ -265,6 +316,19 @@ export class RunStore extends Context.Service<
 >()("@iconograph/adapters/RunStore") {}
 
 const json = (value: unknown) => JSON.stringify(value);
+
+/**
+ * Run tables from before the Judge keyed calls without a purpose; their rows
+ * can't hold Judge calls, so such a database is refused rather than migrated.
+ */
+async function rejectPreJudgeTables(client: Client) {
+  const { rows } = await client.execute("PRAGMA table_info(cost_records)");
+  if (rows.length > 0 && !rows.some((row) => row.name === "purpose")) {
+    throw new Error(
+      "its Run tables predate the Judge (cost records without a purpose); use a new database file",
+    );
+  }
+}
 
 export interface LibsqlRunStoreOptions {
   /** Read a database that must already exist, without creating tables. */
@@ -292,9 +356,9 @@ export const LibsqlRunStore = (databasePath: string, options: LibsqlRunStoreOpti
               // Mastra writes snapshots to the same file; wait for its locks instead of failing.
               timeout: 5_000,
             });
-            if (options.readOnly) return client;
             try {
-              await client.executeMultiple(schema);
+              await rejectPreJudgeTables(client);
+              if (!options.readOnly) await client.executeMultiple(schema);
             } catch (error) {
               client.close();
               throw error;
@@ -337,18 +401,33 @@ export const LibsqlRunStore = (databasePath: string, options: LibsqlRunStoreOpti
       const loadRecords = (runId: string, lane?: number) =>
         query(`Loading the Candidates of Run ${runId}`, async (db) => {
           const { where, args } = scope(runId, lane);
-          const [candidateRows, callRows] = await db.batch(
+          const [candidateRows, callRows, judgementRows] = await db.batch(
             [
               {
                 sql: `SELECT * FROM candidates WHERE ${where} ORDER BY lane, iteration, candidate`,
                 args,
               },
               {
-                sql: `SELECT * FROM cost_records WHERE ${where} ORDER BY lane, iteration, candidate, attempt`,
+                sql: `SELECT * FROM cost_records WHERE ${where}
+                      ORDER BY lane, iteration, candidate, purpose, attempt`,
                 args,
               },
+              { sql: `SELECT * FROM judgements WHERE ${where}`, args },
             ],
             "read",
+          );
+          const judgements = new Map(
+            (judgementRows?.rows ?? []).map((row) => {
+              const key = candidateKeyRow(row);
+              try {
+                return [candidateKeyOf(key), decodeJudgement(row.judgement)] as const;
+              } catch (error) {
+                throw new Error(
+                  `the judgement of Lane ${key.lane}, Iteration ${key.iteration}, Candidate ${key.candidate} can't be read: ${errorMessage(error)}`,
+                  { cause: error },
+                );
+              }
+            }),
           );
           const calls = (callRows?.rows ?? []).map(callRecord);
           const callsByCandidate = new Map<string, CallRecord[]>();
@@ -359,12 +438,7 @@ export const LibsqlRunStore = (databasePath: string, options: LibsqlRunStoreOpti
             else callsByCandidate.set(key, [call]);
           }
           const candidates = (candidateRows?.rows ?? []).map((row): CandidateRecord => {
-            const key = {
-              runId,
-              lane: Number(row.lane),
-              iteration: Number(row.iteration),
-              candidate: Number(row.candidate),
-            };
+            const key = candidateKeyRow(row);
             return {
               ...key,
               outcome: row.outcome === null ? null : decodeOutcome(row.outcome),
@@ -372,6 +446,7 @@ export const LibsqlRunStore = (databasePath: string, options: LibsqlRunStoreOpti
                 row.image_sha256 === null
                   ? null
                   : { sha256: String(row.image_sha256), type: String(row.image_type) },
+              judgement: judgements.get(candidateKeyOf(key)) ?? null,
               calls: callsByCandidate.get(candidateKeyOf(key)) ?? [],
             };
           });
@@ -484,54 +559,80 @@ export const LibsqlRunStore = (databasePath: string, options: LibsqlRunStoreOpti
             ),
           ),
 
+        createJudge: (runId, { price, rubricVersion, referencePhotos }) =>
+          execute(
+            `Saving the Judge of Run ${runId}`,
+            "INSERT INTO judges (run_id, price, rubric_version, reference_photos) VALUES (?, ?, ?, ?)",
+            [runId, json(price), rubricVersion, json(referencePhotos)],
+          ),
+
+        loadJudge: (runId) =>
+          query(`Loading the Judge of Run ${runId}`, async (db) => {
+            const { rows } = await db.execute({
+              sql: "SELECT * FROM judges WHERE run_id = ?",
+              args: [runId],
+            });
+            const row = rows[0];
+            if (!row) return null;
+            return {
+              price: decodePrice(row.price),
+              rubricVersion: String(row.rubric_version),
+              referencePhotos: decodeReferences(row.reference_photos),
+            } satisfies JudgeRecord;
+          }),
+
         // The insert and the reads that explain a rejection run in one write batch: one
         // transaction, one snapshot, executed without yielding in between. So the domain's
         // check sees exactly what the SQL saw, and a disagreement is a real bug. The batch
         // reads the Budget and the whole ledger on every reservation: O(ledger), accepted at
         // M0 sizes (a few dozen calls per Run).
         reserveCall: (key, model, estimate) =>
-          query(`Reserving call ${key.attempt} of Candidate ${key.candidate}`, async (db) => {
-            const [inserted, budget, ledger] = await db.batch(
-              [
-                {
-                  sql: `INSERT INTO cost_records
-                          (run_id, lane, iteration, candidate, attempt, model, created_at, estimated_micros, estimated_usage)
-                        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
+          query(
+            `Reserving ${key.purpose} call ${key.attempt} of Candidate ${key.candidate}`,
+            async (db) => {
+              const [inserted, budget, ledger] = await db.batch(
+                [
+                  {
+                    sql: `INSERT INTO cost_records
+                          (run_id, lane, iteration, candidate, purpose, attempt, model, created_at, estimated_micros, estimated_usage)
+                        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                         WHERE MAX(0, (SELECT budget_micros FROM runs WHERE id = ?)
                           - (SELECT ${committedSql} FROM cost_records WHERE run_id = ?)) >= ?`,
-                  args: [
-                    key.runId,
-                    key.lane,
-                    key.iteration,
-                    key.candidate,
-                    key.attempt,
-                    model,
-                    Date.now(),
-                    estimate.micros,
-                    json(estimate.usage),
-                    key.runId,
-                    key.runId,
-                    estimate.micros,
-                  ],
-                },
-                { sql: "SELECT budget_micros FROM runs WHERE id = ?", args: [key.runId] },
-                { sql: "SELECT * FROM cost_records WHERE run_id = ?", args: [key.runId] },
-              ],
-              "write",
-            );
-            if (inserted?.rowsAffected === 1) return undefined;
-            const runRow = budget?.rows[0];
-            if (!runRow) throw new Error(`Run not found: ${key.runId}`);
-            const decision = checkBudget(
-              Number(runRow.budget_micros),
-              (ledger?.rows ?? []).map(callRecord),
-              estimate.micros,
-            );
-            if (decision.fits) {
-              throw new Error("the Budget check in SQL and in the domain disagree");
-            }
-            return decision.error;
-          }).pipe(
+                    args: [
+                      key.runId,
+                      key.lane,
+                      key.iteration,
+                      key.candidate,
+                      key.purpose,
+                      key.attempt,
+                      model,
+                      Date.now(),
+                      estimate.micros,
+                      json(estimate.usage),
+                      key.runId,
+                      key.runId,
+                      estimate.micros,
+                    ],
+                  },
+                  { sql: "SELECT budget_micros FROM runs WHERE id = ?", args: [key.runId] },
+                  { sql: "SELECT * FROM cost_records WHERE run_id = ?", args: [key.runId] },
+                ],
+                "write",
+              );
+              if (inserted?.rowsAffected === 1) return undefined;
+              const runRow = budget?.rows[0];
+              if (!runRow) throw new Error(`Run not found: ${key.runId}`);
+              const decision = checkBudget(
+                Number(runRow.budget_micros),
+                (ledger?.rows ?? []).map(callRecord),
+                estimate.micros,
+              );
+              if (decision.fits) {
+                throw new Error("the Budget check in SQL and in the domain disagree");
+              }
+              return decision.error;
+            },
+          ).pipe(
             reservations.withPermits(1),
             Effect.flatMap((exhausted) => (exhausted ? Effect.fail(exhausted) : Effect.void)),
           ),
@@ -540,19 +641,20 @@ export const LibsqlRunStore = (databasePath: string, options: LibsqlRunStoreOpti
         // fails instead of overwriting the actual cost.
         settleCall: (key, result) =>
           update(
-            `Recording call ${key.attempt} of Candidate ${key.candidate}`,
+            `Recording ${key.purpose} call ${key.attempt} of Candidate ${key.candidate}`,
             `UPDATE cost_records SET settled = 1, actual_micros = ?, usage = ?, result = ?, reason = ?
-             WHERE run_id = ? AND lane = ? AND iteration = ? AND candidate = ? AND attempt = ?
-               AND settled = 0`,
+             WHERE run_id = ? AND lane = ? AND iteration = ? AND candidate = ? AND purpose = ?
+               AND attempt = ? AND settled = 0`,
             [
               result.costMicros,
-              "usage" in result && result.usage ? json(result.usage) : null,
+              result.usage ? json(result.usage) : null,
               result.kind,
-              "reason" in result ? result.reason : null,
+              result.reason ?? null,
               key.runId,
               key.lane,
               key.iteration,
               key.candidate,
+              key.purpose,
               key.attempt,
             ],
             "no such row, or it was already settled",
@@ -580,6 +682,26 @@ export const LibsqlRunStore = (databasePath: string, options: LibsqlRunStoreOpti
             `UPDATE candidates SET outcome = ?
              WHERE run_id = ? AND lane = ? AND iteration = ? AND candidate = ?`,
             [json(outcome), key.runId, key.lane, key.iteration, key.candidate],
+          ),
+
+        // Encoded through the schema, so a judgement that would not decode is never stored.
+        saveJudgement: (key, judgement) =>
+          Effect.try({
+            try: () => encodeJudgement(judgement),
+            catch: (error) =>
+              new RunStoreError({
+                message: `Saving the judgement of Candidate ${key.candidate} failed: ${errorMessage(error)}`,
+                cause: error,
+              }),
+          }).pipe(
+            Effect.flatMap((encoded) =>
+              execute(
+                `Saving the judgement of Candidate ${key.candidate}`,
+                `INSERT INTO judgements (run_id, lane, iteration, candidate, judgement)
+                 VALUES (?, ?, ?, ?, ?)`,
+                [key.runId, key.lane, key.iteration, key.candidate, encoded],
+              ),
+            ),
           ),
 
         loadCandidates: (runId, lane) =>

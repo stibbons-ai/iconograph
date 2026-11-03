@@ -1,8 +1,10 @@
 /**
- * The Run CLI with the fake Image Model and the real face models, for tests that
- * need a real process (exit code, stderr). It lives in the test tree, so no
- * production entry point or environment variable can select the fake. The
- * script of fake responses comes from FAKE_IMAGE_SCRIPT (JSON: an array, or one per model id). With
+ * The Run CLI with the fake Image Model, the fake Judge and the real face
+ * models, for tests that need a real process (exit code, stderr). It lives in
+ * the test tree, so no production entry point or environment variable can
+ * select the fakes. The scripts of fake responses come from FAKE_IMAGE_SCRIPT
+ * (JSON: an array, or one per model id) and FAKE_JUDGE_SCRIPT (a JSON array;
+ * may be left out). With
  * FAKE_RELEASE_WARNING set, releasing the face backend logs that text as a
  * warning, as a failing release would.
  */
@@ -11,13 +13,19 @@ import { Effect, Layer } from "effect";
 import { realFaceEmbedder } from "../../../adapters/test/face-models";
 import { main } from "../../src/cli";
 import { type FakeScript, fakeImageModels } from "./fake-image-models";
+import { type FakeJudgeResponse, fakeJudges } from "./fake-judges";
 
 const script: FakeScript = JSON.parse(process.env.FAKE_IMAGE_SCRIPT ?? "[]");
+const judgeScript: FakeJudgeResponse[] = JSON.parse(process.env.FAKE_JUDGE_SCRIPT ?? "[]");
 const releaseWarning = process.env.FAKE_RELEASE_WARNING;
 
 try {
   await main(process.argv.slice(2), {
-    imageModels: async () => ({ layer: fakeImageModels(script).layer, close: () => {} }),
+    vendors: async () => ({
+      imageModels: fakeImageModels(script).layer,
+      judges: fakeJudges(judgeScript).layer,
+      close: () => {},
+    }),
     faceEmbedder: () =>
       releaseWarning
         ? Layer.merge(

@@ -50,6 +50,7 @@ import {
   type Usage,
 } from "@iconograph/domain";
 import { Effect, Schema } from "effect";
+import { redactKey } from "./api-key";
 import { errorMessage, field } from "./errors";
 import {
   base64Of,
@@ -287,8 +288,9 @@ export function openaiImageModel(options: OpenAIImageModelOptions): ImageModel {
    * kept). The key goes before truncating, so a cut can't leave part of it; the
    * lookbehind starts a match only at a word's start, so the scan stays cheap.
    */
+  const withoutKey = redactKey(apiKey);
   const redact = (text: string) => {
-    const keyless = apiKey ? text.replaceAll(apiKey, "[redacted]") : text;
+    const keyless = withoutKey(text);
     const masked = keyless
       .slice(0, MAX_REASON_LENGTH)
       .replace(/(?<!\S)\S{3,}\*{3,}\S*?(?=[.,;:!?)"']*(?:\s|$))/g, "[redacted]");
