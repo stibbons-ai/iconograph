@@ -3,16 +3,16 @@ import { fileURLToPath } from "node:url";
 import {
   DEFAULT_TARGET_LOOK,
   type EncodedImage,
-  JUDGE_MAX_OUTPUT_TOKENS,
+  type Effort,
+  MAX_OUTPUT_TOKENS,
   CURRENT_RUBRIC,
   judgeImageTokens,
   judgeInstructions,
   judgeMessage,
-  judgeVendor,
+  llmVendor,
   JudgeVerdict,
   type Judge,
   type JudgeCallResult,
-  type JudgeEffort,
   type JudgeRequest,
   Judges,
   type PriceQuote,
@@ -22,7 +22,8 @@ import { MastraLanguageModelV2Mock } from "@mastra/core/test-utils/llm-mock";
 import { Effect, type Layer } from "effect";
 import { toMastraSchema } from "@iconograph/adapters";
 import { withEnvironment } from "../../adapters/test/git-environment";
-import { MastraJudges, type MastraJudgesOptions } from "../src/judge";
+import { MastraJudges } from "../src/judge";
+import type { LlmAgentsOptions } from "../src/llm";
 import { faceFixture } from "./support/fake-image-models";
 import { FAKE_VERDICT, judgesOnFakeAnthropic } from "./support/fake-judges";
 import { fakeVendorServer, vendorAnswer } from "./support/fake-vendors";
@@ -59,7 +60,7 @@ const allKeys = {
 const getJudge = (
   layer: Layer.Layer<Judges>,
   model = "anthropic/claude-sonnet-5-5",
-  effort: JudgeEffort = "low",
+  effort: Effort = "low",
   recorded?: PriceQuote,
 ) =>
   Effect.runPromise(
@@ -69,7 +70,7 @@ const getJudge = (
   );
 
 /** The real provider-built Judges, their network replaced by `network`. */
-const providerJudges = (network: NonNullable<MastraJudgesOptions["fetch"]>, timeoutMs?: number) =>
+const providerJudges = (network: NonNullable<LlmAgentsOptions["fetch"]>, timeoutMs?: number) =>
   MastraJudges({
     env: allKeys,
     ...(timeoutMs !== undefined && { timeoutMs }),
@@ -114,7 +115,7 @@ function judges(
       return mock as unknown as MastraModelConfig;
     },
   });
-  const get = (model?: string, effort?: JudgeEffort, recorded?: PriceQuote) =>
+  const get = (model?: string, effort?: Effort, recorded?: PriceQuote) =>
     getJudge(layer, model, effort, recorded);
   return { get, calls, keys, lookups };
 }
@@ -185,7 +186,7 @@ describe("Mastra Judge", () => {
         },
       },
     });
-    expect(sent!.maxOutputTokens).toBe(JUDGE_MAX_OUTPUT_TOKENS.low);
+    expect(sent!.maxOutputTokens).toBe(MAX_OUTPUT_TOKENS.low);
   });
 
   test.each([
@@ -222,7 +223,7 @@ describe("Mastra Judge", () => {
       const sent: { url: string; init: BunFetchRequestInit }[] = [];
       const layer = providerJudges(async (input, init) => {
         sent.push({ url: String(input), init });
-        return vendorAnswer(judgeVendor(model)!, JSON.stringify(FAKE_VERDICT));
+        return vendorAnswer(llmVendor(model)!, JSON.stringify(FAKE_VERDICT));
       });
       const request = await judgeRequest();
       const result = await withEnvironment({ [variable]: "https://proxy.example/v1" }, async () =>
@@ -266,12 +267,12 @@ describe("Mastra Judge", () => {
     "%s: an answer cut off at the output cap fails the judging at its cost",
     async (model) => {
       const layer = providerJudges(async () =>
-        vendorAnswer(judgeVendor(model)!, '{"levels": {"resemblance": 4', true),
+        vendorAnswer(llmVendor(model)!, '{"levels": {"resemblance": 4', true),
       );
       expect(await call(await getJudge(layer, model))).toMatchObject({
         kind: "failed",
         costMicros: 21_000,
-        reason: `The Judge hit its ${JUDGE_MAX_OUTPUT_TOKENS.low}-token output cap, reasoning included, before finishing its answer`,
+        reason: `The Judge hit its ${MAX_OUTPUT_TOKENS.low}-token output cap, reasoning included, before finishing its answer`,
       });
     },
   );

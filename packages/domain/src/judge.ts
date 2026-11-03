@@ -1,5 +1,4 @@
 import { Context, Data, Effect, Schema } from "effect";
-import { toMicros } from "./budget";
 import { type ReferenceCandidate, selectCharacterReferences } from "./character-references";
 import {
   type CallEstimate,
@@ -10,6 +9,15 @@ import {
   type UnsuccessfulCall,
   type Usage,
 } from "./image-model";
+import {
+  boundedEstimate,
+  Effort,
+  LlmModelId,
+  type LlmVendor,
+  llmVendor,
+  parseLlmModel,
+  textTokens,
+} from "./llm";
 import type { LlmPricing, PriceQuote, Unpriced } from "./prices";
 import { pricingSpec } from "./prices";
 import {
@@ -24,25 +32,12 @@ import {
   RubricWeights,
   scoreVerdict,
 } from "./rubric";
-import type { TargetLook } from "./target-look";
-
-/** How hard the Judge reasons; each vendor's reasoning parameter takes these levels. */
-export const JudgeEffort = Schema.Literals(["low", "medium", "high"]);
-export type JudgeEffort = typeof JudgeEffort.Type;
-
-/** A Judge model id: `vendor/model`, e.g. `anthropic/claude-sonnet-5-5`. */
-const JudgeModelId = Schema.String.check(
-  Schema.makeFilter((id: string) =>
-    /^[a-z0-9-]+\/\S+$/.test(id)
-      ? true
-      : "Expected a vendor/model id such as anthropic/claude-sonnet-5-5",
-  ),
-);
+import { quotedTargetLook, type TargetLook } from "./target-look";
 
 /** The Judge of a Run: model, effort and Rubric weights, frozen with the Run's request. */
 export const JudgeConfig = Schema.Struct({
-  model: JudgeModelId,
-  effort: JudgeEffort,
+  model: LlmModelId,
+  effort: Effort,
   weights: RubricWeights,
 });
 export type JudgeConfig = typeof JudgeConfig.Type;
@@ -53,54 +48,6 @@ export const DEFAULT_JUDGE: JudgeConfig = {
   effort: "low",
   weights: DEFAULT_WEIGHTS,
 };
-
-/** The vendors a Judge can come from. */
-export const JUDGE_VENDORS = ["anthropic", "openai", "google"] as const;
-export type JudgeVendor = (typeof JUDGE_VENDORS)[number];
-
-export const isJudgeVendor = (vendor: string): vendor is JudgeVendor =>
-  (JUDGE_VENDORS as readonly string[]).includes(vendor);
-
-/** A `vendor/model` id split at its first `/`: the vendor and the vendor's model id. */
-function parseModelId(model: string): { readonly vendor: string; readonly id: string } {
-  const slash = model.indexOf("/");
-  return slash > 0
-    ? { vendor: model.slice(0, slash), id: model.slice(slash + 1) }
-    : { vendor: "", id: model };
-}
-
-/** A `vendor/model` id as its Judge vendor and the vendor's model id; undefined for any other vendor. */
-export function parseJudgeModel(
-  model: string,
-): { readonly vendor: JudgeVendor; readonly id: string } | undefined {
-  const { vendor, id } = parseModelId(model);
-  return isJudgeVendor(vendor) ? { vendor, id } : undefined;
-}
-
-/** A model id's vendor (the part before the first `/`), when it is a Judge vendor. */
-export function judgeVendor(model: string): JudgeVendor | undefined {
-  return parseJudgeModel(model)?.vendor;
-}
-
-/**
- * The id a Judge is priced under: LiteLLM's key naming, which the price
- * source, its overrides and its snapshot use. Anthropic and OpenAI models are
- * keyed by their bare id, Gemini Developer API models by `gemini/<id>`; any
- * other vendor by the full `vendor/model` id.
- */
-export function judgePriceModel(model: string): string {
-  const vendor = judgeVendor(model);
-  const { id } = parseModelId(model);
-  switch (vendor) {
-    case "anthropic":
-    case "openai":
-      return id;
-    case "google":
-      return `gemini/${id}`;
-    default:
-      return model;
-  }
-}
 
 /** The vendor of an Image Model, from how it is billed; undefined when unknown. */
 function imageModelVendor(model: string): string | undefined {
@@ -119,7 +66,7 @@ function imageModelVendor(model: string): string | undefined {
  * Judge may favour its own vendor's images, so the Run warns.
  */
 export function sameVendorLanes(judgeModel: string, laneModels: readonly string[]): number[] {
-  const vendor = judgeVendor(judgeModel);
+  const vendor = llmVendor(judgeModel);
   if (vendor === undefined) return [];
   return laneModels.flatMap((model, lane) => (imageModelVendor(model) === vendor ? [lane] : []));
 }
@@ -150,16 +97,6 @@ export type JudgePart =
   | { readonly kind: "text"; readonly text: string }
   | { readonly kind: "image"; readonly image: EncodedImage };
 
-/** Target Look facets as the Judge reads them, in the Rubric's order. */
-const facetLabels: { readonly [F in keyof TargetLook]: string } = {
-  pose: "Pose",
-  background: "Background",
-  lighting: "Lighting and colour",
-  hairstyle: "Hairstyle",
-  clothing: "Clothing",
-  framing: "Framing",
-};
-
 /**
  * The Judge's user message, always in this order: each Reference Photo with
  * its label, then the Candidate, then the Target Look to judge it against.
@@ -168,9 +105,7 @@ const facetLabels: { readonly [F in keyof TargetLook]: string } = {
  */
 export function judgeMessage(request: JudgeRequest): JudgePart[] {
   const count = request.references.length;
-  const look = (Object.keys(facetLabels) as (keyof TargetLook)[])
-    .map((facet) => `${facetLabels[facet]}: ${JSON.stringify(request.targetLook[facet])}`)
-    .join("\n");
+  const look = quotedTargetLook(request.targetLook);
   return [
     ...request.references.flatMap((image, index): JudgePart[] => [
       { kind: "text", text: `Reference Photo ${index + 1} of ${count}:` },
@@ -216,7 +151,7 @@ export type JudgeCallResult =
 export interface Judge {
   /** The `vendor/model` id. */
   readonly model: string;
-  readonly effort: JudgeEffort;
+  readonly effort: Effort;
   /** The price its estimates and actual costs use: the one recorded when the Run started. */
   readonly price: PriceQuote;
   readonly rubric: Rubric;
@@ -236,13 +171,16 @@ export class JudgeUnavailable extends Data.TaggedError("JudgeUnavailable")<{
 
 /**
  * The Judges a Run can use. Getting one checks its credentials and price, so
- * a Run fails before any billable call. Given a `price` (the one recorded at
- * Run start), the Judge uses it instead of a fresh lookup; it must be the
- * Judge's (`judgePriceModel`), otherwise `get` fails with `Unpriced`.
+ * a Run fails before any billable call; `checkCredentials` checks only the
+ * vendor and its key, so a Run can check every role's key before any price.
+ * Given a `price` (the one recorded at Run start), the Judge uses it instead
+ * of a fresh lookup; it must be the Judge's (`llmPriceModel`), otherwise
+ * `get` fails with `Unpriced`.
  */
 export class Judges extends Context.Service<
   Judges,
   {
+    readonly checkCredentials: (model: string) => Effect.Effect<void, JudgeUnavailable>;
     readonly get: (
       judge: Pick<JudgeConfig, "model" | "effort">,
       price?: PriceQuote,
@@ -270,7 +208,7 @@ export const JUDGE_IMAGE_MAX_SIDE = 1024;
  *   default (`high`) media resolution. Older Gemini models tile by the short
  *   side (258 tokens per tile), unbounded for wide images: no bound.
  */
-const imageTokenBounds: { readonly [V in JudgeVendor]: (id: string) => number | undefined } = {
+const imageTokenBounds: { readonly [V in LlmVendor]: (id: string) => number | undefined } = {
   anthropic: () => 1_369,
   openai: (id) => (id.startsWith("gpt-4o-mini") ? undefined : 2_520),
   google: (id) => {
@@ -284,64 +222,9 @@ const imageTokenBounds: { readonly [V in JudgeVendor]: (id: string) => number | 
  * undefined when no documented bound covers the model (it can't be a Judge).
  */
 export function judgeImageTokens(model: string): number | undefined {
-  const vendor = judgeVendor(model);
-  return vendor && imageTokenBounds[vendor](parseModelId(model).id);
+  const parsed = parseLlmModel(model);
+  return parsed && imageTokenBounds[parsed.vendor](parsed.id);
 }
-
-/**
- * The Judge's output cap per effort, reasoning included (Anthropic's adaptive
- * thinking counts toward it); the estimate assumes it is used up.
- */
-export const JUDGE_MAX_OUTPUT_TOKENS: { readonly [E in JudgeEffort]: number } = {
-  low: 4_096,
-  medium: 8_192,
-  high: 16_384,
-};
-
-/**
- * How long a Judge call may run per effort: room for its whole output cap at
- * about 30 tokens/s (4,096 → 180 s, 8,192 → 300 s, 16,384 → 600 s), so a long
- * reasoning pass isn't cut off, retried and billed again.
- */
-const JUDGE_TIMEOUT_MS: { readonly [E in JudgeEffort]: number } = {
-  low: 180_000,
-  medium: 300_000,
-  high: 600_000,
-};
-
-/** How long a Judge call at this effort may run before it is aborted (`JUDGE_TIMEOUT_MS`). */
-export function judgeTimeoutMs(effort: JudgeEffort): number {
-  return JUDGE_TIMEOUT_MS[effort];
-}
-
-/**
- * Text tokens assumed: ASCII at 2.5 characters per token (Anthropic's current
- * tokenizer averages about that: "1M tokens is roughly 2.5M Unicode
- * characters"), and every UTF-16 code unit above U+007F as 2 tokens, above any
- * measured rate (CJK about 0.7 tokens per character, emoji and rare CJK up to
- * about 1.5), so free-text Target Looks in any script stay within the bound.
- */
-const ASCII_CHARACTERS_PER_TOKEN = 2.5;
-const NON_ASCII_TOKENS_PER_CODE_UNIT = 2;
-
-function textTokens(text: string): number {
-  let nonAscii = 0;
-  for (let index = 0; index < text.length; index++) {
-    if (text.charCodeAt(index) > 0x7f) nonAscii++;
-  }
-  return (
-    Math.ceil((text.length - nonAscii) / ASCII_CHARACTERS_PER_TOKEN) +
-    nonAscii * NON_ASCII_TOKENS_PER_CODE_UNIT
-  );
-}
-
-/**
- * Prompts a vendor adds unseen (Anthropic's structured-output and thinking
- * system prompts are billed but their size unpublished): the estimate adds
- * this many input tokens, or 10% of the counted input if that is more.
- */
-const HIDDEN_PROMPT_TOKENS = 1_000;
-const HIDDEN_PROMPT_SHARE = 0.1;
 
 /** What a Judge call's estimate depends on: how many Reference Photos it sends, and the text. */
 export interface JudgeEstimateInput {
@@ -359,7 +242,7 @@ export interface JudgeEstimateInput {
  * is the Judge model's bound, which `Judges.get` checked exists.
  */
 export function estimateJudgeCall(
-  judge: { readonly effort: JudgeEffort; readonly imageTokens: number },
+  judge: { readonly effort: Effort; readonly imageTokens: number },
   pricing: typeof LlmPricing.Type,
   prompt: string,
   { references, targetLook }: JudgeEstimateInput,
@@ -372,22 +255,7 @@ export function estimateJudgeCall(
   });
   const text = parts.reduce((sum, part) => sum + (part.kind === "text" ? part.text : ""), prompt);
   const images = parts.filter((part) => part.kind === "image").length;
-  const counted = textTokens(text) + images * judge.imageTokens;
-  const usage = {
-    inputTokens: counted + Math.max(HIDDEN_PROMPT_TOKENS, Math.ceil(counted * HIDDEN_PROMPT_SHARE)),
-    outputTokens: JUDGE_MAX_OUTPUT_TOKENS[judge.effort],
-  };
-  return { micros: llmCostMicros(pricing, usage), usage };
-}
-
-/** What a language-model call costs at these token counts, in micro-dollars. */
-export function llmCostMicros(
-  pricing: typeof LlmPricing.Type,
-  usage: { readonly inputTokens: number; readonly outputTokens: number },
-): number {
-  const usd =
-    usage.inputTokens * pricing.inputPerToken + usage.outputTokens * pricing.outputPerToken;
-  return toMicros(usd);
+  return boundedEstimate(textTokens(text) + images * judge.imageTokens, judge.effort, pricing);
 }
 
 /** A judgement without Rubric scores: why the Judge's work on a Candidate failed. */

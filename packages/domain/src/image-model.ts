@@ -81,12 +81,13 @@ export type CallResult =
 export const SettledCallKind = Schema.Literals([
   "image",
   "judged",
+  "optimized",
   "refused",
   "transient",
   "failed",
 ]);
 
-/** What the Budget's ledger records of any billable call's result (Image Model or Judge). */
+/** What the Budget's ledger records of any billable call's result (Image Model, Judge or Optimizer). */
 export interface SettledCall {
   readonly kind: typeof SettledCallKind.Type;
   readonly costMicros: number | null;

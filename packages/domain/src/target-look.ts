@@ -52,6 +52,30 @@ export const TargetLookInput = Schema.Struct({
 });
 export type TargetLookInput = typeof TargetLookInput.Encoded;
 
+/** Target Look facets as the Judge and the Optimizer read them, in the Rubric's order. */
+const facetLabels: { readonly [F in keyof TargetLook]: string } = {
+  pose: "Pose",
+  background: "Background",
+  lighting: "Lighting and colour",
+  hairstyle: "Hairstyle",
+  clothing: "Clothing",
+  framing: "Framing",
+};
+
+/**
+ * The Target Look for a language model: one facet per line, each a JSON
+ * string, so facet text (operator input) can't break out of its line or pose
+ * as further instructions.
+ */
+export function quotedTargetLook(look: TargetLook): string {
+  return (Object.keys(facetLabels) as (keyof TargetLook)[])
+    .map((facet) => `${facetLabels[facet]}: ${JSON.stringify(look[facet])}`)
+    .join("\n");
+}
+
+/** The longest Prompt a Lane takes: OpenAI's image edit limit (32,000 characters). */
+export const MAX_PROMPT_LENGTH = 32_000;
+
 /**
  * The first Prompt of a Lane, built only from the Target Look. It refers to the
  * attached Reference Photos for identity and states every facet as written, so

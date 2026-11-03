@@ -145,9 +145,12 @@ export function levelScore(level: number): number {
 
 const Level = Schema.Int.check(Schema.isBetween({ minimum: MIN_LEVEL, maximum: MAX_LEVEL }));
 
+/** The longest visible issue or suggested Prompt fix, and how many of each a verdict holds. */
+export const MAX_NOTE_LENGTH = 500;
+export const MAX_NOTES = 10;
+
 /** A visible issue or a suggested Prompt fix: one short sentence. */
-const Note = Schema.String.check(Schema.isNonEmpty(), Schema.isMaxLength(500));
-const MAX_NOTES = 10;
+const Note = Schema.String.check(Schema.isNonEmpty(), Schema.isMaxLength(MAX_NOTE_LENGTH));
 
 /**
  * What the Judge returns (LLM-facing, so finite numbers only): a level 1–5

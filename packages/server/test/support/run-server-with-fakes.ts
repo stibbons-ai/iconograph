@@ -1,7 +1,8 @@
 /**
  * The HTTP server with the fake Image Model, the Judge of `fakeJudgesFromEnv`
- * (the fake one, or with FAKE_ANTHROPIC_ORIGIN the real one on a fake
- * Anthropic API) and the real face models, for tests that need a real process
+ * and the Optimizer of `fakeOptimizersFromEnv` (the fake ones, or with
+ * FAKE_ANTHROPIC_ORIGIN the real ones on a fake Anthropic API) and the real
+ * face models, for tests that need a real process
  * to kill. It lives in the test tree, so no production entry point or
  * environment variable can select the fakes. Settings:
  * - FAKE_IMAGE_SCRIPT: the fake's responses (JSON array).
@@ -19,6 +20,7 @@ import { missingWeights } from "../../../adapters/test/face-models";
 import { serverConfig, startServer } from "../../src/server";
 import { type FakeResponse, fakeImageModels } from "./fake-image-models";
 import { fakeJudgesFromEnv } from "./fake-judges";
+import { fakeOptimizersFromEnv } from "./fake-optimizers";
 
 const script: FakeResponse[] = JSON.parse(process.env.FAKE_IMAGE_SCRIPT ?? "[]");
 const layer = process.env.FAKE_HANG_GET
@@ -43,6 +45,7 @@ try {
     vendors: async () => ({
       imageModels: layer,
       judges: fakeJudgesFromEnv(),
+      optimizers: fakeOptimizersFromEnv(),
       close: () => {},
     }),
     fetchModels,

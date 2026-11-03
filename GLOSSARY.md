@@ -34,19 +34,23 @@ The part of a Run that optimizes Prompts for a single Image Model, with its own 
 _Avoid_: Track, branch, provider run
 
 **Iteration**:
-One generate–score–rewrite cycle within a Lane.
+One generate–score–rewrite cycle within a Lane: its Candidates are generated from one Prompt, scored and judged, then the Lane stops or the Optimizer writes the next Prompt.
 _Avoid_: Round, step, epoch
+
+**Stop Reason**:
+Why a Lane stopped iterating: `cancelled`, `target-score`, `budget-exhausted` (a billable call didn't fit the Budget), `repeated-failures` (two Iterations in a row whose Candidates were all Refused or Failed), `patience` (too many Iterations without the best score rising enough) or `iteration-limit`; when several hold at once, the first in this order. A Lane's first recorded Stop Reason stands.
+_Avoid_: Exit code, termination status
 
 **Prompt**:
 The text sent to an Image Model in an Iteration; it may rephrase the Target Look but never change it.
 _Avoid_: Instruction
 
 **Candidate**:
-One attempt by an Image Model, within an Iteration, to produce a headshot; it ends with exactly one Candidate Outcome.
+One attempt by an Image Model, within an Iteration, to produce a headshot (or a slot for one whose call didn't fit the Budget, so it was never made); it ends with exactly one Candidate Outcome.
 _Avoid_: Output, result, sample
 
 **Candidate Outcome**:
-How a Candidate ended: **Refused** (the Image Model declined), **Failed** (errored after retries, or its image was unusable), **Gated** (no face, or below the Identity Gate) or **Scored** (passed the Identity Gate and has a Likeness; the Judge then scores it against the Rubric, and a judging that fails is recorded with it, never replaced by a made-up score).
+How a Candidate ended: **Refused** (the Image Model declined), **Failed** (errored after retries, its image was unusable, or its call or a retry didn't fit the Budget), **Gated** (no face, or below the Identity Gate) or **Scored** (passed the Identity Gate and has a Likeness; the Judge then scores it against the Rubric, and a judging that fails is recorded with it, never replaced by a made-up score).
 _Avoid_: Status, state
 
 **Character Reference**:
@@ -94,7 +98,7 @@ The pairwise comparison among each Lane's best Candidates, judged in both orders
 _Avoid_: Tournament, final round
 
 **Optimizer**:
-The language model that writes a Lane's next Prompt from the scores, issues and Steering of earlier Iterations.
+The language model that writes a Lane's next Prompt from that Lane's own recent Iterations (Prompts, outcomes, scores, issues and fixes) and Steering, rephrasing the Target Look but never changing it.
 _Avoid_: Rewriter, prompt engineer
 
 **Steering**:

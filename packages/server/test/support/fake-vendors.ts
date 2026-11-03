@@ -1,17 +1,18 @@
 /**
- * Fake Judge vendors: answers shaped as each pinned AI SDK provider parses
- * them (the Anthropic Messages API, the OpenAI Responses API, the Gemini API's
- * generateContent), built from the providers' response schemas, never recorded
- * from a live call; and a local server answering as a vendor API.
+ * Fake language-model vendors (Judge, Optimizer): answers shaped as each
+ * pinned AI SDK provider parses them (the Anthropic Messages API, the OpenAI
+ * Responses API, the Gemini API's generateContent), built from the providers'
+ * response schemas, never recorded from a live call; and a local server
+ * answering as a vendor API.
  */
-import type { JudgeVendor } from "@iconograph/domain";
+import type { LlmVendor } from "@iconograph/domain";
 
 /**
  * A successful answer whose text is `text`, with 9,000 input and 300 output
  * tokens; with `cutOff`, stopped at the output-token cap instead.
  */
-export function vendorAnswer(vendor: JudgeVendor, text: string, cutOff = false): Response {
-  const bodies: { readonly [V in JudgeVendor]: object } = {
+export function vendorAnswer(vendor: LlmVendor, text: string, cutOff = false): Response {
+  const bodies: { readonly [V in LlmVendor]: object } = {
     anthropic: {
       id: "msg_fake",
       type: "message",
@@ -58,8 +59,13 @@ export function vendorAnswer(vendor: JudgeVendor, text: string, cutOff = false):
   return Response.json(bodies[vendor]);
 }
 
-/** A local server answering every request with `answer`, recording each; `stop` it when done. */
-export function fakeVendorServer(answer: (request: Request) => Response | Promise<Response>) {
+/**
+ * A local server answering every request with `answer` (given the request and
+ * its body, already read), recording each; `stop` it when done.
+ */
+export function fakeVendorServer(
+  answer: (request: Request, body: string) => Response | Promise<Response>,
+) {
   const requests: { readonly path: string; readonly headers: Headers; readonly body: string }[] =
     [];
   const server = Bun.serve({
@@ -67,12 +73,9 @@ export function fakeVendorServer(answer: (request: Request) => Response | Promis
     // A slow answer must not be cut off by the server's own idle timeout.
     idleTimeout: 0,
     fetch: async (request) => {
-      requests.push({
-        path: new URL(request.url).pathname,
-        headers: request.headers,
-        body: await request.text(),
-      });
-      return answer(request);
+      const body = await request.text();
+      requests.push({ path: new URL(request.url).pathname, headers: request.headers, body });
+      return answer(request, body);
     },
   });
   return { origin: server.url.origin, requests, stop: () => server.stop(true) };

@@ -1,9 +1,10 @@
 # Iconograph
 
 A Bun workspace for the headless Run loop: validate the Subject's Reference Photos with a local face
-pipeline, generate Candidates with an Image Model inside a hard Budget, and score their Likeness.
-Milestone 0 runs one Gemini Lane for one Iteration from the command line or through the HTTP
-server's API (see "Server and container"); there is no UI yet.
+pipeline, generate Candidates with an Image Model inside a hard Budget, score their Likeness, judge
+them, and let the Optimizer rewrite each Lane's Prompt until a stopping rule fires. Milestone 0
+runs from the command line or through the HTTP server's API (see "Server and container"); there is
+no UI yet.
 
 ## Requirements and installation
 
@@ -366,12 +367,13 @@ bun run faces:calibrate --target-far 0.001 ~/calibration
 
 ### Runs
 
-`bun run run` starts a Run: it validates the Reference Photos (as `photos:validate` does), generates
-one Iteration of Candidates in each Lane, runs the Lanes concurrently (a few at a time, as many as
-`LANE_CONCURRENCY` in `packages/server/src/workflow.ts` allows and `--help` states; more wait their
-turn), scores each Candidate's Likeness, has the Judge score every Candidate that passed the
-Identity Gate against the Rubric, and prints the results with their costs. Without `--lane` the
-Run has one Gemini Lane (`gemini-nano-banana-2.1`).
+`bun run run` starts a Run: it validates the Reference Photos (as `photos:validate` does), runs the
+Lanes concurrently (a few at a time, as many as `LANE_CONCURRENCY` in
+`packages/server/src/workflow.ts` allows and `--help` states; more wait their turn), and in each
+Lane repeats an Iteration until a stopping rule fires: generate the Iteration's Candidates, score
+each one's Likeness, have the Judge score every Candidate that passed the Identity Gate against the
+Rubric, then stop the Lane or have the Optimizer write its next Prompt. It prints the results with
+their costs. Without `--lane` the Run has one Gemini Lane (`gemini-nano-banana-2.1`).
 
 ```sh
 GEMINI_API_KEY="op://Freelancing/Gemini test run key/password" \
@@ -391,19 +393,42 @@ ANTHROPIC_API_KEY="op://VAULT/ITEM/credential" \
 
 `op run` resolves the 1Password references into the environment of that one process, so no key is
 written to disk; any other way of setting the variables works too. A Run needs only the keys of its
-Lanes' vendors and its Judge's vendor. Keys are read only from the environment and sent only in
-request headers; they never enter the database, the output or an error. In an OpenAI Lane's
+Lanes' vendors, its Judge's vendor and, for more than one Iteration, its Optimizer's vendor. Keys
+are read only from the environment and sent only in request headers; they never enter the
+database, the output or an error. In an OpenAI Lane's
 failure reasons, a masked echo of a key in the usual form (a word with three or more asterisks,
 such as `sk-proj-****abcd`) is redacted too, and every reason is cut to about 2000 characters. A
 key shorter than 20 characters or with spaces, control or non-ASCII characters (a bad paste) is
 rejected before its price lookup and before any billable call, without echoing it.
 
 - **Arguments:** 1 to 8 Reference Photos; `--budget USD` (default 5), `--candidates N` (1 to 8,
-  default 3, per Lane), `--look FILE`, `--lane SPEC` (repeatable, below), `--pin PHOTO`
-  (repeatable), `--face PHOTO:FACE` (as for `photos:validate`), `--judge-model ID` and
-  `--judge-effort LEVEL` (see "Judge" below), `--data-dir PATH` and `--db PATH` (default
-  `./iconograph.db`, whose directory must exist). `bun run run read --run-id ID` prints a stored
-  Run's report again; it refuses a `--db` file that doesn't exist.
+  default 3, per Lane and Iteration), `--look FILE`, `--lane SPEC` (repeatable, below), `--pin
+  PHOTO` (repeatable), `--face PHOTO:FACE` (as for `photos:validate`), `--judge-model ID` and
+  `--judge-effort LEVEL` (see "Judge" below), `--optimizer-model ID` and `--optimizer-effort
+  LEVEL` (see "Optimizer" below), the stopping rules `--target-score N`, `--patience N`,
+  `--min-improvement N` and `--max-iterations N` (see "Stopping rules" below), `--data-dir PATH`
+  and `--db PATH` (default `./iconograph.db`, whose directory must exist). `bun run run read
+  --run-id ID` prints a stored Run's report again; it refuses a `--db` file that doesn't exist.
+- **Stopping rules:** a Lane stops after an Iteration when its best Candidate (the highest weighted
+  total of any judged Candidate of the Lane) reaches `--target-score` (default 8.5, 0 to 10; the
+  target itself counts) with `target-score`; when `--patience` Iterations in a row (default 3, 1
+  to 50; above `--max-iterations` it never fires, which turns it off) haven't raised the best
+  score by `--min-improvement` (default 0.2, above 0 and at most 10; exactly that counts, compared
+  at 9 decimals so 8.3 → 8.5 does) with `patience`; when two Iterations in a row had only Refused
+  or Failed Candidates (a Gated Candidate is an image, so it breaks the streak) with
+  `repeated-failures`; and after `--max-iterations` Iterations (default 8, 1 to 50) with
+  `iteration-limit`. Patience measures from the best score at the last counted improvement, so
+  small rises that add up to the minimum count as one; an Iteration with no judged Candidate is no
+  improvement. A billable call that doesn't fit the Budget isn't made (an image call's Candidate
+  is stored Failed, a Judge call's `judge-failed`, saying so), and the Lane stops after that
+  Iteration with `budget-exhausted` (unless its target was reached), and
+  cancelling the Run stops every Lane not yet stopped with `cancelled`, wherever the cancel
+  lands (mid-call, between Iterations, during preparation, or with Lanes still waiting their
+  turn; if the process stops before that is recorded, the report still shows them `cancelled`); a
+  Lane's first recorded stop reason stands. When several hold after the same Iteration, the first of
+  `cancelled`, `target-score`, `budget-exhausted`, `repeated-failures`, `patience`,
+  `iteration-limit` wins: a Lane that reached its target says so even if a call of that
+  Iteration didn't fit. The rules are frozen with the Run's request (`stopRules`).
 - **Lanes:** each `--lane NAME[,photos=N+N...][,prompt=FILE]` adds one Lane. `NAME` is `gemini`
   (`gemini-nano-banana-2.1`), `openai` or `openai:sunburst` (`gpt-image-2.5-sunburst`), or
   `openai:flare` (`gpt-image-2.5-flare`). `photos=1+3` limits the Lane to those Reference Photos
@@ -453,9 +478,9 @@ rejected before its price lookup and before any billable call, without echoing i
   the vendor's reasoning parameter (Anthropic `effort`, OpenAI `reasoningEffort`, Gemini
   `thinkingConfig.thinkingLevel`). Its key comes from the environment only: `ANTHROPIC_API_KEY`,
   `OPENAI_API_KEY`, or `GOOGLE_GENERATIVE_AI_API_KEY` (or `GOOGLE_API_KEY`). The Judge is checked
-  first, before any billable call: its key, then its price lookup; a Run without the Judge's key
-  fails before any price is looked up, while the Image Models' keys are checked after the Judge's
-  price. The key and the Reference Photos go only to the vendor's own API
+  first, before any billable call: its key, then (for a Run of more than one Iteration) the
+  Optimizer's key, before any price is looked up; then their prices, then each Lane's Image Model,
+  its key before its own price. The key and the Reference Photos go only to the vendor's own API
   (`https://api.anthropic.com/v1`, `https://api.openai.com/v1`,
   `https://generativelanguage.googleapis.com/v1beta`), set explicitly: the base-URL variables
   `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL` and `GOOGLE_BASE_URL` have no effect on the Judge. A
@@ -507,10 +532,29 @@ rejected before its price lookup and before any billable call, without echoing i
   failed keeps its Likeness and is marked `judge-failed` with a `cause` (`refused`, `failed`,
   `gave-up` after transient errors, or `budget-exhausted`) and the reason; it never gets a
   made-up score.
+- **Optimizer:** a Mastra agent with structured output, built as the Judge is (its vendor's AI SDK
+  provider, the vendor's own API endpoint, the same keys, reasoning effort, deadlines per effort
+  and output caps; ADR-0013); by default Claude Sonnet 5.5 (`anthropic/claude-sonnet-5-5`) at
+  `medium` effort. `--optimizer-model` takes any `anthropic/`, `openai/` or `google/` model as a
+  `vendor/model` id, `--optimizer-effort` `low`, `medium` or `high`; both are frozen with the Run
+  and its key and price are checked at Run start, after the Judge's key (a Run of one Iteration
+  never calls it, so it checks neither and stores no Optimizer price). Between two Iterations it
+  writes the Lane's next Prompt from the Target Look (quoted, to rephrase but never change) and that
+  Lane's recent Iterations only: the last 3, and the Iteration of the Lane's best Candidate when it
+  is older, each with its Prompt and every Candidate's outcome (Refused or Failed with the reason,
+  Gated, or Scored with its Likeness, weighted total, per-criterion scores, the Judge's issues and
+  suggested fixes). Only that text is sent, never a photo; another Lane's Prompts never are. Its
+  answer must be a Prompt of 1 to 32,000 characters (trimmed); an answer outside its schema, blank
+  or longer is a failed call at its cost. When optimizing fails (a refusal, a failed call, retries
+  that ran out), the next Iteration keeps the last Prompt and records why (`source: "kept"`). Its
+  calls are retried and costed like the Judge's; its estimate counts the instructions, schema and
+  message text as the Judge's does, plus the whole output cap.
 - **Budget:** every billable call, retries included, is checked against the remaining Budget
   (Budget − actual cost so far − estimates of calls in flight) before it is made. All N first calls
-  are reserved in order before any is launched, so parallel calls can't overspend; a call that
-  doesn't fit isn't made and the Lane stops with `budget-exhausted`. Concurrent Lanes reserve
+  of an Iteration are reserved in order before any is launched, so parallel calls can't overspend;
+  a call that doesn't fit isn't made: its Candidate is stored Failed (`budgetExhausted: true`) and
+  the Lane stops after the Iteration (`budget-exhausted`, unless its target was reached), as it
+  does when an Optimizer call doesn't fit. Concurrent Lanes reserve
   against the same Budget, so together they can't overspend it either. Gemini's estimate assumes
   1120 input tokens per reference plus the Prompt (about 3 characters per token), the 2K image
   price and 4000 tokens of text and thinking. OpenAI's assumes the Prompt (3 characters per token),
@@ -533,7 +577,7 @@ rejected before its price lookup and before any billable call, without echoing i
   that difference on calls already in flight. Judge calls count against the same Budget: each
   Lane's Judge calls are reserved in Candidate order after its Candidates are scored; one that
   doesn't fit, or a retry that doesn't, isn't made, its Candidate is `judge-failed` with cause
-  `budget-exhausted`, and the Lane stops with `budget-exhausted`. A Judge call's estimate is an
+  `budget-exhausted`, and the Lane stops as above. A Judge call's estimate is an
   upper bound: the instructions, Rubric, verdict schema (as sent) and Target Look with ASCII at
   2.5 characters per token (Anthropic's current tokenizer averages about that) and every other
   UTF-16 code unit at 2 tokens (CJK measures about 0.7, emoji and rare CJK up to about 1.5), each
@@ -551,12 +595,24 @@ rejected before its price lookup and before any billable call, without echoing i
   HTTP errors (400 and up) and network errors that show nothing was sent (ENOTFOUND, EAI_AGAIN,
   connection refused) are booked at $0; any other network failure or a timeout has an unknown cost, so it counts at
   its estimate against the Budget and as $0 in `actualUsd` (`unknownCostCalls`). A Run with an
-  unpriced model or Judge doesn't start. The Budget is in whole
+  unpriced model, Judge or Optimizer doesn't start. The Budget is in whole
   micro-dollars: at most 6 decimals, from $0.000001 to $1,000,000.
-- **Output:** first, before any Candidate is generated, one JSON line on stderr with the estimated
-  cost per Lane and in total (`{"event":"estimate", …}`, including one Judge call per Candidate).
-  Then one JSON object on stdout, with one entry per Lane (its model, `initialPrompt` — null if the
-  Run died before storing it — character references and price source): per Candidate its Outcome —
+- **Output:** first, before any Candidate is generated, one JSON line on stderr with at most what
+  the Run can cost if every Lane ran all `maxIterations` Iterations, each call at its first-call
+  estimate (retries, and calls that cost more than estimated, can exceed it) (`{"event":"estimate",
+  …}`: per Lane its Image Model calls, `perCallUsd` being one call of the first Iteration, with the
+  Lane's Prompt, and later ones quoted with the longest Prompt allowed; the Judge's calls, one per
+  Candidate; and the Optimizer's, one between each two Iterations of a Lane, each at the largest
+  request the Run allows plus 1% (`perCallUsd`): four Iterations with Prompts of 32,000 characters
+  and every Candidate judged with every note at its longest, no lower than any realistic request
+  and far above a typical one; none for a Run of one Iteration). Then one JSON object on stdout,
+  with one entry per Lane (its model, stop reason, `iterations` begun — each has its Prompt
+  stored; the last may have made no call, after a cancel or when its first calls didn't fit —
+  `best` Candidate — `iteration` from 1, `candidate` index from 0 within it, and
+  `score`, or null when none was judged — its `prompts`, one per Iteration with the Prompt, its
+  `source` (`initial`, `optimizer`, or `kept` with a `reason`) and the `optimizerCost` of that
+  Iteration's Optimizer calls, which wrote the next Iteration's Prompt; character references and
+  price source): per Candidate its Iteration, index and Outcome —
   `Refused` or `Failed` with a reason, `Gated` (`no-face` or `below-gate`, with the best face's
   similarity) or `Scored` with its Likeness (similarity to the Identity Anchor scaled linearly from
   the Gate, 0, to the Identity Ceiling, 10, and clamped; with a Ceiling at or below the Gate,
@@ -564,26 +620,34 @@ rejected before its price lookup and before any billable call, without echoing i
   cost per call; its `judgement` — `null` when it wasn't judged, `judged` with `resemblance`,
   every criterion's `scores` and `levels`, `weightedTotal`, `disputed`, `rubricVersion`, `issues`
   and `promptFixes`, or `judge-failed` with its `cause` and `reason` — and its `judgeCost` (the
-  Judge's calls and their costs); each Lane's stop reason (`budget-exhausted` or
-  `iteration-limit`); the `judge` (model, effort, weights, Rubric version, its Reference Photos and
-  price source); totals over every billable call of the Run and the remaining Budget; the Run's
+  Judge's calls and their costs); the `judge` (model, effort, weights, Rubric version, its
+  Reference Photos and price source), the `optimizer` (model, effort and price source; no price
+  source for a Run of one Iteration, which never calls it) and the
+  `stopRules`; totals over every billable call of the Run and the remaining Budget; the Run's
   `warnings` (branch on `code`, e.g. `judge-same-vendor`, never on the message); the Reference
   Photo warnings. `actualUsd` counts calls of unknown cost (`unknownCostCalls`) as $0, while the
   remaining Budget counts them at their estimate, so `budgetUsd − actualUsd` can exceed
-  `remainingUsd`. Calls whose Candidate was never saved (the Run failed mid-way) are listed in
-  `unattributedCalls` and still counted. With several faces in a Candidate, the best match to the
+  `remainingUsd`. Calls whose Candidate was never saved (the Run failed or was cancelled
+  mid-call) are listed in `unattributedCalls` and still counted. With several faces in a
+  Candidate, the best match to the
   Identity Anchor counts. A Run that fails after it started prints its `runId` in the stderr error,
   so `read` can show what it spent.
 - **Storage:** Candidates are content-addressed files in `<data dir>/images` (JPEG or PNG; other
   types fail the Candidate). The `--db` file holds Mastra's workflow snapshots (no image data or
-  embeddings; the Run request is the workflow input) and the tables `runs` (request with the frozen
-  Target Look, Budget and Judge, and the photo report with the Identity Anchor and Ceiling),
-  `lanes`, `iterations` (Prompts), `candidates`, `judges` (the Judge's price, Rubric version and
-  Reference Photos), `judgements` (one per judged Candidate, saved as soon as it exists; a
-  re-executed judge step skips Candidates already judged) and `cost_records` (estimated and actual
-  cost and usage per billable call, by purpose `generate` or `judge`), all keyed by Run, Lane,
-  Iteration and Candidate. A database written before the Judge existed is refused (its cost
-  records have no purpose); use a new `--db` file.
+  embeddings, and no Prompt beyond a Lane's own, which is part of the Run request, the workflow
+  input) and the tables `runs` (request with the frozen Target Look, Budget, Judge, Optimizer and
+  stopping rules, and the photo report with the Identity Anchor and Ceiling), `lanes`,
+  `iterations` (each Iteration's Prompt and its source), `candidates`, `judges` (the Judge's
+  price, Rubric version and Reference Photos), `optimizers` (the Optimizer's price), `judgements`
+  (one per judged Candidate, saved as soon as it exists) and `cost_records` (estimated and actual
+  cost and usage per billable call, by purpose `generate`, `judge` or `optimize`), all keyed by
+  Run, Lane, Iteration and Candidate (an Optimizer call by the Iteration it optimizes). A
+  re-executed Iteration generates only the Candidates not yet stored, judges only those not yet
+  judged, doesn't call the Optimizer for an Iteration already written, and runs nothing for a
+  Lane whose stop is recorded: a call whose result was stored is never made again; one whose call
+  ran but whose result was lost is made again, under the next attempt number, and billed again.
+  A database written before the Judge or the Optimizer existed is refused (its cost records have
+  no purpose, or can't hold an Optimizer call); use a new `--db` file.
 
 ### ADR validation and commits
 
@@ -633,10 +697,10 @@ data. The volume also holds the Runs database (`iconograph.db`, with Mastra's sn
 content-addressed images (`images/`) and the price cache (`prices.db`). Offline machines can copy
 the locked weights into the volume's `models/` folder first (see "Model weights").
 
-**Keys** come from `.env` only: the Judge's vendor (`ANTHROPIC_API_KEY` for the default
-`anthropic/claude-sonnet-5-5`, `OPENAI_API_KEY` for an `openai/` Judge,
-`GOOGLE_GENERATIVE_AI_API_KEY` for a `google/` one) and every Lane's Image Model
-(`GEMINI_API_KEY`, `OPENAI_API_KEY`).
+**Keys** come from `.env` only: the Judge's and the Optimizer's vendor (`ANTHROPIC_API_KEY` for
+the default `anthropic/claude-sonnet-5-5`, `OPENAI_API_KEY` for `openai/`,
+`GOOGLE_GENERATIVE_AI_API_KEY` for `google/`) and every Lane's Image Model (`GEMINI_API_KEY`,
+`OPENAI_API_KEY`).
 
 **Only localhost can reach it.** The server listens on `127.0.0.1` by default; outside a
 container `ICONOGRAPH_HOST` and `ICONOGRAPH_PORT` change that, and any non-loopback address logs a
@@ -656,8 +720,8 @@ requests that change state under `/api` (POST, PUT, PATCH, DELETE) must be `appl
 
 **Upgrading:** images are published from `main` as `ghcr.io/stibbons-ai/iconograph:latest` and
 `:sha-<commit>`, for linux/amd64 and linux/arm64. `docker compose pull && docker compose up -d`
-replaces the container and keeps the volume; Runs that were active restart (except, for now,
-Runs stopped while generating or scoring, below). `docker compose up
+replaces the container and keeps the volume; Runs that were active restart (except, for now, a
+Run interrupted during any Iteration, below). `docker compose up
 -d --build` builds from your checkout instead.
 
 ### Start a Run through the API
@@ -678,10 +742,10 @@ starting a `runId` again answers 409 while it runs and after it ended. A start t
 can be retried: one refused with 400 (invalid input to `start-async`), or a `stream` whose input
 was refused (it answers 200, and the stream ends with the validation error); retry that one
 with `start-async`, since Mastra streams a `runId` only once. The body's `inputData` is the Run
-request, with every Target Look facet, every Lane and the Judge given (the API applies no
-defaults). A Lane's `photos` are numbers into the Run's `photos` (from 1), so the data-volume
-check covers them too; its `prompt` is the Prompt's text. The Judge's `weights` must name every
-Rubric criterion and sum to 1:
+request, with every Target Look facet, every Lane, the Judge, the Optimizer and the stopping rules
+given (the API applies no defaults; the CLI's are in "Runs"). A Lane's `photos` are numbers into
+the Run's `photos` (from 1), so the data-volume check covers them too; its `prompt` is the
+Prompt's text. The Judge's `weights` must name every Rubric criterion and sum to 1:
 
 ```sh
 curl -X POST http://127.0.0.1:4111/api/workflows/run/start-async \
@@ -694,14 +758,16 @@ curl -X POST http://127.0.0.1:4111/api/workflows/run/start-async \
     "judge": {"model": "anthropic/claude-sonnet-5-5", "effort": "low", "weights": {
       "likeness": 0.3, "resemblance": 0.15, "realism": 0.15, "pose": 0.1, "background": 0.08,
       "lighting": 0.08, "hairstyle": 0.07, "clothing": 0.05, "framing": 0.02}},
+    "optimizer": {"model": "anthropic/claude-sonnet-5-5", "effort": "medium"},
+    "stopRules": {"targetScore": 8.5, "patience": 3, "minImprovement": 0.2, "maxIterations": 8},
     "targetLook": {"pose": "…", "background": "…", "lighting": "…",
       "hairstyle": "as in the Reference Photos", "clothing": "…", "framing": "…"}}}'
 ```
 
-A missing key fails the Run with that message before any billable call: the Judge's first, then
-each Lane's in order, each before its own price lookup. A Run
-interrupted while generating or scoring is not resumed yet: Mastra marks the restarted Lane
-failed, and no call is made or billed twice (#35).
+A missing key fails the Run with that message before any billable call: the Judge's and (for more
+than one Iteration) the Optimizer's before any price lookup, then each Lane's before its own. A
+Run interrupted during any Iteration is not resumed yet: Mastra marks the restarted Lane failed
+(#35).
 
 The server keeps its Runs in `<data volume>/iconograph.db`, while `bun run run read` defaults to
 `./iconograph.db`; to read a server Run from a checkout, pass the volume's database, e.g.
@@ -727,11 +793,11 @@ The image is `gcr.io/distroless/cc-debian13` (glibc, no shell) as the non-root u
 
 ## Architecture and schema authority
 
-| Package                | Responsibility                                                                                                                                                                                                                             | Dependencies at the boundary                                                               |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------ |
-| `@iconograph/domain`   | Pure Run schemas; Target Look and Prompt; `FaceEmbedder` and `ImageModels` seams; Identity Anchor/Ceiling, photo verdicts, Likeness and Candidate Outcomes; character-reference choice; Budget arithmetic; price precedence and `Unpriced` | Effect only; no Mastra, storage, or infrastructure                                         |
-| `@iconograph/adapters` | Effect-to-Mastra schema helper; LibSQL storage and Run tables; model weights; YuNet/SFace via ONNX; Reference Photo decoding and storage; content-addressed images; LiteLLM price source; Gemini Interactions adapter                      | Effect, Mastra core and LibSQL adapter, libsql client, onnxruntime-node, sharp, libheif-js |
-| `@iconograph/server`   | Run workflow (prepare → Lanes → finish; a Lane generates and scores one Iteration), the Run CLI and the HTTP server (Mastra routes via Hono, `/health`)                                                                                    | Domain and adapters; Mastra owns durable execution                                         |
+| Package                | Responsibility                                                                                                                                                                                                                                                                                | Dependencies at the boundary                                                               |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `@iconograph/domain`   | Pure Run schemas; Target Look and Prompt; `FaceEmbedder`, `ImageModels`, `Judges` and `Optimizers` seams; Identity Anchor/Ceiling, photo verdicts, Likeness and Candidate Outcomes; character-reference choice; Rubric and stopping rules; Budget arithmetic; price precedence and `Unpriced` | Effect only; no Mastra, storage, or infrastructure                                         |
+| `@iconograph/adapters` | Effect-to-Mastra schema helper; LibSQL storage and Run tables; model weights; YuNet/SFace via ONNX; Reference Photo decoding and storage; content-addressed images; LiteLLM price source; Gemini Interactions adapter                                                                         | Effect, Mastra core and LibSQL adapter, libsql client, onnxruntime-node, sharp, libheif-js |
+| `@iconograph/server`   | Run workflow (prepare → Lanes → finish; a Lane repeats its Iteration step — generate, score, judge, optimize — until a stopping rule fires), the Judge and Optimizer agents, the Run CLI and the HTTP server (Mastra routes via Hono, `/health`)                                              | Domain and adapters; Mastra owns durable execution                                         |
 
 **Effect Schema is the single schema source.** Mastra is the single durable workflow engine; LibSQL
 stores its snapshots. Zod exists transitively in Mastra's dependency graph but is not an independent

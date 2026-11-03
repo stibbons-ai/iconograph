@@ -44,10 +44,18 @@ export {
   LibsqlRunStore,
   RunStore,
   RunStoreError,
+  type CallKey,
   type CallPurpose,
   type CallRecord,
+  type CallSubject,
+  type CandidateCallKey,
   type CandidateKey,
   type CandidateRecord,
+  type IterationKey,
+  type IterationRecord,
+  type JudgeRecord,
+  type LaneRecord,
+  type PromptSource,
   type StoredRun,
 } from "./run-store";
 export { toMastraSchema } from "./schema";
