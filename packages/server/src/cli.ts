@@ -114,16 +114,20 @@ fixes, refusals and failures; it rephrases the Target Look, never changes it.
 The Judge and the Optimizer need their vendor's key in the environment:
 ANTHROPIC_API_KEY, OPENAI_API_KEY, or GOOGLE_GENERATIVE_AI_API_KEY (or
 GOOGLE_API_KEY); a Run of one Iteration (--max-iterations 1) never calls the
-Optimizer and needs neither its key nor its price. Keys are checked before any
-billable call and never stored or logged. Only the Rubric, at most 3 Reference
-Photos (stripped), the Candidate and the Target Look are sent to the Judge's
-vendor; only the Target Look and the Lane's recent Prompts, outcomes and Judge
-notes (text, no photos) to the Optimizer's.
+Optimizer and needs neither its key nor its price. Keys must be set before any
+billable call and are never stored or logged. Only the Rubric, at most 3
+Reference Photos (stripped), the Candidate and the Target Look are sent to the
+Judge's vendor; only the Target Look and the Lane's recent Prompts, outcomes and
+Judge notes (text, no photos) to the Optimizer's.
 
-A Lane stops with the first of: "cancelled"; "target-score";
-"budget-exhausted" (a billable call didn't fit the Budget, so it wasn't
-made); "repeated-failures" (two Iterations in a row whose Candidates were all
-Refused or Failed); "patience"; "iteration-limit".
+A Lane stops with the first of: "cancelled"; "optimizer-failed" or
+"judge-failed" (the vendor rejected the Optimizer's or Judge's call with HTTP
+401, 403 or 404, e.g. a bad key; Google reports a bad key as 400, which isn't
+caught: an Optimizer rejection stops the Lane at once, a Judge rejection once
+the Iteration's calls settle); "target-score"; "budget-exhausted" (a billable
+call didn't fit the Budget, so it wasn't made); "repeated-failures" (two
+Iterations in a row whose Candidates were all Refused or Failed); "patience";
+"iteration-limit".
 
 Before generating, an estimate prints as one JSON line on stderr: at most what
 every Lane running all its Iterations can cost, each call at its first-call
@@ -133,7 +137,8 @@ is one JSON object on stdout: per Candidate its Iteration, Outcome (Refused,
 Failed, Gated or Scored), Likeness, reason, stored image and estimated and
 actual cost, and its judgement (Resemblance, per-criterion scores, weighted
 total, Disputed, Rubric version, issues, suggested Prompt fixes) with the
-Judge's cost; per Lane its stop reason, Iterations, best Candidate (Iteration,
+Judge's cost; per Lane its stop reason (with stopDetail, the vendor's reason,
+for optimizer-failed and judge-failed), Iterations, best Candidate (Iteration,
 index, score) and Prompt history (each Iteration's Prompt, its source initial,
 optimizer or kept, and the cost of that Iteration's Optimizer call, which
 wrote the next Iteration's Prompt); the Judge, the Optimizer and the stopping

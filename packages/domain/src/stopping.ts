@@ -6,20 +6,27 @@ import type { Judgement } from "./rubric";
  * Why a Lane stopped. When several rules hold after the same Iteration, the
  * first in this order wins (`laneStopReason` follows it):
  * 1. `cancelled`: the operator cancelled the Run.
- * 2. `target-score`: the Lane's best Candidate reached the target score.
- * 3. `budget-exhausted`: a billable call (Image Model, Judge or Optimizer)
+ * 2. `optimizer-failed`: the vendor turned an Optimizer call away for good
+ *    (HTTP 401, 403 or 404); the Lane stops at once, without a next Prompt.
+ * 3. `judge-failed`: the vendor turned a Judge call away for good; the Lane
+ *    stops once the Iteration's calls have settled.
+ * 4. `target-score`: the Lane's best Candidate reached the target score.
+ * 5. `budget-exhausted`: a billable call (Image Model, Judge or Optimizer)
  *    didn't fit the Budget, so it wasn't made.
- * 4. `repeated-failures`: two Iterations in a row whose Candidates were all
+ * 6. `repeated-failures`: two Iterations in a row whose Candidates were all
  *    Refused or Failed.
- * 5. `patience`: the patience Iterations in a row without the best score
+ * 7. `patience`: the patience Iterations in a row without the best score
  *    rising by the minimum improvement.
- * 6. `iteration-limit`: the Lane ran its maximum Iterations.
- * The operator's stop comes first; then success, so a Lane that reached its
- * target says so even if a call of the same Iteration didn't fit; then the
- * Budget; then the failure signals; the Iteration cap last.
+ * 8. `iteration-limit`: the Lane ran its maximum Iterations.
+ * The operator's stop comes first; then a role whose every further call would
+ * be turned away; then success, so a Lane that reached its target says so
+ * even if a call of the same Iteration didn't fit; then the Budget; then the
+ * failure signals; the Iteration cap last.
  */
 export const LaneStopReason = Schema.Literals([
   "cancelled",
+  "optimizer-failed",
+  "judge-failed",
   "target-score",
   "budget-exhausted",
   "repeated-failures",
@@ -27,6 +34,12 @@ export const LaneStopReason = Schema.Literals([
   "iteration-limit",
 ]);
 export type LaneStopReason = typeof LaneStopReason.Type;
+
+/** The stop reasons that come with the vendor's reason, stored as the Lane's stop detail. */
+export const LANE_STOPS_WITH_DETAIL = [
+  "optimizer-failed",
+  "judge-failed",
+] as const satisfies readonly LaneStopReason[];
 
 /** The most Iterations a Run may allow a Lane; the Budget is the practical limit. */
 export const MAX_ITERATIONS = 50;
@@ -96,6 +109,11 @@ export interface IterationResult {
   readonly allFailed: boolean;
   /** A stored Candidate shows that one of its calls didn't fit the Budget (`showsBudgetExhausted`). */
   readonly budgetExhausted: boolean;
+  /**
+   * The vendor's reason when a stored judgement shows a Judge call turned
+   * away for good (`JudgeFailed` with cause `non-recoverable`); else null.
+   */
+  readonly judgeRejected: string | null;
 }
 
 /**
@@ -115,12 +133,16 @@ export function showsBudgetExhausted({
 
 /** An Iteration's Candidates as an `IterationResult`. */
 export function iterationResult(candidates: readonly RankedCandidate[]): IterationResult {
+  const rejected = candidates.find(
+    ({ judgement }) => judgement?._tag === "JudgeFailed" && judgement.cause === "non-recoverable",
+  )?.judgement;
   return {
     best: bestCandidate(candidates)?.score ?? null,
     allFailed:
       candidates.length > 0 &&
       candidates.every(({ outcome }) => outcome?._tag === "Refused" || outcome?._tag === "Failed"),
     budgetExhausted: candidates.some(showsBudgetExhausted),
+    judgeRejected: rejected?._tag === "JudgeFailed" ? rejected.reason : null,
   };
 }
 
@@ -164,8 +186,10 @@ export function iterationsWithoutImprovement(
  * another: of the rules that hold, the first in `LaneStopReason`'s order.
  * The Budget ran out when `budgetExhausted` says so (a call of the last
  * Iteration didn't fit, e.g. one that left no Candidate) or the last
- * Iteration's stored Candidates show it. Cancellation never reaches here: a
- * cancelled Lane stops where it is.
+ * Iteration's stored Candidates show it; the Judge failed when they show a
+ * Judge call turned away for good. Cancellation and `optimizer-failed` never
+ * reach here: a cancelled Lane stops where it is, and the Optimizer is called
+ * only once no rule holds, its rejection stopping the Lane at once.
  */
 export function laneStopReason(
   history: readonly IterationResult[],
@@ -174,6 +198,8 @@ export function laneStopReason(
 ): LaneStopReason | null {
   const holds: { readonly [R in LaneStopReason]: () => boolean } = {
     cancelled: () => false,
+    "optimizer-failed": () => false,
+    "judge-failed": () => (history.at(-1)?.judgeRejected ?? null) !== null,
     "target-score": () => history.some(({ best }) => best !== null && best >= rules.targetScore),
     "budget-exhausted": () => budgetExhausted || history.at(-1)?.budgetExhausted === true,
     "repeated-failures": () =>

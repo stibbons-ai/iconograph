@@ -6,7 +6,6 @@ import {
   callWithRetries,
   type EncodedImage,
   type RetryPolicy,
-  type UnsuccessfulCall,
   type Usage,
 } from "./image-model";
 import {
@@ -15,6 +14,7 @@ import {
   LlmModelId,
   type LlmVendor,
   llmVendor,
+  type LlmUnsuccessfulCall,
   parseLlmModel,
   textTokens,
 } from "./llm";
@@ -145,7 +145,7 @@ export type JudgeCallResult =
       readonly usage: Usage | null;
       readonly costMicros: number | null;
     }
-  | UnsuccessfulCall;
+  | LlmUnsuccessfulCall;
 
 /** A vision model scoring Candidates against a Rubric (GLOSSARY "Judge"). */
 export interface Judge {
@@ -282,8 +282,9 @@ export interface JudgeCandidateOptions<E> {
 /**
  * One Candidate's Judge call with retries (`callWithRetries`), as a
  * judgement: a verdict scored against the Rubric with the Run's weights, or
- * `JudgeFailed` for a refusal, a failure, or retries that ran out or didn't
- * fit the Budget. A failed judging never makes up a score.
+ * `JudgeFailed` for a refusal, a failure, retries that ran out or didn't fit
+ * the Budget, or a call the vendor turned away for good (`non-recoverable`).
+ * A failed judging never makes up a score.
  */
 export const judgeCandidate = <E>(options: JudgeCandidateOptions<E>) => {
   const { judge, request, estimate, likeness, weights, gate, policy } = options;
@@ -301,7 +302,8 @@ export const judgeCandidate = <E>(options: JudgeCandidateOptions<E>) => {
         case "refused":
           return judgeFailed(rubric, "refused", `The Judge refused: ${result.reason}`);
         case "failed":
-          return judgeFailed(rubric, "failed", result.reason);
+        case "non-recoverable":
+          return judgeFailed(rubric, result.kind, result.reason);
         case "gave-up":
           return judgeFailed(
             rubric,

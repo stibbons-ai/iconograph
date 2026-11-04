@@ -246,10 +246,18 @@ const Score = Schema.Finite.check(Schema.isBetween({ minimum: 0, maximum: MAX_LI
 /**
  * Why the Judge's work on a Candidate failed: the Judge `refused`; the call
  * `failed` (an error not worth retrying, or an answer outside the verdict
- * schema); it `gave-up` after transient errors; or a call or retry was
- * `budget-exhausted` (didn't fit the Budget, so it wasn't made).
+ * schema); it `gave-up` after transient errors; a call or retry was
+ * `budget-exhausted` (didn't fit the Budget, so it wasn't made); or the
+ * vendor turned the call away for good, `non-recoverable` (HTTP 401, 403 or
+ * 404), which stops the Lane (`judge-failed`).
  */
-export const JudgeFailure = Schema.Literals(["refused", "failed", "gave-up", "budget-exhausted"]);
+export const JudgeFailure = Schema.Literals([
+  "refused",
+  "failed",
+  "gave-up",
+  "budget-exhausted",
+  "non-recoverable",
+]);
 export type JudgeFailure = typeof JudgeFailure.Type;
 
 export const RubricVersion = Schema.Literals(RUBRIC_VERSIONS);

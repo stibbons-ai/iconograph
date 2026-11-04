@@ -555,8 +555,11 @@ type ScoredCandidate = CandidateRecord & {
  * every first call is reserved in Candidate order before any is launched, and
  * each transient retry is reserved first; a call that doesn't fit isn't made,
  * its Candidate is marked judge-failed for the Budget, and the Lane stops
- * after the Iteration (`budget-exhausted`, unless a rule before it holds).
- * Every judgement is stored as soon as it exists,
+ * after the Iteration (`budget-exhausted`, unless a rule before it holds). A
+ * call the vendor turns away for good marks its Candidate judge-failed
+ * (`non-recoverable`) and, once the Iteration's calls have settled, the
+ * optimize phase stops the Lane (`judge-failed`). Every judgement is stored as
+ * soon as it exists,
  * with the Rubric version; a Candidate already judged is skipped, so a
  * re-executed step doesn't call the Judge again. A failed judging leaves the
  * Candidate's Likeness, never a made-up score.
@@ -649,16 +652,19 @@ export const judgeIteration = (input: LaneState) =>
  * End an Iteration: decide whether the Lane stops (`laneStopReason` over its
  * Iterations so far, with a call of this one that didn't fit the Budget,
  * whether this execution saw it or the stored Candidates show it) and record
- * why; otherwise have the Optimizer write the next Iteration's Prompt from
- * the Lane's own recent history (`recentHistory`; never another Lane's) and
- * the Target Look, and store that Iteration. The Optimizer call belongs to
- * this Iteration (it is booked under it) and is reserved against the Budget
- * first, as every billable call is; one that doesn't fit, or a retry that
- * doesn't, isn't made and the Lane stops with `budget-exhausted`. When
- * optimizing fails (a refusal, an unusable answer, retries that ran out), the
- * next Iteration keeps the last Prompt, records why, and a warning says so. A
- * re-executed step that finds the next Iteration stored moves on to it
- * without calling again.
+ * why, with the vendor's reason when a Judge call was turned away for good
+ * (`judge-failed`); otherwise have the Optimizer write the next Iteration's
+ * Prompt from the Lane's own recent history (`recentHistory`; never another
+ * Lane's) and the Target Look, and store that Iteration. The Optimizer call
+ * belongs to this Iteration (it is booked under it) and is reserved against
+ * the Budget first, as every billable call is; one that doesn't fit, or a
+ * retry that doesn't, isn't made and the Lane stops with `budget-exhausted`.
+ * One the vendor turns away for good stops the Lane at once with
+ * `optimizer-failed` and the vendor's reason, storing no next Iteration. When
+ * optimizing fails otherwise (a refusal, an unusable answer, retries that ran
+ * out), the next Iteration keeps the last Prompt, records why, and a warning
+ * says so. A re-executed step that finds the next Iteration stored moves on
+ * to it without calling again.
  */
 export const optimizeIteration = (input: LaneState) =>
   Effect.gen(function* () {
@@ -675,15 +681,19 @@ export const optimizeIteration = (input: LaneState) =>
         prompt,
         candidates: candidates.filter((candidate) => candidate.iteration === iteration),
       }));
-    const stop = (stopReason: LaneStopReason) =>
+    const stop = (stopReason: LaneStopReason, detail?: string) =>
       store
-        .stopLane(input.runId, input.lane, stopReason)
+        .stopLane(input.runId, input.lane, stopReason, detail)
         .pipe(Effect.as({ ...input, stopReason } satisfies LaneState));
+    const results = history.map(({ candidates }) => iterationResult(candidates));
     const stopReason = laneStopReason(
-      history.map(({ candidates }) => iterationResult(candidates)),
+      results,
       run.request.stopRules,
       input.stopReason === "budget-exhausted",
     );
+    // `judge-failed` holds only when the last Iteration shows the vendor's reason.
+    if (stopReason === "judge-failed")
+      return yield* stop(stopReason, results.at(-1)!.judgeRejected!);
     if (stopReason) return yield* stop(stopReason);
 
     const next = { runId: input.runId, lane: input.lane, iteration: input.iteration + 1 };
@@ -716,6 +726,9 @@ export const optimizeIteration = (input: LaneState) =>
       policy: retryPolicy,
     }).pipe(about(key));
     if (optimization.kind === "budget-exhausted") return yield* stop("budget-exhausted");
+    if (optimization.kind === "non-recoverable") {
+      return yield* stop("optimizer-failed", optimization.reason);
+    }
     if (optimization.kind === "kept") {
       yield* Effect.logWarning("Optimizing failed; the next Iteration keeps the last Prompt").pipe(
         Effect.annotateLogs({ reason: optimization.reason }),

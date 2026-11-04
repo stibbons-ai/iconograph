@@ -59,6 +59,10 @@ export function vendorAnswer(vendor: LlmVendor, text: string, cutOff = false): R
   return Response.json(bodies[vendor]);
 }
 
+/** An Anthropic API error answer: `status`, with the error's `type` and `message`. */
+export const vendorError = (status: number, type: string, message: string): Response =>
+  Response.json({ type: "error", error: { type, message } }, { status });
+
 /**
  * A local server answering every request with `answer` (given the request and
  * its body, already read), recording each; `stop` it when done.

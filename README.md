@@ -399,7 +399,13 @@ database, the output or an error. In an OpenAI Lane's
 failure reasons, a masked echo of a key in the usual form (a word with three or more asterisks,
 such as `sk-proj-****abcd`) is redacted too, and every reason is cut to about 2000 characters. A
 key shorter than 20 characters or with spaces, control or non-ASCII characters (a bad paste) is
-rejected before its price lookup and before any billable call, without echoing it.
+rejected before its price lookup and before any billable call, without echoing it. That check
+only proves a key is set, not that the vendor accepts it: a Judge or Optimizer call the vendor
+answers with HTTP 401, 403 or 404 stops each Lane at the first such call it makes (`judge-failed`,
+`optimizer-failed`; see "Stopping rules"): the Optimizer's after the Lane's first Iteration, the
+Judge's in the Lane's first Iteration with a Scored Candidate. Google's API answers a bad key
+with HTTP 400 (`API_KEY_INVALID`), which this doesn't catch: with a bad `google/` Judge or
+Optimizer key, every judging fails, or every Prompt is kept, until another rule stops the Lane.
 
 - **Arguments:** 1 to 8 Reference Photos; `--budget USD` (default 5), `--candidates N` (1 to 8,
   default 3, per Lane and Iteration), `--look FILE`, `--lane SPEC` (repeatable, below), `--pin
@@ -421,14 +427,23 @@ rejected before its price lookup and before any billable call, without echoing i
   small rises that add up to the minimum count as one; an Iteration with no judged Candidate is no
   improvement. A billable call that doesn't fit the Budget isn't made (an image call's Candidate
   is stored Failed, a Judge call's `judge-failed`, saying so), and the Lane stops after that
-  Iteration with `budget-exhausted` (unless its target was reached), and
-  cancelling the Run stops every Lane not yet stopped with `cancelled`, wherever the cancel
+  Iteration with `budget-exhausted` (unless its target was reached). A Judge or Optimizer call
+  the vendor answers with HTTP 401, 403 or 404 (a rejected key, no access to the model, or no
+  such model; Google reports a bad key as 400, which isn't caught) would be turned away every
+  time, so it isn't retried and the Lane stops: an Optimizer call at once with `optimizer-failed`
+  (no next Prompt, no next Iteration); a Judge call with `judge-failed` once the Iteration's calls
+  already made have settled (no image or Optimizer call, and no Judge call beyond retries of calls
+  already running; Candidates judged before keep their scores, and the best is still reported).
+  Each Lane stops on its own first such call, and the report shows the vendor's reason (the key
+  itself redacted) as the Lane's `stopDetail`. Cancelling the Run stops every Lane not yet
+  stopped with `cancelled`, wherever the cancel
   lands (mid-call, between Iterations, during preparation, or with Lanes still waiting their
   turn; if the process stops before that is recorded, the report still shows them `cancelled`); a
   Lane's first recorded stop reason stands. When several hold after the same Iteration, the first of
-  `cancelled`, `target-score`, `budget-exhausted`, `repeated-failures`, `patience`,
-  `iteration-limit` wins: a Lane that reached its target says so even if a call of that
-  Iteration didn't fit. The rules are frozen with the Run's request (`stopRules`).
+  `cancelled`, `optimizer-failed`, `judge-failed`, `target-score`, `budget-exhausted`,
+  `repeated-failures`, `patience`, `iteration-limit` wins: a Lane that reached its target says so
+  even if a call of that Iteration didn't fit. The rules are frozen with the Run's request
+  (`stopRules`).
 - **Lanes:** each `--lane NAME[,photos=N+N...][,prompt=FILE]` adds one Lane. `NAME` is `gemini`
   (`gemini-nano-banana-2.1`), `openai` or `openai:sunburst` (`gpt-image-2.5-sunburst`), or
   `openai:flare` (`gpt-image-2.5-flare`). `photos=1+3` limits the Lane to those Reference Photos
@@ -526,12 +541,15 @@ rejected before its price lookup and before any billable call, without echoing i
   estimate since it may follow a billed response; only `ERR_INVALID_URL`, thrown before
   anything is sent, at $0), an empty answer, an answer cut off at the
   output cap or one outside the schema (the reason names the first problem and where) is not.
+  A 401, 403 or 404 is `non-recoverable` (result in the call's record, at $0) and stops the Lane
+  (`judge-failed`, see "Stopping rules"); a 400 can be specific to one request, so it fails only
+  that judging.
   OpenAI reports a structured-output refusal as an empty answer, which Mastra 1.80 doesn't mark,
   so it shows as cause `failed` ("empty answer"), not `refused`. Mastra's
   own retries are off, so every attempt is a reserved, recorded call. A Candidate whose judging
   failed keeps its Likeness and is marked `judge-failed` with a `cause` (`refused`, `failed`,
-  `gave-up` after transient errors, or `budget-exhausted`) and the reason; it never gets a
-  made-up score.
+  `gave-up` after transient errors, `budget-exhausted`, or `non-recoverable`) and the reason; it
+  never gets a made-up score.
 - **Optimizer:** a Mastra agent with structured output, built as the Judge is (its vendor's AI SDK
   provider, the vendor's own API endpoint, the same keys, reasoning effort, deadlines per effort
   and output caps; ADR-0013); by default Claude Sonnet 5.5 (`anthropic/claude-sonnet-5-5`) at
@@ -546,7 +564,8 @@ rejected before its price lookup and before any billable call, without echoing i
   suggested fixes). Only that text is sent, never a photo; another Lane's Prompts never are. Its
   answer must be a Prompt of 1 to 32,000 characters (trimmed); an answer outside its schema, blank
   or longer is a failed call at its cost. When optimizing fails (a refusal, a failed call, retries
-  that ran out), the next Iteration keeps the last Prompt and records why (`source: "kept"`). Its
+  that ran out), the next Iteration keeps the last Prompt and records why (`source: "kept"`); a
+  401, 403 or 404 instead stops the Lane at once (`optimizer-failed`). Its
   calls are retried and costed like the Judge's; its estimate counts the instructions, schema and
   message text as the Judge's does, plus the whole output cap.
 - **Budget:** every billable call, retries included, is checked against the remaining Budget
@@ -606,7 +625,8 @@ rejected before its price lookup and before any billable call, without echoing i
   request the Run allows plus 1% (`perCallUsd`): four Iterations with Prompts of 32,000 characters
   and every Candidate judged with every note at its longest, no lower than any realistic request
   and far above a typical one; none for a Run of one Iteration). Then one JSON object on stdout,
-  with one entry per Lane (its model, stop reason, `iterations` begun — each has its Prompt
+  with one entry per Lane (its model, stop reason — with `stopDetail`, the vendor's reason, for
+  `optimizer-failed` and `judge-failed` — `iterations` begun — each has its Prompt
   stored; the last may have made no call, after a cancel or when its first calls didn't fit —
   `best` Candidate — `iteration` from 1, `candidate` index from 0 within it, and
   `score`, or null when none was judged — its `prompts`, one per Iteration with the Prompt, its

@@ -15,7 +15,7 @@ import {
   subjectPhotos,
 } from "./support/fake-image-models";
 import { FAKE_VERDICT, levels } from "./support/fake-judges";
-import { fakeVendorServer, vendorAnswer } from "./support/fake-vendors";
+import { fakeVendorServer, vendorAnswer, vendorError } from "./support/fake-vendors";
 
 const cli = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const withFakes = fileURLToPath(new URL("./support/run-cli-with-fakes.ts", import.meta.url));
@@ -227,6 +227,46 @@ test("a Run iterates: the Optimizer rewrites the Prompt until the target score s
       unknownCostCalls: 0,
     });
     const read = await invoke(cli, ["read", ...common, "--run-id", report.runId]);
+    expect(JSON.parse(read.stdout)).toEqual(report);
+  } finally {
+    await vendor.stop();
+  }
+}, 60_000);
+
+// End-to-end walkthrough of a rejected Optimizer key: the real Judge and Optimizer on a fake
+// Anthropic API that turns the Optimizer away, the fake Image Model, in a real process.
+test("a Run whose Optimizer key is rejected stops its Lane optimizer-failed and says why", async () => {
+  const key = "SENTINEL-ANTHROPIC-KEY-0123456789";
+  // The vendor quotes the key it rejected; the process must never print it.
+  const vendor = fakeVendorServer((_, body) =>
+    isOptimizerRequest(body)
+      ? vendorError(401, "authentication_error", `invalid x-api-key ${key}`)
+      : vendorAnswer("anthropic", JSON.stringify(FAKE_VERDICT)),
+  );
+  try {
+    const directory = await temporaryDirectory();
+    const common = ["--db", join(directory, "runs.db"), "--data-dir", join(directory, "data")];
+    const { stdout, lines, exitCode } = await invoke(
+      withFakes,
+      [...common, "--candidates", "1", ...subjectPhotos],
+      ["same", "same"],
+      { FAKE_ANTHROPIC_ORIGIN: vendor.origin, ANTHROPIC_API_KEY: key },
+    );
+    expect(exitCode).toBe(0);
+    const report = JSON.parse(stdout);
+    expect(report.lanes[0]).toMatchObject({
+      stopReason: "optimizer-failed",
+      stopDetail: "Optimizer HTTP 401: invalid x-api-key [redacted]",
+      iterations: 1,
+      best: { iteration: 1, candidate: 0 },
+    });
+    expect(stdout).not.toContain(key);
+    expect(lines.join("\n")).not.toContain(key);
+    // One Judge call and one Optimizer call; no second Iteration.
+    expect(vendor.requests).toHaveLength(2);
+    expect(report.lanes[0].candidates).toHaveLength(1);
+    const read = await invoke(cli, ["read", ...common, "--run-id", report.runId]);
+    expect(read.stdout).not.toContain(key);
     expect(JSON.parse(read.stdout)).toEqual(report);
   } finally {
     await vendor.stop();

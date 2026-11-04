@@ -21,8 +21,9 @@ const scored = (best: number | null): IterationResult => ({
   best,
   allFailed: false,
   budgetExhausted: false,
+  judgeRejected: null,
 });
-const failed: IterationResult = { best: null, allFailed: true, budgetExhausted: false };
+const failed: IterationResult = { ...scored(null), allFailed: true };
 const rules = DEFAULT_STOP_RULES;
 
 describe("improvement threshold", () => {
@@ -135,15 +136,28 @@ describe("laneStopReason", () => {
     expect(laneStopReason([ranOut, scored(6)], rules, false)).toBeNull();
   });
 
+  test("a Judge turned away for good in the last Iteration stops the Lane before every other rule", () => {
+    const limitOne = { ...rules, maxIterations: 1 };
+    const rejected = (best: number | null) => ({
+      ...scored(best),
+      judgeRejected: "Judge HTTP 401",
+    });
+    // It outranks a reached target, a call that didn't fit and the Iteration limit.
+    expect(laneStopReason([rejected(9)], limitOne, true)).toBe("judge-failed");
+    expect(laneStopReason([scored(5), rejected(null)], rules, false)).toBe("judge-failed");
+    // Only the last Iteration counts.
+    expect(laneStopReason([rejected(5), scored(6)], rules, false)).toBeNull();
+  });
+
   test("patience above the Iteration limit never fires, which turns it off", () => {
     const flat = Array.from({ length: 8 }, () => scored(5));
     expect(laneStopReason(flat, { ...rules, patience: 9 }, false)).toBe("iteration-limit");
   });
 });
 
-describe("an Iteration's stored evidence that the Budget ran out", () => {
+describe("an Iteration's stored evidence for the stopping rules", () => {
   const scoredOutcome: CandidateOutcome = { _tag: "Scored", similarity: 0.6, likeness: 5 };
-  test("is a Failed Candidate whose retry didn't fit, or a Judge call that didn't fit", () => {
+  test("the Budget ran out: a Failed Candidate whose retry didn't fit, or a Judge call that didn't fit", () => {
     const retry = {
       outcome: { _tag: "Failed", reason: "x", budgetExhausted: true } as const,
       judgement: null,
@@ -164,6 +178,22 @@ describe("an Iteration's stored evidence that the Budget ran out", () => {
     expect(iterationResult([retry]).budgetExhausted).toBe(true);
     expect(iterationResult([notJudged]).budgetExhausted).toBe(true);
     expect(iterationResult([failedOtherwise]).budgetExhausted).toBe(false);
+  });
+
+  test("a Judge call turned away for good shows in the Iteration, with the vendor's reason", () => {
+    const judgeFailure = (cause: "non-recoverable" | "failed") => ({
+      outcome: scoredOutcome,
+      judgement: {
+        _tag: "JudgeFailed",
+        rubricVersion: "rubric-v1",
+        cause,
+        reason: "Judge HTTP 401: invalid x-api-key",
+      } as const,
+    });
+    expect(
+      iterationResult([judgeFailure("failed"), judgeFailure("non-recoverable")]),
+    ).toMatchObject({ judgeRejected: "Judge HTTP 401: invalid x-api-key", budgetExhausted: false });
+    expect(iterationResult([judgeFailure("failed")]).judgeRejected).toBeNull();
   });
 });
 

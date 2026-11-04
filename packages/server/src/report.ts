@@ -95,9 +95,10 @@ const priceView = ({ _tag, ...age }: PriceQuote["source"]) => ({ source: _tag, .
  * Everything the operator needs about a Run, read back from the Run tables:
  * per Candidate its Iteration (from 1), index (from 0), Outcome, Likeness,
  * reason, stored image and generation costs, its judgement and Judge costs;
- * per Lane its stop reason, how many Iterations it began (each has its Prompt
- * stored; the last may have made no call, if the Run was cancelled or its
- * first calls didn't fit the Budget), its best
+ * per Lane its stop reason (with `stopDetail`, the vendor's reason, when the
+ * Optimizer or the Judge was turned away for good), how many Iterations it
+ * began (each has its Prompt stored; the last may have made no call, if the
+ * Run was cancelled or its first calls didn't fit the Budget), its best
  * Candidate, and its Prompt history (each Iteration's Prompt, where it came
  * from, and the cost of that Iteration's Optimizer calls, which wrote the
  * next Iteration's Prompt); the Judge, the Optimizer and the stopping rules;
@@ -172,6 +173,7 @@ export const runReport = (runId: string, workflowCancelled = false) =>
           model: lane.model,
           // A Run Mastra stored as cancelled whose cancel wasn't recorded yet.
           stopReason: lane.stopReason ?? (workflowCancelled ? "cancelled" : null),
+          ...(lane.stopDetail !== null && { stopDetail: lane.stopDetail }),
           iterations: prompts.length,
           best: bestCandidateView(own),
           prompts: prompts.map((prompt) => ({

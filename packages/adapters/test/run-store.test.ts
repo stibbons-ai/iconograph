@@ -594,6 +594,27 @@ describe("RunStore rows", () => {
     }
   });
 
+  test("a role's failure is stored with the vendor's reason, which no later stop overwrites", async () => {
+    const { runtime, run } = await storeWithRun(1);
+    try {
+      const reason = "Optimizer HTTP 401: invalid x-api-key";
+      // A role's failure needs the vendor's reason; no other stop takes one.
+      await expect(
+        run(withStore((store) => store.stopLane("run", 0, "judge-failed"))),
+      ).rejects.toThrow();
+      await expect(
+        run(withStore((store) => store.stopLane("run", 0, "patience", reason))),
+      ).rejects.toThrow();
+      await run(withStore((store) => store.stopLane("run", 0, "optimizer-failed", reason)));
+      await run(withStore((store) => store.stopLane("run", 0, "judge-failed", "Judge HTTP 403")));
+      await run(withStore((store) => store.cancelLanes("run")));
+      const [lane] = await run(withStore((store) => store.loadLanes("run")));
+      expect(lane).toMatchObject({ stopReason: "optimizer-failed", stopDetail: reason });
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
   test("reading needs an existing database file and doesn't create one", async () => {
     const directory = await temporaryDirectory();
     const missing = join(directory, "missing.db");

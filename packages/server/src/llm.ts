@@ -20,6 +20,7 @@ import {
   llmPriceModel,
   type LlmVendor,
   MAX_OUTPUT_TOKENS,
+  type LlmUnsuccessfulCall,
   parseLlmModel,
   type PriceQuote,
   Unpriced,
@@ -237,13 +238,21 @@ const NOT_SENT_CODES = new Set(["ENOTFOUND", "EAI_AGAIN", "ConnectionRefused", "
 const LOCAL_CODE = /^ERR_(INVALID_|.*_ARGS?(_|$))/;
 const NOT_SENT_LOCAL_CODES = new Set(["ERR_INVALID_URL"]);
 
+/**
+ * HTTP statuses that turn a role away for good: a rejected key (401), no
+ * access to the model (403), no such model or endpoint (404). A 400 can be
+ * specific to one request, so it only fails that call.
+ */
+const NON_RECOVERABLE_STATUSES = new Set([401, 403, 404]);
+
 /** An error's message, or a marker when the vendor sent an empty body. */
 const messageOf = (error: unknown) => errorMessage(error) || "(empty body)";
 
 /**
  * A thrown model error as a result:
  * - an HTTP error status (400 and up) is the vendor's answer, not billed, so
- *   $0: transient when retrying can help, else failed;
+ *   $0: non-recoverable for 401, 403 and 404 (`NonRecoverableCall`), else
+ *   transient when retrying can help, else failed;
  * - a local programming error (a TypeError, SyntaxError or RangeError with no
  *   code, or a Bun/Node argument code such as `ERR_INVALID_URL`) is failed and
  *   not retried: at $0 for `ERR_INVALID_URL`, thrown before anything is sent;
@@ -259,10 +268,13 @@ function classifyError(
   error: unknown,
   role: string,
   redact: (text: string) => string,
-): UnsuccessfulCall {
+): LlmUnsuccessfulCall {
   const status = statusOf(error);
   if (status !== undefined && status >= 400) {
-    return httpErrorResult(status, redact(`${role} HTTP ${status}: ${messageOf(error)}`));
+    const reason = redact(`${role} HTTP ${status}: ${messageOf(error)}`);
+    return NON_RECOVERABLE_STATUSES.has(status)
+      ? { kind: "non-recoverable", reason, costMicros: 0 }
+      : httpErrorResult(status, reason);
   }
   const code = codeOf(error);
   const local =
@@ -418,7 +430,7 @@ export const llmCaller = <A, S extends object>(options: LlmCallOptions<A, S>) =>
         Effect.match({
           // Mastra resolves an aborted generation with an empty result.
           onSuccess: (result) => (timeout.aborted ? timedOut : classify(result)),
-          onFailure: (error): UnsuccessfulCall => {
+          onFailure: (error): LlmUnsuccessfulCall => {
             const abortLike =
               hasErrorNamed(error, "TimeoutError") || hasErrorNamed(error, "AbortError");
             // Defensive, for a Mastra that rejects on abort instead of resolving: past the

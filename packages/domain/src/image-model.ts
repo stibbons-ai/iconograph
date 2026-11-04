@@ -85,6 +85,7 @@ export const SettledCallKind = Schema.Literals([
   "refused",
   "transient",
   "failed",
+  "non-recoverable",
 ]);
 
 /** What the Budget's ledger records of any billable call's result (Image Model, Judge or Optimizer). */

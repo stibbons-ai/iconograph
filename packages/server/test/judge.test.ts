@@ -26,7 +26,7 @@ import { MastraJudges } from "../src/judge";
 import type { LlmAgentsOptions } from "../src/llm";
 import { faceFixture } from "./support/fake-image-models";
 import { FAKE_VERDICT, judgesOnFakeAnthropic } from "./support/fake-judges";
-import { fakeVendorServer, vendorAnswer } from "./support/fake-vendors";
+import { fakeVendorServer, vendorAnswer, vendorError } from "./support/fake-vendors";
 
 const KEY = "SENTINEL-JUDGE-KEY-0123456789";
 
@@ -280,11 +280,7 @@ describe("Mastra Judge", () => {
   test.each([
     [
       "a 429",
-      async () =>
-        Response.json(
-          { type: "error", error: { type: "rate_limit_error", message: `slow down, ${KEY}` } },
-          { status: 429 },
-        ),
+      async () => vendorError(429, "rate_limit_error", `slow down, ${KEY}`),
       { kind: "transient", costMicros: 0, reason: expect.stringMatching(/HTTP 429.*\[redacted\]/) },
     ],
     [
@@ -440,7 +436,9 @@ describe("Mastra Judge", () => {
     ["status 429", { statusCode: 429 }, "transient", 0],
     ["status 400", { statusCode: 400 }, "failed", 0],
     ["status 503 on its cause", { cause: { statusCode: 503 } }, "transient", 0],
-    ["status 401 on its cause", { cause: { statusCode: 401 } }, "failed", 0],
+    ["status 401 on its cause", { cause: { statusCode: 401 } }, "non-recoverable", 0],
+    ["status 403", { statusCode: 403 }, "non-recoverable", 0],
+    ["status 404", { statusCode: 404 }, "non-recoverable", 0],
     ["no status", {}, "transient", null],
     [
       "status 200 whose body broke off (ECONNRESET)",

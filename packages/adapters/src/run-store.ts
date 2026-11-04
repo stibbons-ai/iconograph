@@ -8,6 +8,7 @@ import {
   Judgement,
   IdentityCeiling,
   type KeptReason,
+  LANE_STOPS_WITH_DETAIL,
   LaneStopReason,
   type LedgerEntry,
   PriceQuote,
@@ -36,6 +37,9 @@ export class RunStoreError extends Data.TaggedError("RunStoreError")<{
   notFound?: true;
 }> {}
 
+/** Literal strings as a SQL list for `IN (…)`; only for our own constants, never input. */
+const sqlList = (values: readonly string[]) => values.map((value) => `'${value}'`).join(", ");
+
 /**
  * Our own tables, in the same LibSQL file as Mastra's storage. Every row is
  * keyed by Run, Lane, Iteration and Candidate index (and purpose and attempt
@@ -60,8 +64,10 @@ CREATE TABLE IF NOT EXISTS lanes (
   model TEXT NOT NULL,
   price TEXT NOT NULL,
   character_references TEXT NOT NULL,
-  stop_reason TEXT CHECK (stop_reason IN (${LaneStopReason.literals.map((reason) => `'${reason}'`).join(", ")})),
-  PRIMARY KEY (run_id, lane)
+  stop_reason TEXT CHECK (stop_reason IN (${sqlList(LaneStopReason.literals)})),
+  stop_detail TEXT CHECK (stop_detail IS NULL OR length(stop_detail) > 0),
+  PRIMARY KEY (run_id, lane),
+  CHECK ((stop_detail IS NOT NULL) = (stop_reason IS NOT NULL AND stop_reason IN (${sqlList(LANE_STOPS_WITH_DETAIL)})))
 );
 CREATE TABLE IF NOT EXISTS iterations (
   run_id TEXT NOT NULL,
@@ -205,6 +211,8 @@ export interface NewLane {
 
 export interface LaneRecord extends NewLane {
   stopReason: LaneStopReason | null;
+  /** The vendor's reason a role was turned away for good, for `LANE_STOPS_WITH_DETAIL`; else null. */
+  stopDetail: string | null;
 }
 
 /** The Run's Judge as frozen at Run start; its model, effort and weights are in the request. */
@@ -323,11 +331,15 @@ export class RunStore extends Context.Service<
     readonly loadRun: (runId: string) => Effect.Effect<StoredRun, RunStoreError>;
     readonly createLane: (runId: string, lane: NewLane) => Effect.Effect<void, RunStoreError>;
     readonly loadLanes: (runId: string) => Effect.Effect<LaneRecord[], RunStoreError>;
-    /** Stop a Lane with `reason`, unless it already stopped (the first reason stands). */
+    /**
+     * Stop a Lane with `reason`, unless it already stopped (the first reason
+     * stands). `detail` is required with, and only with, `LANE_STOPS_WITH_DETAIL`.
+     */
     readonly stopLane: (
       runId: string,
       lane: number,
       reason: LaneStopReason,
+      detail?: string,
     ) => Effect.Effect<void, RunStoreError>;
     /** Stop every Lane of the Run that hasn't stopped yet with `cancelled`. */
     readonly cancelLanes: (runId: string) => Effect.Effect<void, RunStoreError>;
@@ -683,16 +695,19 @@ export const LibsqlRunStore = (databasePath: string, options: LibsqlRunStoreOpti
               price: decodePrice(row.price),
               characterReferences: decodeReferences(row.character_references),
               stopReason: decodeStopReason(row.stop_reason),
+              stopDetail: row.stop_detail === null ? null : String(row.stop_detail),
             }));
           }),
 
         // The first stop recorded stands: a later one (e.g. a step finishing after the Run was
-        // cancelled) never overwrites it.
-        stopLane: (runId, lane, reason) =>
+        // cancelled) never overwrites it, nor its detail. Every right-hand side reads the old row.
+        stopLane: (runId, lane, reason, detail) =>
           update(
             `Stopping Lane ${lane} of Run ${runId}`,
-            "UPDATE lanes SET stop_reason = COALESCE(stop_reason, ?) WHERE run_id = ? AND lane = ?",
-            [reason, runId, lane],
+            `UPDATE lanes SET stop_reason = COALESCE(stop_reason, ?),
+              stop_detail = CASE WHEN stop_reason IS NULL THEN ? ELSE stop_detail END
+              WHERE run_id = ? AND lane = ?`,
+            [reason, detail ?? null, runId, lane],
           ),
 
         cancelLanes: (runId) =>

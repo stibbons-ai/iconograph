@@ -4,10 +4,9 @@ import {
   type CallGate,
   callWithRetries,
   type RetryPolicy,
-  type UnsuccessfulCall,
   type Usage,
 } from "./image-model";
-import { boundedEstimate, Effort, LlmModelId, textTokens } from "./llm";
+import { boundedEstimate, Effort, LlmModelId, type LlmUnsuccessfulCall, textTokens } from "./llm";
 import type { LlmPricing, PriceQuote, Unpriced } from "./prices";
 import {
   byCriterion,
@@ -231,7 +230,7 @@ export type OptimizerCallResult =
       readonly usage: Usage | null;
       readonly costMicros: number | null;
     }
-  | UnsuccessfulCall;
+  | LlmUnsuccessfulCall;
 
 /** A language model writing a Lane's next Prompt (GLOSSARY "Optimizer"). */
 export interface Optimizer {
@@ -297,13 +296,15 @@ export const keptReason = (reason: string) =>
 
 /**
  * How optimizing ended: a new Prompt; the Lane keeps its last Prompt and says
- * why (a refusal, a failure, retries that ran out); or a retry didn't fit the
- * Budget, so the Lane stops.
+ * why (a refusal, a failure, retries that ran out); a retry didn't fit the
+ * Budget, so the Lane stops; or the vendor turned the call away for good
+ * (`NonRecoverableCall`), so the Lane stops with the vendor's reason.
  */
 export type Optimization =
   | { readonly kind: "rewritten"; readonly prompt: string }
   | { readonly kind: "kept"; readonly reason: KeptReason }
-  | { readonly kind: "budget-exhausted" };
+  | { readonly kind: "budget-exhausted" }
+  | { readonly kind: "non-recoverable"; readonly reason: string };
 
 export interface OptimizePromptOptions<E> {
   readonly optimizer: Optimizer;
@@ -318,7 +319,8 @@ export interface OptimizePromptOptions<E> {
  * One Optimizer call with retries (`callWithRetries`), as an `Optimization`:
  * a refusal, a failure (including an answer that isn't a usable Prompt) or
  * retries that ran out keep the Lane's last Prompt; a retry that didn't fit
- * the Budget is `budget-exhausted`.
+ * the Budget is `budget-exhausted`; a call the vendor turned away for good is
+ * `non-recoverable`.
  */
 export const optimizePrompt = <E>(options: OptimizePromptOptions<E>) => {
   const { optimizer, request, estimate, gate, policy } = options;
@@ -336,6 +338,8 @@ export const optimizePrompt = <E>(options: OptimizePromptOptions<E>) => {
           return { kind: "kept", reason: keptReason(`The Optimizer refused: ${result.reason}`) };
         case "failed":
           return { kind: "kept", reason: keptReason(result.reason) };
+        case "non-recoverable":
+          return { kind: "non-recoverable", reason: result.reason };
         case "gave-up":
           return result.budgetExhausted
             ? { kind: "budget-exhausted" }

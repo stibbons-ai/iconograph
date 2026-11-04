@@ -1,6 +1,6 @@
 import { Schema } from "effect";
 import { toMicros } from "./budget";
-import type { CallEstimate } from "./image-model";
+import type { CallEstimate, UnsuccessfulCall } from "./image-model";
 import type { LlmPricing } from "./prices";
 
 /**
@@ -86,6 +86,22 @@ const TIMEOUT_MS: { readonly [E in Effort]: number } = {
 export function callTimeoutMs(effort: Effort): number {
   return TIMEOUT_MS[effort];
 }
+
+/**
+ * A language-model call the vendor turned away for good: HTTP 401, 403 or 404
+ * (a rejected key, no access to the model, or no such model). Every later
+ * call of the role would be turned away too, so it is never retried and the
+ * Lane stops (`optimizer-failed`, `judge-failed`). Vendors don't bill it.
+ */
+export interface NonRecoverableCall {
+  readonly kind: "non-recoverable";
+  /** The vendor's answer, with the key redacted. */
+  readonly reason: string;
+  readonly costMicros: 0;
+}
+
+/** A language-model call that produced nothing usable: as an Image Model's, or turned away for good. */
+export type LlmUnsuccessfulCall = UnsuccessfulCall | NonRecoverableCall;
 
 /**
  * Text tokens assumed: ASCII at 2.5 characters per token (Anthropic's current
