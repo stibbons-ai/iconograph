@@ -2,7 +2,9 @@ import { Schema } from "effect";
 import { isWholeMicros, toMicros } from "./budget";
 import { MAX_REFERENCE_PHOTOS } from "./identity";
 import { JudgeConfig } from "./judge";
-import { TargetLook } from "./target-look";
+import { OptimizerConfig } from "./optimizer";
+import { StopRules } from "./stopping";
+import { MAX_PROMPT_LENGTH, TargetLook } from "./target-look";
 
 /** Issue #1 defaults: a $5 Budget and 3 Candidates per Iteration. */
 export const DEFAULT_BUDGET_USD = 5;
@@ -21,9 +23,6 @@ export const GEMINI_IMAGE_MODEL = "gemini-nano-banana-2.1";
 export const OPENAI_IMAGE_MODEL = "gpt-image-2.5-sunburst";
 /** The faster OpenAI Image Model, selectable per Lane. */
 export const OPENAI_FLARE_IMAGE_MODEL = "gpt-image-2.5-flare";
-
-/** The longest Prompt a Lane takes: OpenAI's image edit limit (32,000 characters). */
-export const MAX_PROMPT_LENGTH = 32_000;
 
 /** A number from 1, as photos and faces are numbered in the Reference Photo report. */
 const Ordinal = Schema.Int.check(Schema.isGreaterThanOrEqualTo(1));
@@ -90,6 +89,10 @@ export const RunRequest = Schema.Struct({
   lanes: Schema.Array(LaneRequest).check(Schema.isMinLength(1)),
   /** The Judge of every Lane's Candidates, with the Rubric weights frozen for the Run. */
   judge: JudgeConfig,
+  /** The Optimizer writing every Lane's next Prompt. */
+  optimizer: OptimizerConfig,
+  /** When each Lane stops iterating. */
+  stopRules: StopRules,
 }).check(
   Schema.makeFilter(
     ({ photos, lanes }: { photos: readonly string[]; lanes: readonly LaneRequest[] }) => {
@@ -103,10 +106,3 @@ export const RunRequest = Schema.Struct({
   ),
 );
 export type RunRequest = typeof RunRequest.Type;
-
-/**
- * Why a Lane stopped: `budget-exhausted` when a billable call didn't fit the
- * Budget, `iteration-limit` when it ran its Iterations (one, in M0).
- */
-export const LaneStopReason = Schema.Literals(["budget-exhausted", "iteration-limit"]);
-export type LaneStopReason = typeof LaneStopReason.Type;

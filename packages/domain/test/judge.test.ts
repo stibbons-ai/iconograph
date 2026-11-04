@@ -14,13 +14,13 @@ import {
   judgeCandidate,
   JUDGED_CRITERIA,
   judgeInstructions,
-  judgeTimeoutMs,
+  callTimeoutMs,
   JudgeVerdict,
   JUDGE_IMAGE_MAX_SIDE,
-  JUDGE_MAX_OUTPUT_TOKENS,
+  MAX_OUTPUT_TOKENS,
   judgeImageTokens,
   judgeMessage,
-  judgePriceModel,
+  llmPriceModel,
   pricingSpecs,
   RUBRIC_V1,
   type ReferenceCandidate,
@@ -162,10 +162,10 @@ describe("a Judge call's estimate", () => {
           targetLook,
         });
         const worst = worstInput(targetLook, imageTokens);
-        expect(usage.outputTokens).toBe(JUDGE_MAX_OUTPUT_TOKENS[effort]);
+        expect(usage.outputTokens).toBe(MAX_OUTPUT_TOKENS[effort]);
         expect(usage.inputTokens).toBeGreaterThanOrEqual(worst);
         expect(micros).toBeGreaterThanOrEqual(
-          Math.round((worst * 2e-6 + JUDGE_MAX_OUTPUT_TOKENS[effort] * 1e-5) * 1e6),
+          Math.round((worst * 2e-6 + MAX_OUTPUT_TOKENS[effort] * 1e-5) * 1e6),
         );
       }
     },
@@ -194,11 +194,9 @@ describe("a Judge call's estimate", () => {
 });
 
 test.each(["low", "medium", "high"] as const)(
-  "a %s-effort Judge call may run long enough to emit its whole output cap at 30 tokens/s",
+  "a %s-effort Judge or Optimizer call may run long enough to emit its whole output cap at 30 tokens/s",
   (effort) => {
-    expect(judgeTimeoutMs(effort)).toBeGreaterThanOrEqual(
-      (JUDGE_MAX_OUTPUT_TOKENS[effort] / 30) * 1000,
-    );
+    expect(callTimeoutMs(effort)).toBeGreaterThanOrEqual((MAX_OUTPUT_TOKENS[effort] / 30) * 1000);
   },
 );
 
@@ -296,10 +294,10 @@ describe("vendors", () => {
     expect(sameVendorLanes("openai/gpt-5.5", ["unknown-image-model"])).toEqual([]);
   });
 
-  test("a Judge is priced under LiteLLM's key for its model", () => {
-    expect(judgePriceModel("anthropic/claude-sonnet-5-5")).toBe("claude-sonnet-5-5");
-    expect(judgePriceModel("openai/gpt-5.5")).toBe("gpt-5.5");
-    expect(judgePriceModel("google/gemini-3.1-pro-preview")).toBe("gemini/gemini-3.1-pro-preview");
-    expect(judgePriceModel("xai/grok-5")).toBe("xai/grok-5");
+  test("a Judge or Optimizer is priced under LiteLLM's key for its model", () => {
+    expect(llmPriceModel("anthropic/claude-sonnet-5-5")).toBe("claude-sonnet-5-5");
+    expect(llmPriceModel("openai/gpt-5.5")).toBe("gpt-5.5");
+    expect(llmPriceModel("google/gemini-3.1-pro-preview")).toBe("gemini/gemini-3.1-pro-preview");
+    expect(llmPriceModel("xai/grok-5")).toBe("xai/grok-5");
   });
 });

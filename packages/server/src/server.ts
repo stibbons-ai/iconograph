@@ -137,8 +137,10 @@ export interface RunningServer {
    * Stop retrying the face models and abort a download in progress (an injected
    * `fetchModels` only until its response arrives), start no more restarts,
    * stop listening, then close Mastra, the Run database and the Image Models.
-   * Runs already running, or restarted by Mastra's lease timer, are not
-   * cancelled: closing storage under them fails them, and Mastra may log that.
+   * Cancelled Runs still unwinding get up to 10 s to record their Lanes
+   * `cancelled` first. Runs already running, or restarted by Mastra's lease
+   * timer, are not cancelled: closing storage under them fails them, and
+   * Mastra may log that.
    */
   stop(): Promise<void>;
 }
@@ -197,6 +199,7 @@ export async function startServer(
     dataDirectory,
     imageModels: models.imageModels,
     judges: models.judges,
+    optimizers: models.optimizers,
     faceEmbedder: faceEmbedder(dataDirectory),
     ...(dependencies.retryPolicy && { retryPolicy: dependencies.retryPolicy }),
     warn: log,

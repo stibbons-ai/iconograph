@@ -11,22 +11,26 @@ import type {
   FaceModelError,
   ImageModels,
   Judges,
+  Optimizers,
   RetryPolicy,
   RunRequest,
 } from "@iconograph/domain";
 import { Mastra } from "@mastra/core/mastra";
+import type { MastraCompositeStore } from "@mastra/core/storage";
 import { Effect, Layer, Logger, ManagedRuntime, Schema } from "effect";
 import { runReport } from "./report";
 import { defaultRunConfig, type PhotoPaths, RunConfig } from "./run-steps";
 import { EstimateEvent, type RunResult } from "./schemas";
 import { printWarning, type RunWarning, warningLogger } from "./warnings";
-import { createRunWorkflow, RUN_WORKFLOW_ID } from "./workflow";
+import { CancelRecordings, createRunWorkflow, RUN_WORKFLOW_ID } from "./workflow";
 
 export type { EstimateEvent, RunResult } from "./schemas";
 export { RUN_WORKFLOW_ID } from "./workflow";
 export type { PhotoPaths } from "./run-steps";
 export type { RunWarning } from "./warnings";
 
+/** How long closing waits for cancelled Runs to unwind and record their Lanes. */
+const CANCEL_SETTLE_TIMEOUT_MS = 10_000;
 const decodeEvent = Schema.decodeUnknownOption(EstimateEvent);
 
 export interface RunApplicationOptions {
@@ -36,6 +40,7 @@ export interface RunApplicationOptions {
   dataDirectory: string;
   imageModels: Layer.Layer<ImageModels>;
   judges: Layer.Layer<Judges>;
+  optimizers: Layer.Layer<Optimizers>;
   faceEmbedder: Layer.Layer<FaceEmbedder, FaceModelError>;
   retryPolicy?: RetryPolicy;
   /**
@@ -53,7 +58,8 @@ export interface RunApplicationOptions {
 
 /**
  * The Mastra instance with the Run workflow on one shared Effect runtime that
- * provides the Image Models, the Judges, face backend, Run tables and config.
+ * provides the Image Models, the Judges, the Optimizers, face backend, Run
+ * tables and config.
  */
 export async function createRunApplication(options: RunApplicationOptions) {
   const { databasePath, dataDirectory } = options;
@@ -63,6 +69,7 @@ export async function createRunApplication(options: RunApplicationOptions) {
       options.faceEmbedder,
       options.imageModels,
       options.judges,
+      options.optimizers,
       LibsqlRunStore(databasePath),
       Layer.succeed(RunConfig)({
         ...defaultRunConfig(dataDirectory),
@@ -72,21 +79,27 @@ export async function createRunApplication(options: RunApplicationOptions) {
       // Provided to the layers too, so logs while building or releasing them are warnings.
     ).pipe(Layer.provideMerge(Logger.layer([warningLogger(options.warn ?? printWarning)]))),
   );
+  const cancels = new CancelRecordings(options.warn ?? printWarning);
   /** Shut down in order; a later step still runs when an earlier one fails. */
   const closeAll = (shutdown?: () => Promise<void>) =>
     withCleanup(
-      async () => shutdown?.(),
+      // Cancelled Runs finish (and record their Lanes) only while Mastra and its storage run.
+      () => cancels.settled(CANCEL_SETTLE_TIMEOUT_MS),
       () =>
         withCleanup(
-          () => runtime.dispose(),
-          () => storage.close(),
+          async () => shutdown?.(),
+          () =>
+            withCleanup(
+              () => runtime.dispose(),
+              () => storage.close(),
+            ),
         ),
     );
   try {
     await storage.init();
     const mastra = new Mastra({
       storage,
-      workflows: { run: createRunWorkflow(runtime) },
+      workflows: { run: createRunWorkflow(runtime, cancels) },
       logger: false,
     });
     const workflows = await workflowsStore(storage);
@@ -129,7 +142,8 @@ export async function createRunApplication(options: RunApplicationOptions) {
         );
       },
       /** The stored Run: Candidates, Outcomes, costs and stop reasons. */
-      report: (runId: string) => runtime.runPromise(runReport(runId)),
+      report: async (runId: string) =>
+        runtime.runPromise(runReport(runId, await workflowCancelled(storage, runId))),
       /** Mastra's persisted snapshot of a Run's workflow. */
       async snapshot(runId: string) {
         const snapshot = await workflows.loadWorkflowSnapshot({
@@ -159,6 +173,17 @@ export class RunFailedError extends Error {
   }
 }
 
+/**
+ * Whether Mastra stored the Run as cancelled. Its report then shows every Lane
+ * without a stop reason as `cancelled`: recording them may have been cut off
+ * (the process stopped while the Run's steps unwound).
+ */
+async function workflowCancelled(storage: MastraCompositeStore, runId: string) {
+  const workflows = await workflowsStore(storage);
+  const snapshot = await workflows.loadWorkflowSnapshot({ workflowName: RUN_WORKFLOW_ID, runId });
+  return snapshot?.status === "canceled";
+}
+
 /** Read a stored Run's report without starting Mastra, the face models or any Image Model. */
 export async function readRunReport(databasePath: string, dataDirectory: string, runId: string) {
   const runtime = ManagedRuntime.make(
@@ -168,7 +193,20 @@ export async function readRunReport(databasePath: string, dataDirectory: string,
     ),
   );
   return withCleanup(
-    () => runtime.runPromise(runReport(runId)),
+    async () => {
+      // The Run tables first: they refuse a missing or outdated database file.
+      await runtime.runPromise(
+        Effect.gen(function* () {
+          yield* (yield* RunStore).loadRun(runId);
+        }),
+      );
+      const storage = createLocalStore(databasePath);
+      try {
+        return await runtime.runPromise(runReport(runId, await workflowCancelled(storage, runId)));
+      } finally {
+        await storage.close();
+      }
+    },
     () => runtime.dispose(),
   );
 }

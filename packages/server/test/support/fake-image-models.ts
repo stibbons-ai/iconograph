@@ -157,11 +157,11 @@ export function fakeImageModels(script: FakeScript, options: FakeOptions = {}): 
       usage: { outputImageTokens: 1680 },
     }),
     call: (request) =>
-      Effect.promise(async () => {
+      Effect.promise(async (signal) => {
         const call = requests.push({ ...request, model: id }) - 1;
         // Picked at once: other calls may arrive while `beforeAnswer` waits.
         const response = scripted(id, call);
-        await options.beforeAnswer?.(call, id);
+        await untilAborted(signal, options.beforeAnswer?.(call, id));
         return respond(response);
       }),
   });
@@ -182,4 +182,14 @@ export function fakeImageModels(script: FakeScript, options: FakeOptions = {}): 
       },
     }),
   };
+}
+
+/**
+ * Waits for `held` (a fake's `beforeAnswer`), as a vendor request does: it
+ * ends early, rejecting, when the call is interrupted (`signal` aborts).
+ */
+export async function untilAborted(signal: AbortSignal, held: Promise<void> | undefined) {
+  const { promise: aborted, reject } = Promise.withResolvers<never>();
+  signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+  await Promise.race([held, aborted]);
 }

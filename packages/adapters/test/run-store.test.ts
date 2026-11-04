@@ -5,6 +5,8 @@ import {
   byCriterion,
   checkBudget,
   DEFAULT_JUDGE,
+  DEFAULT_OPTIMIZER,
+  DEFAULT_STOP_RULES,
   DEFAULT_TARGET_LOOK,
   DEFAULT_WEIGHTS,
   JUDGED_CRITERIA,
@@ -15,8 +17,15 @@ import {
   type SettledCall,
   toMicros,
 } from "@iconograph/domain";
-import { Effect, type Layer, ManagedRuntime } from "effect";
-import { LibsqlRunStore, RunStore, type RunPhotoReport } from "../src/run-store";
+import { type Client, createClient } from "@libsql/client";
+import { Effect, Fiber, type Layer, ManagedRuntime } from "effect";
+import {
+  LibsqlRunStore,
+  type LibsqlRunStoreOptions,
+  RunStore,
+  type RunPhotoReport,
+} from "../src/run-store";
+import { localDatabaseUrl } from "../src/storage";
 import { tamper } from "./tamper";
 import { temporaryDirectories } from "./temporary-directory";
 
@@ -31,6 +40,8 @@ const request = (budgetUsd: number): RunRequest => ({
   candidates: 3,
   lanes: [{ model: "fake" }],
   judge: DEFAULT_JUDGE,
+  optimizer: DEFAULT_OPTIMIZER,
+  stopRules: DEFAULT_STOP_RULES,
 });
 
 const face = { face: 1, box: { x: 0, y: 0, width: 10, height: 10 }, score: 0.9 };
@@ -97,17 +108,61 @@ const createRun = (runId: string, budgetUsd: number) =>
         },
         characterReferences: [1],
       });
-      yield* store.createIteration({ runId, lane: 0, iteration: 1 }, "prompt");
+      yield* store.createIteration({ runId, lane: 0, iteration: 1 }, "prompt", {
+        source: "initial",
+      });
     }),
   );
 
 /** A store on a fresh database holding Run "run" with this Budget. */
-async function storeWithRun(budgetUsd: number) {
+async function storeWithRun(budgetUsd: number, options: LibsqlRunStoreOptions = {}) {
   const databasePath = join(await temporaryDirectory(), "runs.db");
-  const runtime = ManagedRuntime.make(LibsqlRunStore(databasePath) as Layer.Layer<RunStore>);
+  const runtime = ManagedRuntime.make(
+    LibsqlRunStore(databasePath, options) as Layer.Layer<RunStore>,
+  );
   const run = <A, E>(effect: Effect.Effect<A, E, RunStore>) => runtime.runPromise(effect);
   await run(createRun("run", budgetUsd));
   return { runtime, run, databasePath };
+}
+
+/**
+ * A client wrapper that reports the store's first SQLITE_BUSY (the store
+ * reconnects on each), optionally holding that reconnect until `release`, and
+ * counts statements.
+ */
+function lockWatch({ holdFirstReconnect = false } = {}) {
+  const busy = Promise.withResolvers<void>();
+  const released = Promise.withResolvers<void>();
+  let reconnects = 0;
+  const watch = {
+    /** Settles once a store action has met the lock. */
+    busy: busy.promise,
+    release: () => released.resolve(),
+    statements: 0,
+    wrapClient: (client: Client): Client =>
+      new Proxy(client, {
+        get(target, property) {
+          if (property === "reconnect") {
+            return async () => {
+              if (reconnects++ === 0) {
+                busy.resolve();
+                if (holdFirstReconnect) await released.promise;
+              }
+              return target.reconnect();
+            };
+          }
+          if (property === "execute") {
+            return (...args: Parameters<Client["execute"]>) => {
+              watch.statements++;
+              return target.execute(...args);
+            };
+          }
+          const value: unknown = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      }),
+  };
+  return watch;
 }
 
 const key = (
@@ -416,22 +471,147 @@ describe("RunStore rows", () => {
     }
   });
 
-  test("a database from before the Judge is refused, for writing and for reading", async () => {
-    const databasePath = join(await temporaryDirectory(), "old.db");
-    tamper(
-      databasePath,
+  test.each([
+    [
+      "the Judge",
       `CREATE TABLE cost_records (run_id TEXT, lane INTEGER, iteration INTEGER, candidate INTEGER,
          attempt INTEGER, PRIMARY KEY (run_id, lane, iteration, candidate, attempt))`,
-    );
+    ],
+    [
+      "the Optimizer",
+      `CREATE TABLE cost_records (run_id TEXT, lane INTEGER, iteration INTEGER,
+         candidate INTEGER NOT NULL, purpose TEXT NOT NULL, attempt INTEGER,
+         PRIMARY KEY (run_id, lane, iteration, candidate, purpose, attempt))`,
+    ],
+  ])("a database from before %s is refused, for writing and for reading", async (what, table) => {
+    const databasePath = join(await temporaryDirectory(), "old.db");
+    tamper(databasePath, table);
     for (const readOnly of [false, true]) {
       const runtime = ManagedRuntime.make(LibsqlRunStore(databasePath, { readOnly }));
       try {
         await expect(runtime.runPromise(withStore((store) => store.loadRun("x")))).rejects.toThrow(
-          "predate the Judge",
+          `predate ${what}`,
         );
       } finally {
         await runtime.dispose();
       }
+    }
+  });
+
+  test("a write that meets the database locked by another writer waits it out, and commits", async () => {
+    const watch = lockWatch();
+    const { runtime, run, databasePath } = await storeWithRun(1, watch);
+    // Mastra's storage: another client on the same file, in an interactive write transaction.
+    const other = createClient({ url: localDatabaseUrl(databasePath) });
+    const reader = createClient({ url: localDatabaseUrl(databasePath) });
+    try {
+      const transaction = await other.transaction("write");
+      const stopping = run(withStore((store) => store.stopLane("run", 0, "cancelled")));
+      await watch.busy;
+      await transaction.commit();
+      await stopping;
+      // Another connection sees the write: the store didn't leave it in an open transaction.
+      const { rows } = await reader.execute("SELECT stop_reason FROM lanes WHERE run_id = 'run'");
+      expect(rows[0]?.stop_reason).toBe("cancelled");
+    } finally {
+      other.close();
+      reader.close();
+      await runtime.dispose();
+    }
+  });
+
+  test("a write that comes while another is recovering from the lock waits, and both commit", async () => {
+    // The first write meets the lock; its connection is left in a transaction that would
+    // swallow any write until the store reconnects, which is held here.
+    const watch = lockWatch({ holdFirstReconnect: true });
+    const { runtime, run, databasePath } = await storeWithRun(1, watch);
+    const other = createClient({ url: localDatabaseUrl(databasePath) });
+    const reader = createClient({ url: localDatabaseUrl(databasePath) });
+    try {
+      const transaction = await other.transaction("write");
+      const first = run(withStore((store) => store.stopLane("run", 0, "patience")));
+      await watch.busy;
+      await transaction.commit();
+      const second = run(
+        withStore((store) =>
+          store.createIteration({ runId: "run", lane: 0, iteration: 2 }, "next", {
+            source: "optimizer",
+          }),
+        ),
+      );
+      // A store that let the second write through would finish it now, on the leaked
+      // connection; one that makes it wait never does, so this waits out a bound.
+      await Promise.race([second, Bun.sleep(500)]);
+      watch.release();
+      await Promise.all([first, second]);
+      const lanes = await reader.execute("SELECT stop_reason FROM lanes WHERE run_id = 'run'");
+      const iterations = await reader.execute(
+        "SELECT iteration FROM iterations WHERE run_id = 'run' ORDER BY iteration",
+      );
+      expect(lanes.rows[0]?.stop_reason).toBe("patience");
+      expect(iterations.rows.map((row) => Number(row.iteration))).toEqual([1, 2]);
+    } finally {
+      other.close();
+      reader.close();
+      await runtime.dispose();
+    }
+  });
+
+  test("a write interrupted while it waits for the lock is never made", async () => {
+    const watch = lockWatch();
+    const { runtime, databasePath } = await storeWithRun(1, watch);
+    const other = createClient({ url: localDatabaseUrl(databasePath) });
+    const reader = createClient({ url: localDatabaseUrl(databasePath) });
+    try {
+      const transaction = await other.transaction("write");
+      const fiber = runtime.runFork(withStore((store) => store.stopLane("run", 0, "cancelled")));
+      await watch.busy;
+      await runtime.runPromise(Fiber.interrupt(fiber));
+      const statements = watch.statements;
+      await transaction.commit();
+      // No event marks an attempt that never comes: give a retry (every 20 ms) time to show.
+      await Bun.sleep(100);
+      expect(watch.statements).toBe(statements);
+      const { rows } = await reader.execute("SELECT stop_reason FROM lanes WHERE run_id = 'run'");
+      expect(rows[0]?.stop_reason).toBeNull();
+    } finally {
+      other.close();
+      reader.close();
+      await runtime.dispose();
+    }
+  });
+
+  test("a Lane's first stop reason stands", async () => {
+    const { runtime, run } = await storeWithRun(1);
+    try {
+      await run(withStore((store) => store.stopLane("run", 0, "cancelled")));
+      await run(withStore((store) => store.stopLane("run", 0, "iteration-limit")));
+      await run(withStore((store) => store.cancelLanes("run")));
+      const [lane] = await run(withStore((store) => store.loadLanes("run")));
+      expect(lane!.stopReason).toBe("cancelled");
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  test("a role's failure is stored with the vendor's reason, which no later stop overwrites", async () => {
+    const { runtime, run } = await storeWithRun(1);
+    try {
+      const reason = "Optimizer HTTP 401: invalid x-api-key";
+      // A role's failure needs the vendor's reason; no other stop takes one.
+      await expect(
+        run(withStore((store) => store.stopLane("run", 0, "judge-failed"))),
+      ).rejects.toThrow();
+      await expect(
+        run(withStore((store) => store.stopLane("run", 0, "patience", reason))),
+      ).rejects.toThrow();
+      await run(withStore((store) => store.stopLane("run", 0, "optimizer-failed", reason)));
+      await run(withStore((store) => store.stopLane("run", 0, "judge-failed", "Judge HTTP 403")));
+      await run(withStore((store) => store.cancelLanes("run")));
+      const [lane] = await run(withStore((store) => store.loadLanes("run")));
+      expect(lane).toMatchObject({ stopReason: "optimizer-failed", stopDetail: reason });
+    } finally {
+      await runtime.dispose();
     }
   });
 

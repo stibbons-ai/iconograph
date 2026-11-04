@@ -3,16 +3,16 @@ import { fileURLToPath } from "node:url";
 import {
   DEFAULT_TARGET_LOOK,
   type EncodedImage,
-  JUDGE_MAX_OUTPUT_TOKENS,
+  type Effort,
+  MAX_OUTPUT_TOKENS,
   CURRENT_RUBRIC,
   judgeImageTokens,
   judgeInstructions,
   judgeMessage,
-  judgeVendor,
+  llmVendor,
   JudgeVerdict,
   type Judge,
   type JudgeCallResult,
-  type JudgeEffort,
   type JudgeRequest,
   Judges,
   type PriceQuote,
@@ -22,10 +22,16 @@ import { MastraLanguageModelV2Mock } from "@mastra/core/test-utils/llm-mock";
 import { Effect, type Layer } from "effect";
 import { toMastraSchema } from "@iconograph/adapters";
 import { withEnvironment } from "../../adapters/test/git-environment";
-import { MastraJudges, type MastraJudgesOptions } from "../src/judge";
+import { MastraJudges } from "../src/judge";
+import type { LlmAgentsOptions } from "../src/llm";
 import { faceFixture } from "./support/fake-image-models";
-import { FAKE_VERDICT, judgesOnFakeAnthropic } from "./support/fake-judges";
-import { fakeVendorServer, vendorAnswer } from "./support/fake-vendors";
+import { FAKE_VERDICT, judgesOnFakeVendor } from "./support/fake-judges";
+import {
+  fakeVendorServer,
+  googleBadKeyBody,
+  vendorAnswer,
+  vendorError,
+} from "./support/fake-vendors";
 
 const KEY = "SENTINEL-JUDGE-KEY-0123456789";
 
@@ -59,7 +65,7 @@ const allKeys = {
 const getJudge = (
   layer: Layer.Layer<Judges>,
   model = "anthropic/claude-sonnet-5-5",
-  effort: JudgeEffort = "low",
+  effort: Effort = "low",
   recorded?: PriceQuote,
 ) =>
   Effect.runPromise(
@@ -69,7 +75,7 @@ const getJudge = (
   );
 
 /** The real provider-built Judges, their network replaced by `network`. */
-const providerJudges = (network: NonNullable<MastraJudgesOptions["fetch"]>, timeoutMs?: number) =>
+const providerJudges = (network: NonNullable<LlmAgentsOptions["fetch"]>, timeoutMs?: number) =>
   MastraJudges({
     env: allKeys,
     ...(timeoutMs !== undefined && { timeoutMs }),
@@ -114,7 +120,7 @@ function judges(
       return mock as unknown as MastraModelConfig;
     },
   });
-  const get = (model?: string, effort?: JudgeEffort, recorded?: PriceQuote) =>
+  const get = (model?: string, effort?: Effort, recorded?: PriceQuote) =>
     getJudge(layer, model, effort, recorded);
   return { get, calls, keys, lookups };
 }
@@ -185,7 +191,7 @@ describe("Mastra Judge", () => {
         },
       },
     });
-    expect(sent!.maxOutputTokens).toBe(JUDGE_MAX_OUTPUT_TOKENS.low);
+    expect(sent!.maxOutputTokens).toBe(MAX_OUTPUT_TOKENS.low);
   });
 
   test.each([
@@ -222,7 +228,7 @@ describe("Mastra Judge", () => {
       const sent: { url: string; init: BunFetchRequestInit }[] = [];
       const layer = providerJudges(async (input, init) => {
         sent.push({ url: String(input), init });
-        return vendorAnswer(judgeVendor(model)!, JSON.stringify(FAKE_VERDICT));
+        return vendorAnswer(llmVendor(model)!, JSON.stringify(FAKE_VERDICT));
       });
       const request = await judgeRequest();
       const result = await withEnvironment({ [variable]: "https://proxy.example/v1" }, async () =>
@@ -266,12 +272,12 @@ describe("Mastra Judge", () => {
     "%s: an answer cut off at the output cap fails the judging at its cost",
     async (model) => {
       const layer = providerJudges(async () =>
-        vendorAnswer(judgeVendor(model)!, '{"levels": {"resemblance": 4', true),
+        vendorAnswer(llmVendor(model)!, '{"levels": {"resemblance": 4', true),
       );
       expect(await call(await getJudge(layer, model))).toMatchObject({
         kind: "failed",
         costMicros: 21_000,
-        reason: `The Judge hit its ${JUDGE_MAX_OUTPUT_TOKENS.low}-token output cap, reasoning included, before finishing its answer`,
+        reason: `The Judge hit its ${MAX_OUTPUT_TOKENS.low}-token output cap, reasoning included, before finishing its answer`,
       });
     },
   );
@@ -279,11 +285,7 @@ describe("Mastra Judge", () => {
   test.each([
     [
       "a 429",
-      async () =>
-        Response.json(
-          { type: "error", error: { type: "rate_limit_error", message: `slow down, ${KEY}` } },
-          { status: 429 },
-        ),
+      async () => vendorError(429, "rate_limit_error", `slow down, ${KEY}`),
       { kind: "transient", costMicros: 0, reason: expect.stringMatching(/HTTP 429.*\[redacted\]/) },
     ],
     [
@@ -317,7 +319,7 @@ describe("Mastra Judge", () => {
     const vendor = fakeVendorServer(() => vendorAnswer("anthropic", JSON.stringify(FAKE_VERDICT)));
     try {
       const result = await withEnvironment({ OPENAI_API_KEY: KEY }, async () =>
-        call(await getJudge(judgesOnFakeAnthropic(vendor.origin), "openai/gpt-5.5")),
+        call(await getJudge(judgesOnFakeVendor(vendor.origin), "openai/gpt-5.5")),
       );
       // Failed at $0 and not retried, so no test can reach a live vendor by accident.
       expect(result).toMatchObject({ kind: "failed", costMicros: 0 });
@@ -438,8 +440,30 @@ describe("Mastra Judge", () => {
     ["status 529", { statusCode: 529 }, "transient", 0],
     ["status 429", { statusCode: 429 }, "transient", 0],
     ["status 400", { statusCode: 400 }, "failed", 0],
+    [
+      "status 400 whose body on its cause is Google's API_KEY_INVALID",
+      {
+        cause: {
+          statusCode: 400,
+          responseBody: JSON.stringify(
+            googleBadKeyBody("API key not valid. Please pass a valid API key."),
+          ),
+        },
+      },
+      "non-recoverable",
+      0,
+    ],
+    [
+      "status 400 whose body isn't JSON",
+      { statusCode: 400, responseBody: "<html>Bad Request</html>" },
+      "failed",
+      0,
+    ],
+    ["status 402", { statusCode: 402 }, "non-recoverable", 0],
     ["status 503 on its cause", { cause: { statusCode: 503 } }, "transient", 0],
-    ["status 401 on its cause", { cause: { statusCode: 401 } }, "failed", 0],
+    ["status 401 on its cause", { cause: { statusCode: 401 } }, "non-recoverable", 0],
+    ["status 403", { statusCode: 403 }, "non-recoverable", 0],
+    ["status 404", { statusCode: 404 }, "non-recoverable", 0],
     ["no status", {}, "transient", null],
     [
       "status 200 whose body broke off (ECONNRESET)",
@@ -451,7 +475,7 @@ describe("Mastra Judge", () => {
       null,
     ],
   ] as const)(
-    "an error with %s is %s at cost %s, made once, and never quotes the key",
+    "an error with %s (%o) is %s at cost %p, made once, and never quotes the key",
     async (_, fields, kind, costMicros) => {
       const fake = judges(async () => {
         throw Object.assign(new Error(`upstream said no to ${KEY}`), {

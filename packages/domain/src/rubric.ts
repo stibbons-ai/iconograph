@@ -145,9 +145,12 @@ export function levelScore(level: number): number {
 
 const Level = Schema.Int.check(Schema.isBetween({ minimum: MIN_LEVEL, maximum: MAX_LEVEL }));
 
+/** The longest visible issue or suggested Prompt fix, and how many of each a verdict holds. */
+export const MAX_NOTE_LENGTH = 500;
+export const MAX_NOTES = 10;
+
 /** A visible issue or a suggested Prompt fix: one short sentence. */
-const Note = Schema.String.check(Schema.isNonEmpty(), Schema.isMaxLength(500));
-const MAX_NOTES = 10;
+const Note = Schema.String.check(Schema.isNonEmpty(), Schema.isMaxLength(MAX_NOTE_LENGTH));
 
 /**
  * What the Judge returns (LLM-facing, so finite numbers only): a level 1–5
@@ -243,10 +246,19 @@ const Score = Schema.Finite.check(Schema.isBetween({ minimum: 0, maximum: MAX_LI
 /**
  * Why the Judge's work on a Candidate failed: the Judge `refused`; the call
  * `failed` (an error not worth retrying, or an answer outside the verdict
- * schema); it `gave-up` after transient errors; or a call or retry was
- * `budget-exhausted` (didn't fit the Budget, so it wasn't made).
+ * schema); it `gave-up` after transient errors; a call or retry was
+ * `budget-exhausted` (didn't fit the Budget, so it wasn't made); or the
+ * vendor turned the call away for good, `non-recoverable` (HTTP 401, 402,
+ * 403 or 404, or Google's 400 for a bad key), which stops the Lane
+ * (`judge-failed`).
  */
-export const JudgeFailure = Schema.Literals(["refused", "failed", "gave-up", "budget-exhausted"]);
+export const JudgeFailure = Schema.Literals([
+  "refused",
+  "failed",
+  "gave-up",
+  "budget-exhausted",
+  "non-recoverable",
+]);
 export type JudgeFailure = typeof JudgeFailure.Type;
 
 export const RubricVersion = Schema.Literals(RUBRIC_VERSIONS);

@@ -42,9 +42,14 @@ export const CandidateOutcome = Schema.Union([
   Schema.TaggedStruct("Refused", { reason: Schema.String }),
   /**
    * The Candidate couldn't be produced or scored: the call errored after any
-   * retries, a retry didn't fit the Budget, or the response or image was unusable.
+   * retries, its first call or a retry didn't fit the Budget
+   * (`budgetExhausted`, so the Lane stops), or the response or image was
+   * unusable.
    */
-  Schema.TaggedStruct("Failed", { reason: Schema.String }),
+  Schema.TaggedStruct("Failed", {
+    reason: Schema.String,
+    budgetExhausted: Schema.optionalKey(Schema.Literal(true)),
+  }),
   /** No face, or the best face is below the Identity Gate; never judged. */
   Schema.TaggedStruct("Gated", {
     reason: Schema.Literals(["no-face", "below-gate"]),

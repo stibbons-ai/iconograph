@@ -14,8 +14,8 @@ import {
   type FakeScript,
   subjectPhotos,
 } from "./support/fake-image-models";
-import { FAKE_VERDICT } from "./support/fake-judges";
-import { fakeVendorServer, vendorAnswer } from "./support/fake-vendors";
+import { FAKE_VERDICT, levels } from "./support/fake-judges";
+import { fakeVendorServer, vendorAnswer, vendorError } from "./support/fake-vendors";
 
 const cli = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const withFakes = fileURLToPath(new URL("./support/run-cli-with-fakes.ts", import.meta.url));
@@ -80,9 +80,14 @@ test("a Run prints its estimate, then a report that read can reproduce", async (
     ],
     ["same", "different"],
   );
-  expect(started.lines.map((line) => JSON.parse(line))).toEqual([
-    expect.objectContaining({ event: "estimate", estimatedUsd: 0.33, budgetUsd: 0.25 }),
+  // The estimate quotes every Iteration (8 by default) and the 7 Optimizer calls between them.
+  const events = started.lines.map((line) => JSON.parse(line));
+  expect(events).toEqual([
+    expect.objectContaining({ event: "estimate", maxIterations: 8, budgetUsd: 0.25 }),
   ]);
+  const [{ estimatedUsd, optimizer }] = events;
+  expect(optimizer.perCallUsd).toBeGreaterThanOrEqual(0.02);
+  expect(estimatedUsd).toBeCloseTo(8 * 0.33 + 7 * optimizer.perCallUsd, 10);
   expect(started.exitCode).toBe(0);
   const report = JSON.parse(started.stdout);
   expect(report.targetLook.background).toBe("dark navy backdrop");
@@ -91,16 +96,23 @@ test("a Run prints its estimate, then a report that read can reproduce", async (
     stopReason: "budget-exhausted",
     characterReferences: [2, 1],
   });
+  // The third Candidate's call didn't fit the Budget: it is stored Failed, saying so.
   expect(report.lanes[0].candidates.map(({ outcome }: { outcome: string }) => outcome)).toEqual([
     "Scored",
     "Gated",
+    "Failed",
   ]);
+  expect(report.lanes[0].candidates[2]).toMatchObject({ budgetExhausted: true, calls: [] });
   expect(report.totals.estimatedUsd).toBeLessThanOrEqual(0.25);
-  // The Scored Candidate was judged by the default Judge; the Gated one never was.
+  // The Scored Candidate was judged by the default Judge; the others never were.
   expect(report.judge).toMatchObject({ model: "anthropic/claude-sonnet-5-5", effort: "low" });
   expect(
     report.lanes[0].candidates.map(({ judgement }: { judgement: unknown }) => judgement),
-  ).toEqual([expect.objectContaining({ status: "judged", rubricVersion: "rubric-v1" }), null]);
+  ).toEqual([
+    expect.objectContaining({ status: "judged", rubricVersion: "rubric-v1" }),
+    null,
+    null,
+  ]);
 
   const read = await invoke(cli, ["read", ...common, "--run-id", report.runId]);
   expect(read.lines).toEqual([]);
@@ -118,7 +130,7 @@ test("a Run's Judge sends its key and the photos to the Anthropic API, whatever 
     const common = ["--db", join(directory, "runs.db"), "--data-dir", join(directory, "data")];
     const { stdout, exitCode } = await invoke(
       withFakes,
-      [...common, "--candidates", "1", ...subjectPhotos],
+      [...common, "--candidates", "1", "--max-iterations", "1", ...subjectPhotos],
       ["same"],
       {
         FAKE_ANTHROPIC_ORIGIN: vendor.origin,
@@ -154,12 +166,155 @@ test("a Run's Judge sends its key and the photos to the Anthropic API, whatever 
   }
 }, 60_000);
 
+/** Whether a request to the fake Anthropic API is the Optimizer's: its output schema asks for a Prompt. */
+const isOptimizerRequest = (body: string) =>
+  "prompt" in (JSON.parse(body).output_config?.format?.schema?.properties ?? {});
+
+// End-to-end walkthrough of the loop: the real Judge and Optimizer on a fake Anthropic API, the
+// fake Image Model, in a real process; then the same report read back by a second process.
+test("a Run iterates: the Optimizer rewrites the Prompt until the target score stops the Lane", async () => {
+  const key = "SENTINEL-ANTHROPIC-KEY-0123456789";
+  const better = "A sharper studio headshot of the person in the reference photos.";
+  let judged = 0;
+  const vendor = fakeVendorServer((_, body) => {
+    if (isOptimizerRequest(body)) {
+      return vendorAnswer("anthropic", JSON.stringify({ prompt: better }));
+    }
+    // The first Candidate is judged at level 4 everywhere, the second at level 5.
+    judged++;
+    const verdict = judged === 1 ? FAKE_VERDICT : { ...FAKE_VERDICT, levels: levels(5) };
+    return vendorAnswer("anthropic", JSON.stringify(verdict));
+  });
+  try {
+    const directory = await temporaryDirectory();
+    const common = ["--db", join(directory, "runs.db"), "--data-dir", join(directory, "data")];
+    const { stdout, exitCode } = await invoke(
+      withFakes,
+      [...common, "--candidates", "1", ...subjectPhotos],
+      ["same", "same"],
+      { FAKE_ANTHROPIC_ORIGIN: vendor.origin, ANTHROPIC_API_KEY: key },
+    );
+    expect(exitCode).toBe(0);
+    const report = JSON.parse(stdout);
+    const [lane] = report.lanes;
+    expect(lane).toMatchObject({
+      stopReason: "target-score",
+      iterations: 2,
+      best: { iteration: 2, candidate: 0 },
+    });
+    expect(
+      lane.prompts.map(({ prompt, source }: { prompt: string; source: string }) => [
+        prompt,
+        source,
+      ]),
+    ).toEqual([
+      [expect.stringContaining("headshot"), "initial"],
+      [better, "optimizer"],
+    ]);
+    expect(report.optimizer).toMatchObject({
+      model: "anthropic/claude-sonnet-5-5",
+      effort: "medium",
+    });
+    // The Optimizer's call went at medium effort, with the key, and without any image.
+    const optimizerCalls = vendor.requests.filter(({ body }) => isOptimizerRequest(body));
+    const sent = JSON.parse(optimizerCalls[0]!.body);
+    expect(sent).toMatchObject({ output_config: { effort: "medium" } });
+    expect(optimizerCalls[0]!.body).not.toContain('"type":"image"');
+    expect(optimizerCalls[0]!.headers.get("x-api-key")).toBe(key);
+    // Iteration 1's Optimizer call, billed: 9,000 input and 300 output tokens at the fake price.
+    expect(lane.prompts[0].optimizerCost).toMatchObject({
+      actualUsd: 0.004875,
+      unknownCostCalls: 0,
+    });
+    const read = await invoke(cli, ["read", ...common, "--run-id", report.runId]);
+    expect(JSON.parse(read.stdout)).toEqual(report);
+  } finally {
+    await vendor.stop();
+  }
+}, 60_000);
+
+// End-to-end walkthrough of a rejected Optimizer key: the real Judge and Optimizer on a fake
+// Anthropic API that turns the Optimizer away, the fake Image Model, in a real process.
+test("a Run whose Optimizer key is rejected stops its Lane optimizer-failed and says why", async () => {
+  const key = "SENTINEL-ANTHROPIC-KEY-0123456789";
+  // The vendor quotes the key it rejected; the process must never print it.
+  const vendor = fakeVendorServer((_, body) =>
+    isOptimizerRequest(body)
+      ? vendorError(401, "authentication_error", `invalid x-api-key ${key}`)
+      : vendorAnswer("anthropic", JSON.stringify(FAKE_VERDICT)),
+  );
+  try {
+    const directory = await temporaryDirectory();
+    const common = ["--db", join(directory, "runs.db"), "--data-dir", join(directory, "data")];
+    const { stdout, lines, exitCode } = await invoke(
+      withFakes,
+      [...common, "--candidates", "1", ...subjectPhotos],
+      ["same", "same"],
+      { FAKE_ANTHROPIC_ORIGIN: vendor.origin, ANTHROPIC_API_KEY: key },
+    );
+    expect(exitCode).toBe(0);
+    const report = JSON.parse(stdout);
+    expect(report.lanes[0]).toMatchObject({
+      stopReason: "optimizer-failed",
+      stopDetail: "Optimizer HTTP 401: invalid x-api-key [redacted]",
+      iterations: 1,
+      best: { iteration: 1, candidate: 0 },
+    });
+    expect(stdout).not.toContain(key);
+    expect(lines.join("\n")).not.toContain(key);
+    // One Judge call and one Optimizer call; no second Iteration.
+    expect(vendor.requests).toHaveLength(2);
+    expect(report.lanes[0].candidates).toHaveLength(1);
+    const read = await invoke(cli, ["read", ...common, "--run-id", report.runId]);
+    expect(read.stdout).not.toContain(key);
+    expect(JSON.parse(read.stdout)).toEqual(report);
+  } finally {
+    await vendor.stop();
+  }
+}, 60_000);
+
+test("the stopping rules and the Optimizer are taken from the command line", async () => {
+  const directory = await temporaryDirectory();
+  const common = ["--db", join(directory, "runs.db"), "--data-dir", join(directory, "data")];
+  const { stdout, exitCode } = await invoke(
+    withFakes,
+    [
+      ...common,
+      "--candidates",
+      "1",
+      "--target-score",
+      "9.5",
+      "--patience",
+      "2",
+      "--min-improvement",
+      "0.4",
+      "--max-iterations",
+      "1",
+      "--optimizer-model",
+      "openai/gpt-5.5",
+      "--optimizer-effort",
+      "low",
+      ...subjectPhotos,
+    ],
+    ["same"],
+  );
+  expect(exitCode).toBe(0);
+  const report = JSON.parse(stdout);
+  expect(report.stopRules).toEqual({
+    targetScore: 9.5,
+    patience: 2,
+    minImprovement: 0.4,
+    maxIterations: 1,
+  });
+  expect(report.optimizer).toMatchObject({ model: "openai/gpt-5.5", effort: "low" });
+}, 60_000);
+
 test("engine warnings, even while shutting down, are JSON lines on stderr; stdout stays the report", async () => {
   const directory = await temporaryDirectory();
   const common = ["--db", join(directory, "runs.db"), "--data-dir", join(directory, "data")];
   const { stdout, lines, exitCode } = await invoke(
     withFakes,
-    [...common, "--candidates", "1", ...subjectPhotos],
+    [...common, "--candidates", "1", "--max-iterations", "1", ...subjectPhotos],
     ["same"],
     { FAKE_RELEASE_WARNING: "Releasing the face backend failed" },
   );
@@ -181,6 +336,8 @@ test("--lane runs a Gemini and an OpenAI Lane, each with its photos and Prompt; 
     [
       ...common,
       "--candidates",
+      "1",
+      "--max-iterations",
       "1",
       "--lane",
       "gemini",
@@ -211,11 +368,16 @@ test("--lane runs a Gemini and an OpenAI Lane, each with its photos and Prompt; 
     characterReferences: [2, 1],
     candidates: [expect.objectContaining({ outcome: "Scored" })],
   });
-  expect(report.lanes[0].initialPrompt).toContain("headshot");
+  expect(report.lanes[0].prompts[0].prompt).toContain("headshot");
   expect(report.lanes[1]).toMatchObject({
     model: "gpt-image-2.5-flare",
     stopReason: "iteration-limit",
-    initialPrompt: "A studio headshot of the person in the reference photos.",
+    prompts: [
+      expect.objectContaining({
+        prompt: "A studio headshot of the person in the reference photos.",
+        source: "initial",
+      }),
+    ],
     characterReferences: [2],
     candidates: [expect.objectContaining({ outcome: "Gated" })],
   });
@@ -232,6 +394,8 @@ test("--lane openai and openai:sunburst drive Sunburst; a prompt path may hold c
       ...common,
       "--candidates",
       "1",
+      "--max-iterations",
+      "1",
       "--lane",
       `openai,photos=1,prompt=${prompt}`,
       "--lane",
@@ -247,7 +411,7 @@ test("--lane openai and openai:sunburst drive Sunburst; a prompt path may hold c
     "gpt-image-2.5-sunburst",
   ]);
   expect(report.lanes[0]).toMatchObject({
-    initialPrompt: "A bright studio headshot.",
+    prompts: [expect.objectContaining({ prompt: "A bright studio headshot." })],
     characterReferences: [1],
   });
 }, 60_000);
@@ -260,6 +424,8 @@ test("the Judge's model and effort are taken from the command line", async () =>
     [
       ...common,
       "--candidates",
+      "1",
+      "--max-iterations",
       "1",
       "--judge-model",
       "google/gemini-3.1-pro-preview",

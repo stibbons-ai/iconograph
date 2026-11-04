@@ -14,15 +14,19 @@ import {
   DEFAULT_BUDGET_USD,
   DEFAULT_CANDIDATES,
   DEFAULT_JUDGE,
+  DEFAULT_OPTIMIZER,
+  DEFAULT_STOP_RULES,
   type FaceEmbedder,
   type FaceModelError,
   GEMINI_IMAGE_MODEL,
   type ImageModels,
   type Judges,
   MAX_CANDIDATES,
+  MAX_ITERATIONS,
   MAX_REFERENCE_PHOTOS,
   OPENAI_FLARE_IMAGE_MODEL,
   OPENAI_IMAGE_MODEL,
+  type Optimizers,
   type RetryPolicy,
   RunRequest,
   TargetLookInput,
@@ -30,10 +34,11 @@ import {
 import { Effect, type Layer, Schema } from "effect";
 import { createRunApplication, readRunReport } from "./index";
 import { MastraJudges } from "./judge";
+import { MastraOptimizers } from "./optimizer";
 import { jsonLine } from "./warnings";
 import { LANE_CONCURRENCY } from "./workflow";
 
-const help = `Start a Run: one or more Lanes, up to ${LANE_CONCURRENCY} at a time, one Iteration of Candidates each, each judged
+const help = `Start a Run: one or more Lanes, up to ${LANE_CONCURRENCY} at a time, each iterating (generate, judge, rewrite the Prompt) until a stopping rule fires
 
 Usage:
   bun run run [options] PHOTO...          1 to ${MAX_REFERENCE_PHOTOS} Reference Photos of the Subject
@@ -70,6 +75,22 @@ Options:
   --judge-effort LEVEL
                       The Judge's reasoning effort: low, medium or high
                       (default: ${DEFAULT_JUDGE.effort}).
+  --optimizer-model ID
+                      The Optimizer, which writes each Lane's next Prompt, as
+                      a vendor/model id: an anthropic/, openai/ or google/
+                      model (default: ${DEFAULT_OPTIMIZER.model}).
+  --optimizer-effort LEVEL
+                      The Optimizer's reasoning effort: low, medium or high
+                      (default: ${DEFAULT_OPTIMIZER.effort}).
+  --target-score N    A Lane stops once its best Candidate's weighted total
+                      reaches N, 0 to 10 (default: ${DEFAULT_STOP_RULES.targetScore}).
+  --patience N        A Lane stops after N Iterations in a row without its best
+                      score rising by --min-improvement, 1 to 50; above
+                      --max-iterations it never fires (default: ${DEFAULT_STOP_RULES.patience}).
+  --min-improvement N The least rise of the best score that counts, above 0 and
+                      at most 10 (default: ${DEFAULT_STOP_RULES.minImprovement}).
+  --max-iterations N  A Lane stops after N Iterations, 1 to ${MAX_ITERATIONS}
+                      (default: ${DEFAULT_STOP_RULES.maxIterations}).
   --data-dir PATH     Data volume (default: ICONOGRAPH_DATA_DIR, else ./.data):
                       images, face-model weights and the price cache.
   --db PATH           LibSQL file for Runs (default: ./iconograph.db); its
@@ -87,30 +108,51 @@ sends only its chosen character references (stripped of metadata) and its
 Prompt to its vendor.
 
 Every Candidate that passes the Identity Gate is scored by the Judge against
-Rubric v1 with the default weights. The Judge needs its vendor's key in the
-environment: ANTHROPIC_API_KEY, OPENAI_API_KEY, or GOOGLE_GENERATIVE_AI_API_KEY
-(or GOOGLE_API_KEY); keys are checked before any billable call and never stored
-or logged. Only the Rubric, at most 3 Reference Photos (stripped), the
-Candidate and the Target Look are sent to the Judge's vendor.
+Rubric v1 with the default weights. Between Iterations the Optimizer writes the
+Lane's next Prompt from that Lane's recent Prompts, scores, Judge issues and
+fixes, refusals and failures; it rephrases the Target Look, never changes it.
+The Judge and the Optimizer need their vendor's key in the environment:
+ANTHROPIC_API_KEY, OPENAI_API_KEY, or GOOGLE_GENERATIVE_AI_API_KEY (or
+GOOGLE_API_KEY); a Run of one Iteration (--max-iterations 1) never calls the
+Optimizer and needs neither its key nor its price. Keys must be set before any
+billable call and are never stored or logged. Only the Rubric, at most 3
+Reference Photos (stripped), the Candidate and the Target Look are sent to the
+Judge's vendor; only the Target Look and the Lane's recent Prompts, outcomes and
+Judge notes (text, no photos) to the Optimizer's.
 
-Before generating, an estimate prints as one JSON line on stderr. Every
-billable call is checked against the remaining Budget first; a call that
-doesn't fit isn't made and the Lane stops with "budget-exhausted". The result
-is one JSON object on stdout: per Candidate its Outcome (Refused, Failed,
-Gated or Scored), Likeness, reason, stored image and estimated and actual
-cost, and its judgement (Resemblance, per-criterion scores, weighted total,
-Disputed, Rubric version, issues, suggested Prompt fixes) with the Judge's
-cost; each Lane's initial Prompt and stop reason; the Judge; totals; the Run's
-warnings (code judge-same-vendor when the Judge's vendor makes a Lane's Image
-Model); the Reference Photo warnings. read
-prints the same report for a stored Run. Errors print JSON to stderr (the
-last line) and exit nonzero.
+A Lane stops with the first of: "cancelled"; "optimizer-failed" or
+"judge-failed" (the vendor rejected the Optimizer's or Judge's call with HTTP
+401, 402, 403 or 404, or Google's 400 for a bad key (API_KEY_INVALID); an
+Optimizer rejection stops the Lane at once, a Judge rejection once the
+Iteration's calls settle); "target-score"; "budget-exhausted" (a billable
+call didn't fit the Budget, so it wasn't made); "repeated-failures" (two
+Iterations in a row whose Candidates were all Refused or Failed); "patience";
+"iteration-limit".
+
+Before generating, an estimate prints as one JSON line on stderr: at most what
+every Lane running all its Iterations can cost, each call at its first-call
+estimate (retries, and calls that cost more than estimated, can exceed it).
+Every billable call is checked against the remaining Budget first. The result
+is one JSON object on stdout: per Candidate its Iteration, Outcome (Refused,
+Failed, Gated or Scored), Likeness, reason, stored image and estimated and
+actual cost, and its judgement (Resemblance, per-criterion scores, weighted
+total, Disputed, Rubric version, issues, suggested Prompt fixes) with the
+Judge's cost; per Lane its stop reason (with stopDetail, the vendor's reason,
+for optimizer-failed and judge-failed), Iterations, best Candidate (Iteration,
+index, score) and Prompt history (each Iteration's Prompt, its source initial,
+optimizer or kept, and the cost of that Iteration's Optimizer call, which
+wrote the next Iteration's Prompt); the Judge, the Optimizer and the stopping
+rules; totals; the Run's warnings (code judge-same-vendor when the Judge's
+vendor makes a Lane's Image Model); the Reference Photo warnings. read prints
+the same report for a stored Run. Errors print JSON to stderr (the last line)
+and exit nonzero.
 `;
 
-/** The Image Models and Judges a Run uses, and how to release what they hold. */
+/** The Image Models, Judges and Optimizers a Run uses, and how to release what they hold. */
 export interface VendorsResource {
   imageModels: Layer.Layer<ImageModels>;
   judges: Layer.Layer<Judges>;
+  optimizers: Layer.Layer<Optimizers>;
   close(): void;
 }
 
@@ -135,7 +177,10 @@ export function refreshOnFirstLookup(
   };
 }
 
-/** The native Image Model adapters and the Mastra Judges, priced by the price source in the data volume. */
+/**
+ * The native Image Model adapters and the Mastra Judges and Optimizers, priced
+ * by the price source in the data volume.
+ */
 export async function nativeVendors(
   dataDirectory: string,
   warn: (message: string) => void,
@@ -145,14 +190,16 @@ export async function nativeVendors(
   return {
     imageModels: NativeImageModels({ prices }),
     judges: MastraJudges({ prices }),
+    optimizers: MastraOptimizers({ prices }),
     close: () => source.close(),
   };
 }
 
 /**
- * Test seam: the Image Models, Judges and face backend. Production uses the
- * native adapters and Mastra Judges with the price source and the locked ONNX
- * models; nothing in the environment can switch to a fake.
+ * Test seam: the Image Models, Judges, Optimizers and face backend. Production
+ * uses the native adapters and the Mastra Judges and Optimizers with the price
+ * source and the locked ONNX models; nothing in the environment can switch to
+ * a fake.
  */
 export interface RunCliDependencies {
   vendors?: (dataDirectory: string, warn: (message: string) => void) => Promise<VendorsResource>;
@@ -255,6 +302,12 @@ export async function main(args: string[], dependencies: RunCliDependencies = {}
       face: { type: "string", multiple: true },
       "judge-model": { type: "string" },
       "judge-effort": { type: "string" },
+      "optimizer-model": { type: "string" },
+      "optimizer-effort": { type: "string" },
+      "target-score": { type: "string" },
+      patience: { type: "string" },
+      "min-improvement": { type: "string" },
+      "max-iterations": { type: "string" },
       "data-dir": { type: "string" },
       db: { type: "string", default: "./iconograph.db" },
       "run-id": { type: "string" },
@@ -276,6 +329,12 @@ export async function main(args: string[], dependencies: RunCliDependencies = {}
       "face",
       "judge-model",
       "judge-effort",
+      "optimizer-model",
+      "optimizer-effort",
+      "target-score",
+      "patience",
+      "min-improvement",
+      "max-iterations",
     ] as const;
     if (
       positionals.length > 1 ||
@@ -293,17 +352,27 @@ export async function main(args: string[], dependencies: RunCliDependencies = {}
     return;
   }
   const faceChoices = faceChoiceMap(values.face ?? []);
+  /** A numeric option's value, else its default. */
+  const numberOption = (
+    name:
+      | "budget"
+      | "candidates"
+      | "target-score"
+      | "patience"
+      | "min-improvement"
+      | "max-iterations",
+    fallback: number,
+  ) => {
+    const value = values[name];
+    return value === undefined ? fallback : parseNumber(`--${name}`, value);
+  };
   const request = decodeRequest({
     photos: positionals,
     faceChoices: [...faceChoices].map(([photo, face]) => ({ photo, face })),
     pins: (values.pin ?? []).map((pin) => parseNumber("--pin", pin)),
     targetLook: await readLook(values.look),
-    budgetUsd:
-      values.budget === undefined ? DEFAULT_BUDGET_USD : parseNumber("--budget", values.budget),
-    candidates:
-      values.candidates === undefined
-        ? DEFAULT_CANDIDATES
-        : parseNumber("--candidates", values.candidates),
+    budgetUsd: numberOption("budget", DEFAULT_BUDGET_USD),
+    candidates: numberOption("candidates", DEFAULT_CANDIDATES),
     lanes:
       values.lane === undefined
         ? [{ model: GEMINI_IMAGE_MODEL }]
@@ -312,6 +381,16 @@ export async function main(args: string[], dependencies: RunCliDependencies = {}
       model: values["judge-model"] ?? DEFAULT_JUDGE.model,
       effort: values["judge-effort"] ?? DEFAULT_JUDGE.effort,
       weights: DEFAULT_JUDGE.weights,
+    },
+    optimizer: {
+      model: values["optimizer-model"] ?? DEFAULT_OPTIMIZER.model,
+      effort: values["optimizer-effort"] ?? DEFAULT_OPTIMIZER.effort,
+    },
+    stopRules: {
+      targetScore: numberOption("target-score", DEFAULT_STOP_RULES.targetScore),
+      patience: numberOption("patience", DEFAULT_STOP_RULES.patience),
+      minImprovement: numberOption("min-improvement", DEFAULT_STOP_RULES.minImprovement),
+      maxIterations: numberOption("max-iterations", DEFAULT_STOP_RULES.maxIterations),
     },
   });
   const printLine = (value: unknown) => stderr(jsonLine(value));
@@ -323,6 +402,7 @@ export async function main(args: string[], dependencies: RunCliDependencies = {}
         dataDirectory,
         imageModels: models.imageModels,
         judges: models.judges,
+        optimizers: models.optimizers,
         faceEmbedder: faceEmbedder(dataDirectory),
         // The operator names their own files on the command line.
         photoPaths: "operator",

@@ -11,9 +11,12 @@ import {
 } from "@iconograph/adapters";
 import {
   DEFAULT_JUDGE,
+  DEFAULT_OPTIMIZER,
+  DEFAULT_STOP_RULES,
   DEFAULT_TARGET_LOOK,
   type ImageModels,
   type Judges,
+  type Optimizers,
   type RunRequest,
 } from "@iconograph/domain";
 import { Effect, type Layer } from "effect";
@@ -39,6 +42,7 @@ import {
 import { MastraJudges } from "../src/judge";
 import { faceFixture, fakeImageModels, subjectPhotos } from "./support/fake-image-models";
 import { FAKE_VERDICT, fakeJudges } from "./support/fake-judges";
+import { fakeOptimizers } from "./support/fake-optimizers";
 import { fakeVendorServer, vendorAnswer } from "./support/fake-vendors";
 
 const temporaryDirectory = temporaryDirectories("server");
@@ -61,7 +65,8 @@ const photosInVolume = subjectPhotos.map((photo) => `photos/${basename(photo)}`)
 
 /**
  * The server in-process on a free port (loopback unless `hostname`), with the
- * given Image Models and Judges (default: the fake Judge).
+ * given Image Models, Judges (default: the fake Judge) and Optimizers
+ * (default: the fake Optimizer).
  */
 async function serve(
   dataDirectory: string,
@@ -74,9 +79,16 @@ async function serve(
     fetchModels?: ((url: string) => Promise<Response>) | null;
     hostname?: string;
     judges?: Layer.Layer<Judges>;
+    optimizers?: Layer.Layer<Optimizers>;
   } = {},
 ) {
-  const { fetchModels, hostname, judges = fakeJudges().layer, ...seams } = options;
+  const {
+    fetchModels,
+    hostname,
+    judges = fakeJudges().layer,
+    optimizers = fakeOptimizers().layer,
+    ...seams
+  } = options;
   const logs: Record<string, unknown>[] = [];
   const waiters: { matches: (line: Record<string, unknown>) => boolean; resolve: () => void }[] =
     [];
@@ -94,7 +106,7 @@ async function serve(
       ...(hostname && { ICONOGRAPH_HOST: hostname }),
     }),
     {
-      vendors: async () => ({ imageModels, judges, close: () => {} }),
+      vendors: async () => ({ imageModels, judges, optimizers, close: () => {} }),
       retryPolicy: { maxRetries: 2, baseDelayMs: 0 },
       ...seams,
       // Weights are never downloaded in tests; a test that downloads passes its own fetch.
@@ -121,6 +133,7 @@ async function storedRunCount(server: RunningServer) {
   return body.total;
 }
 
+/** A Run request; one Iteration per Lane unless `stopRules` says otherwise. */
 const runInput = (overrides: Partial<RunRequest> = {}): RunRequest => ({
   photos: photosInVolume,
   faceChoices: [],
@@ -130,6 +143,8 @@ const runInput = (overrides: Partial<RunRequest> = {}): RunRequest => ({
   candidates: 2,
   lanes: [{ model: "gemini-nano-banana-2.1" }],
   judge: DEFAULT_JUDGE,
+  optimizer: DEFAULT_OPTIMIZER,
+  stopRules: { ...DEFAULT_STOP_RULES, maxIterations: 1 },
   ...overrides,
 });
 
@@ -562,23 +577,60 @@ describe("HTTP server with the fake Image Model", () => {
     expect(await shaped.json()).toEqual({ error: "runId must be a single value" });
   }, 30_000);
 
-  test("a Run is streamed, observed and cancelled through the mounted routes", async () => {
+  test("a Run is streamed, observed and cancelled mid-loop through the mounted routes; its Lane says cancelled", async () => {
     const data = await volumeWithPhotos();
     const { promise: hold, resolve: release } = Promise.withResolvers<void>();
-    const fake = fakeImageModels(["same"], { beforeAnswer: () => hold });
+    // The second Iteration's image call answers only when aborted, or when the test ends.
+    const fake = fakeImageModels(["same", "same"], {
+      beforeAnswer: async (call) => {
+        if (call === 1) await hold;
+      },
+    });
     const { server } = await serve(data, fake.layer);
     await server.booted;
     const runId = await createRun(server);
     const streamed = await post(server.url, `/api/workflows/run/stream?runId=${runId}`, {
-      inputData: runInput({ candidates: 1 }),
+      inputData: runInput({ candidates: 1, stopRules: DEFAULT_STOP_RULES }),
     });
     expect(streamed.status).toBe(200);
-    await until(async () => fake.requests.length === 1, { timeoutMs: 20_000 });
+    await until(async () => fake.requests.length === 2, { timeoutMs: 20_000 });
     const observed = await post(server.url, `/api/workflows/run/observe?runId=${runId}`, {});
     expect(observed.status).toBe(200);
     const cancelled = await post(server.url, `/api/workflows/run/runs/${runId}/cancel`, {});
     expect(cancelled.status).toBe(200);
     await until(async () => (await runStatus(server, runId)) === "canceled", { timeoutMs: 10_000 });
+    // The stored state: the Lane stopped as cancelled in its second Iteration, whose aborted call
+    // was settled as sent, at unknown cost.
+    const stored = () => readRunReport(runsDatabase(data), data, runId);
+    // The Lane's row, not the report (which also shows a Run Mastra cancelled as cancelled).
+    const storedStopReason = () => {
+      const db = new Database(runsDatabase(data), { readonly: true });
+      try {
+        return db
+          .query<{ stop_reason: string | null }, [string]>(
+            "SELECT stop_reason FROM lanes WHERE run_id = ?",
+          )
+          .get(runId)?.stop_reason;
+      } finally {
+        db.close();
+      }
+    };
+    await until(
+      async () =>
+        storedStopReason() === "cancelled" &&
+        (await stored()).unattributedCalls[0]?.settled === true,
+      { timeoutMs: 10_000 },
+    );
+    const report = await stored();
+    expect(report.lanes[0]!.prompts.map(({ source }) => source)).toEqual(["initial", "optimizer"]);
+    expect(report.unattributedCalls).toEqual([
+      expect.objectContaining({
+        iteration: 2,
+        settled: true,
+        result: "transient",
+        actualUsd: null,
+      }),
+    ]);
     release();
     await Promise.all([streamed.body?.cancel(), observed.body?.cancel()]);
   }, 60_000);

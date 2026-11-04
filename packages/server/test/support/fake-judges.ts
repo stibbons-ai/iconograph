@@ -9,13 +9,16 @@ import {
   type JudgeRequest,
   Judges,
   type JudgeVerdict,
-  judgePriceModel,
+  llmPriceModel,
+  type LlmVendor,
   type PriceQuote,
   Unpriced,
+  type UnsuccessfulCall,
 } from "@iconograph/domain";
 import { Effect, Layer } from "effect";
-import { JUDGE_BASE_URLS, MastraJudges } from "../../src/judge";
-import { FAKE_PRICE } from "./fake-image-models";
+import { MastraJudges } from "../../src/judge";
+import { FAKE_PRICE, untilAborted } from "./fake-image-models";
+import { fakeVendorFetch } from "./fake-vendors";
 
 export const FAKE_JUDGE_ESTIMATE_MICROS = 10_000;
 export const FAKE_JUDGE_ACTUAL_MICROS = 5_000;
@@ -71,24 +74,46 @@ export interface FakeJudgeOptions {
   lookupPricing?: (lookup: number) => PriceQuote["pricing"];
 }
 
-/** An answer to one call, its usage priced at the Judge's price. */
-const answer = (response: FakeJudgeResponse | undefined, price: PriceQuote): JudgeCallResult => {
-  const usage = { inputTokens: 9_000, outputTokens: 400 };
-  const costMicros = price.pricing._tag === "Llm" ? llmCostMicros(price.pricing, usage) : null;
+/** What `usage` costs at `price`, in micros; null when the price isn't an LLM's. */
+export const fakeLlmCost = (
+  price: PriceQuote,
+  usage: { inputTokens: number; outputTokens: number },
+) => (price.pricing._tag === "Llm" ? llmCostMicros(price.pricing, usage) : null);
+
+/**
+ * A fake role's unsuccessful answer, the same for every role: a failure (an
+ * HTTP 400, at $0), a transient error at $0, or one of unknown cost.
+ */
+export const fakeUnsuccessful = (
+  role: string,
+  response: "fail" | "transient" | "transient-unknown-cost",
+): UnsuccessfulCall => {
   switch (response) {
-    case "refuse":
-      return { kind: "refused", reason: "fake: declined", usage, costMicros };
     case "fail":
       return {
         kind: "failed",
-        reason: "fake Judge HTTP 400: bad request",
+        reason: `fake ${role} HTTP 400: bad request`,
         usage: null,
         costMicros: 0,
       };
     case "transient":
-      return { kind: "transient", reason: "fake Judge HTTP 529: overloaded", costMicros: 0 };
+      return { kind: "transient", reason: `fake ${role} HTTP 529: overloaded`, costMicros: 0 };
     case "transient-unknown-cost":
       return { kind: "transient", reason: "fake: connection reset", costMicros: null };
+  }
+};
+
+/** An answer to one call, its usage priced at the Judge's price. */
+const answer = (response: FakeJudgeResponse | undefined, price: PriceQuote): JudgeCallResult => {
+  const usage = { inputTokens: 9_000, outputTokens: 400 };
+  const costMicros = fakeLlmCost(price, usage);
+  switch (response) {
+    case "refuse":
+      return { kind: "refused", reason: "fake: declined", usage, costMicros };
+    case "fail":
+    case "transient":
+    case "transient-unknown-cost":
+      return fakeUnsuccessful("Judge", response);
     case "unknown-cost":
       return { kind: "judged", verdict: FAKE_VERDICT, usage: null, costMicros: null };
     default:
@@ -98,7 +123,7 @@ const answer = (response: FakeJudgeResponse | undefined, price: PriceQuote): Jud
 
 /**
  * A Judge that answers from a script, for Run-engine tests: any model id
- * resolves to it (priced as an LLM under `judgePriceModel`), unless `unpriced`.
+ * resolves to it (priced as an LLM under `llmPriceModel`), unless `unpriced`.
  */
 export function fakeJudges(
   script: readonly FakeJudgeResponse[] = [],
@@ -117,9 +142,9 @@ export function fakeJudges(
       usage: { inputTokens: 10_000 },
     }),
     call: (request) =>
-      Effect.promise(async () => {
+      Effect.promise(async (signal) => {
         const call = requests.push(request) - 1;
-        await options.beforeAnswer?.(call);
+        await untilAborted(signal, options.beforeAnswer?.(call));
         return answer(script[call], price);
       }),
   });
@@ -127,53 +152,53 @@ export function fakeJudges(
     requests,
     gets,
     layer: Layer.succeed(Judges)({
+      checkCredentials: () => Effect.void,
       get: (config, recorded) => {
         gets.push({ judge: config, price: recorded });
-        const model = judgePriceModel(config.model);
-        if (options.unpriced) {
-          return Effect.fail(new Unpriced({ model, reason: "not in the fake price data" }));
-        }
-        if (recorded && recorded.model !== model) {
-          return Effect.fail(
-            new Unpriced({ model, reason: `the recorded price is for ${recorded.model}` }),
-          );
-        }
-        return Effect.succeed(
-          judge(config, recorded ?? fakeJudgePrice(model, options.lookupPricing?.(lookups++))),
-        );
+        return fakeLlmGetPrice(config.model, recorded, options.unpriced, (model) =>
+          fakeLlmPrice(model, options.lookupPricing?.(lookups++)),
+        ).pipe(Effect.map((price) => judge(config, price)));
       },
     }),
   };
 }
 
-/** A fresh fake price lookup's quote for `model`. */
-const fakeJudgePrice = (
+/** A fresh fake price lookup's quote for `model`: an LLM price (default `FAKE_JUDGE_PRICING`). */
+export const fakeLlmPrice = (
   model: string,
   pricing: PriceQuote["pricing"] = FAKE_JUDGE_PRICING,
 ): PriceQuote => ({ model, pricing, source: FAKE_PRICE.source });
 
 /**
- * The real Judges, priced at `FAKE_JUDGE_PRICING`, with their calls to the
- * Anthropic API sent to the fake one at `origin`. A request to a loopback
- * address goes there unchanged, so a local trap sees a misrouted call; any
- * other request is refused before it leaves, so no test reaches a live vendor.
+ * A fake role's price as the real roles resolve it: `Unpriced` when
+ * `unpriced`, or when the recorded price is another model's; else the
+ * recorded price, or `fresh` for the model it is priced under.
  */
-export const judgesOnFakeAnthropic = (origin: string) => {
-  const anthropic = new URL(JUDGE_BASE_URLS.anthropic).origin;
-  return MastraJudges({
-    prices: { lookup: (model) => Effect.succeed(fakeJudgePrice(model)) },
-    fetch: async (input, init) => {
-      const url = new URL(String(input));
-      if (url.origin === anthropic) return fetch(`${origin}${url.pathname}${url.search}`, init);
-      if (["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)) return fetch(url, init);
-      // ERR_INVALID_URL: classified as failed at $0 and not retried, like a local refusal.
-      throw Object.assign(
-        new TypeError(`The fake Anthropic Judge refused a request to ${url.origin}`),
-        { code: "ERR_INVALID_URL" },
-      );
-    },
-  });
+export const fakeLlmGetPrice = (
+  configModel: string,
+  recorded: PriceQuote | undefined,
+  unpriced: boolean | undefined,
+  fresh: (model: string) => PriceQuote,
+): Effect.Effect<PriceQuote, Unpriced> => {
+  const model = llmPriceModel(configModel);
+  if (unpriced) return Effect.fail(new Unpriced({ model, reason: "not in the fake price data" }));
+  if (recorded && recorded.model !== model) {
+    return Effect.fail(
+      new Unpriced({ model, reason: `the recorded price is for ${recorded.model}` }),
+    );
+  }
+  return Effect.succeed(recorded ?? fresh(model));
 };
+
+/**
+ * The real Judges, priced at `FAKE_JUDGE_PRICING`, on the fake `vendor` API
+ * (Anthropic unless given) at `origin`.
+ */
+export const judgesOnFakeVendor = (origin: string, vendor: LlmVendor = "anthropic") =>
+  MastraJudges({
+    prices: { lookup: (model) => Effect.succeed(fakeLlmPrice(model)) },
+    fetch: fakeVendorFetch(origin, "Judge", vendor),
+  });
 
 /**
  * The Judges of the test entry points: the real Judges on the fake Anthropic
@@ -182,5 +207,5 @@ export const judgesOnFakeAnthropic = (origin: string) => {
  */
 export const fakeJudgesFromEnv = (script: readonly FakeJudgeResponse[] = []) => {
   const origin = process.env.FAKE_ANTHROPIC_ORIGIN;
-  return origin ? judgesOnFakeAnthropic(origin) : fakeJudges(script).layer;
+  return origin ? judgesOnFakeVendor(origin) : fakeJudges(script).layer;
 };

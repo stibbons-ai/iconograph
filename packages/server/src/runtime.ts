@@ -1,6 +1,6 @@
 import type { RunStore } from "@iconograph/adapters";
-import type { FaceEmbedder, ImageModels, Judges } from "@iconograph/domain";
+import type { FaceEmbedder, ImageModels, Judges, Optimizers } from "@iconograph/domain";
 import type { RunConfig } from "./run-steps";
 
 /** The services every Run step program runs with; tests swap in fakes via Layers. */
-export type RunServices = FaceEmbedder | ImageModels | Judges | RunStore | RunConfig;
+export type RunServices = FaceEmbedder | ImageModels | Judges | Optimizers | RunStore | RunConfig;
