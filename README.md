@@ -401,11 +401,10 @@ such as `sk-proj-****abcd`) is redacted too, and every reason is cut to about 20
 key shorter than 20 characters or with spaces, control or non-ASCII characters (a bad paste) is
 rejected before its price lookup and before any billable call, without echoing it. That check
 only proves a key is set, not that the vendor accepts it: a Judge or Optimizer call the vendor
-answers with HTTP 401, 403 or 404 stops each Lane at the first such call it makes (`judge-failed`,
+answers with HTTP 401, 402, 403 or 404, or Google's HTTP 400 for a bad key (reason
+`API_KEY_INVALID`), stops each Lane at the first such call it makes (`judge-failed`,
 `optimizer-failed`; see "Stopping rules"): the Optimizer's after the Lane's first Iteration, the
-Judge's in the Lane's first Iteration with a Scored Candidate. Google's API answers a bad key
-with HTTP 400 (`API_KEY_INVALID`), which this doesn't catch: with a bad `google/` Judge or
-Optimizer key, every judging fails, or every Prompt is kept, until another rule stops the Lane.
+Judge's in the Lane's first Iteration with a Scored Candidate.
 
 - **Arguments:** 1 to 8 Reference Photos; `--budget USD` (default 5), `--candidates N` (1 to 8,
   default 3, per Lane and Iteration), `--look FILE`, `--lane SPEC` (repeatable, below), `--pin
@@ -428,15 +427,15 @@ Optimizer key, every judging fails, or every Prompt is kept, until another rule 
   improvement. A billable call that doesn't fit the Budget isn't made (an image call's Candidate
   is stored Failed, a Judge call's `judge-failed`, saying so), and the Lane stops after that
   Iteration with `budget-exhausted` (unless its target was reached). A Judge or Optimizer call
-  the vendor answers with HTTP 401, 403 or 404 (a rejected key, no access to the model, or no
-  such model; Google reports a bad key as 400, which isn't caught) would be turned away every
-  time, so it isn't retried and the Lane stops: an Optimizer call at once with `optimizer-failed`
-  (no next Prompt, no next Iteration); a Judge call with `judge-failed` once the Iteration's calls
-  already made have settled (no image or Optimizer call, and no Judge call beyond retries of calls
-  already running; Candidates judged before keep their scores, and the best is still reported).
-  Each Lane stops on its own first such call, and the report shows the vendor's reason (the key
-  itself redacted) as the Lane's `stopDetail`. Cancelling the Run stops every Lane not yet
-  stopped with `cancelled`, wherever the cancel
+  the vendor answers with HTTP 401, 402, 403 or 404 (a rejected key, no credit left, no access to
+  the model, or no such model), or with Google's HTTP 400 for a bad key (`error.details[].reason`
+  `API_KEY_INVALID`), would be turned away every time, so it isn't retried and the Lane stops: an
+  Optimizer call at once with `optimizer-failed` (no next Prompt, no next Iteration); a Judge call
+  with `judge-failed` once the Iteration's calls already made have settled (no image or Optimizer
+  call, and no Judge call beyond retries of calls already running; Candidates judged before keep
+  their scores, and the best is still reported). Each Lane stops on its own first such call, and
+  the report shows the vendor's reason (the key itself redacted) as the Lane's `stopDetail`.
+  Cancelling the Run stops every Lane not yet stopped with `cancelled`, wherever the cancel
   lands (mid-call, between Iterations, during preparation, or with Lanes still waiting their
   turn; if the process stops before that is recorded, the report still shows them `cancelled`); a
   Lane's first recorded stop reason stands. When several hold after the same Iteration, the first of
@@ -541,9 +540,9 @@ Optimizer key, every judging fails, or every Prompt is kept, until another rule 
   estimate since it may follow a billed response; only `ERR_INVALID_URL`, thrown before
   anything is sent, at $0), an empty answer, an answer cut off at the
   output cap or one outside the schema (the reason names the first problem and where) is not.
-  A 401, 403 or 404 is `non-recoverable` (result in the call's record, at $0) and stops the Lane
-  (`judge-failed`, see "Stopping rules"); a 400 can be specific to one request, so it fails only
-  that judging.
+  A 401, 402, 403 or 404, or Google's 400 for a bad key (reason `API_KEY_INVALID`), is
+  `non-recoverable` (result in the call's record, at $0) and stops the Lane (`judge-failed`, see
+  "Stopping rules"); any other 400 can be specific to one request, so it fails only that judging.
   OpenAI reports a structured-output refusal as an empty answer, which Mastra 1.80 doesn't mark,
   so it shows as cause `failed` ("empty answer"), not `refused`. Mastra's
   own retries are off, so every attempt is a reserved, recorded call. A Candidate whose judging
@@ -565,9 +564,9 @@ Optimizer key, every judging fails, or every Prompt is kept, until another rule 
   answer must be a Prompt of 1 to 32,000 characters (trimmed); an answer outside its schema, blank
   or longer is a failed call at its cost. When optimizing fails (a refusal, a failed call, retries
   that ran out), the next Iteration keeps the last Prompt and records why (`source: "kept"`); a
-  401, 403 or 404 instead stops the Lane at once (`optimizer-failed`). Its
-  calls are retried and costed like the Judge's; its estimate counts the instructions, schema and
-  message text as the Judge's does, plus the whole output cap.
+  401, 402, 403 or 404, or Google's 400 for a bad key, instead stops the Lane at once
+  (`optimizer-failed`). Its calls are retried and costed like the Judge's; its estimate counts the
+  instructions, schema and message text as the Judge's does, plus the whole output cap.
 - **Budget:** every billable call, retries included, is checked against the remaining Budget
   (Budget − actual cost so far − estimates of calls in flight) before it is made. All N first calls
   of an Iteration are reserved in order before any is launched, so parallel calls can't overspend;

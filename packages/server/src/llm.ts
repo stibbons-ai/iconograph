@@ -9,6 +9,7 @@ import {
   httpErrorResult,
   type PriceSource,
   redactKey,
+  responseBodyOf,
   statusOf,
   toMastraSchema,
 } from "@iconograph/adapters";
@@ -240,10 +241,37 @@ const NOT_SENT_LOCAL_CODES = new Set(["ERR_INVALID_URL"]);
 
 /**
  * HTTP statuses that turn a role away for good: a rejected key (401), no
- * access to the model (403), no such model or endpoint (404). A 400 can be
+ * credit left (402: Anthropic's `billing_error`, Gemini's `payment_required`),
+ * no access to the model (403), no such model or endpoint (404).
+ */
+const NON_RECOVERABLE_STATUSES = new Set([401, 402, 403, 404]);
+
+/** Google's error body (`google.rpc.Status`), as far as the reasons in its `details` go. */
+const decodeGoogleErrorBody = Schema.decodeUnknownOption(
+  Schema.fromJsonString(
+    Schema.Struct({
+      error: Schema.Struct({
+        details: Schema.Array(Schema.Struct({ reason: Schema.optionalKey(Schema.String) })),
+      }),
+    }),
+  ),
+);
+
+/**
+ * Whether an HTTP error turns the role away for good: a status in
+ * `NON_RECOVERABLE_STATUSES`, or Google's answer to a bad key, a 400 whose
+ * body gives `error.details[].reason` `API_KEY_INVALID`. Any other 400 can be
  * specific to one request, so it only fails that call.
  */
-const NON_RECOVERABLE_STATUSES = new Set([401, 403, 404]);
+function turnsRoleAway(status: number, error: unknown): boolean {
+  if (NON_RECOVERABLE_STATUSES.has(status)) return true;
+  if (status !== 400) return false;
+  const body = decodeGoogleErrorBody(responseBodyOf(error));
+  return (
+    body._tag === "Some" &&
+    body.value.error.details.some(({ reason }) => reason === "API_KEY_INVALID")
+  );
+}
 
 /** An error's message, or a marker when the vendor sent an empty body. */
 const messageOf = (error: unknown) => errorMessage(error) || "(empty body)";
@@ -251,8 +279,9 @@ const messageOf = (error: unknown) => errorMessage(error) || "(empty body)";
 /**
  * A thrown model error as a result:
  * - an HTTP error status (400 and up) is the vendor's answer, not billed, so
- *   $0: non-recoverable for 401, 403 and 404 (`NonRecoverableCall`), else
- *   transient when retrying can help, else failed;
+ *   $0: non-recoverable when it turns the role away for good (`turnsRoleAway`:
+ *   401, 402, 403, 404, or Google's 400 for a bad key; `NonRecoverableCall`),
+ *   else transient when retrying can help, else failed;
  * - a local programming error (a TypeError, SyntaxError or RangeError with no
  *   code, or a Bun/Node argument code such as `ERR_INVALID_URL`) is failed and
  *   not retried: at $0 for `ERR_INVALID_URL`, thrown before anything is sent;
@@ -272,7 +301,7 @@ function classifyError(
   const status = statusOf(error);
   if (status !== undefined && status >= 400) {
     const reason = redact(`${role} HTTP ${status}: ${messageOf(error)}`);
-    return NON_RECOVERABLE_STATUSES.has(status)
+    return turnsRoleAway(status, error)
       ? { kind: "non-recoverable", reason, costMicros: 0 }
       : httpErrorResult(status, reason);
   }

@@ -7,7 +7,8 @@ import type { Judgement } from "./rubric";
  * first in this order wins (`laneStopReason` follows it):
  * 1. `cancelled`: the operator cancelled the Run.
  * 2. `optimizer-failed`: the vendor turned an Optimizer call away for good
- *    (HTTP 401, 403 or 404); the Lane stops at once, without a next Prompt.
+ *    (HTTP 401, 402, 403 or 404, or Google's 400 for a bad key); the Lane
+ *    stops at once, without a next Prompt.
  * 3. `judge-failed`: the vendor turned a Judge call away for good; the Lane
  *    stops once the Iteration's calls have settled.
  * 4. `target-score`: the Lane's best Candidate reached the target score.

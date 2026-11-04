@@ -69,7 +69,7 @@ import {
   FAKE_VERDICT,
   fakeJudges,
   fakeLlmPrice,
-  judgesOnFakeAnthropic,
+  judgesOnFakeVendor,
   levels,
 } from "./support/fake-judges";
 import {
@@ -78,9 +78,15 @@ import {
   type FakeOptimizerOptions,
   type FakeOptimizerResponse,
   fakeOptimizers,
-  optimizersOnFakeAnthropic,
+  optimizersOnFakeVendor,
 } from "./support/fake-optimizers";
-import { fakeVendorServer, vendorAnswer, vendorError } from "./support/fake-vendors";
+import {
+  fakeVendorServer,
+  googleBadKeyBody,
+  googleError,
+  vendorAnswer,
+  vendorError,
+} from "./support/fake-vendors";
 
 const temporaryDirectory = temporaryDirectories("run");
 
@@ -1832,7 +1838,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
       fakeImageModels(["same", "same"]).layer,
       undefined,
       fakeJudges().layer,
-      optimizersOnFakeAnthropic(vendor.origin),
+      optimizersOnFakeVendor(vendor.origin),
     );
     try {
       const custom = { model: "anthropic/claude-haiku-5", effort: "high" } as const;
@@ -1878,7 +1884,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
       fake.layer,
       undefined,
       fakeJudges().layer,
-      optimizersOnFakeAnthropic(vendor.origin),
+      optimizersOnFakeVendor(vendor.origin),
     );
     try {
       const key = "test-optimizer-key-0123456789";
@@ -2315,7 +2321,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
       fakeImageModels(["same"]).layer,
       undefined,
       fakeJudges().layer,
-      optimizersOnFakeAnthropic(vendor.origin),
+      optimizersOnFakeVendor(vendor.origin),
     );
     try {
       await withEnvironment({ ANTHROPIC_API_KEY: "test-optimizer-key-0123456789" }, async () => {
@@ -2379,6 +2385,47 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
   const turnedAway = (status: number, key: string) =>
     vendorError(status, "authentication_error", `invalid x-api-key ${key}`);
 
+  const GOOGLE_MODEL = "google/gemini-3.1-pro-preview";
+  /** Google's answer to a bad key, both details as it sends them, quoting the key it was sent. */
+  const googleRejectsKey = (key: string) =>
+    Response.json(googleBadKeyBody(`API key ${key} not valid. Please pass a valid API key.`), {
+      status: 400,
+    });
+  /**
+   * Google's answer to a request it can't take for any reason but the key; it names
+   * `API_KEY_INVALID` in prose only, so only the structured reason may count.
+   */
+  const googleRejectsRequest = () =>
+    googleError(400, "INVALID_ARGUMENT", "Request contains an invalid argument.", [
+      {
+        "@type": "type.googleapis.com/google.rpc.BadRequest",
+        fieldViolations: [{ field: "contents", description: "API_KEY_INVALID is not a field" }],
+      },
+    ]);
+
+  /**
+   * What turns a role away for good, from its vendor's fake API, quoting the key it was sent:
+   * `model` is the role's model there (its default when undefined), `env` holds its key.
+   */
+  const rejections = [
+    ...[401, 402, 403, 404].map((status) => ({
+      what: `HTTP ${status}`,
+      vendor: "anthropic" as const,
+      model: undefined,
+      env: "ANTHROPIC_API_KEY",
+      answer: (key: string) => turnedAway(status, key),
+      detail: `HTTP ${status}: invalid x-api-key [redacted]`,
+    })),
+    {
+      what: "Google's HTTP 400 API_KEY_INVALID",
+      vendor: "google" as const,
+      model: GOOGLE_MODEL,
+      env: "GOOGLE_GENERATIVE_AI_API_KEY",
+      answer: googleRejectsKey,
+      detail: "HTTP 400: API key [redacted] not valid. Please pass a valid API key.",
+    },
+  ];
+
   /** Every billable call of the Run as stored in the ledger: Lane, Iteration, purpose, result. */
   const storedCalls = (databasePath: string, runId: string) => {
     const db = new Database(databasePath, { readonly: true });
@@ -2409,20 +2456,23 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
       [OPENAI_IMAGE_MODEL]: ["same", "same", "same", "same"],
     });
 
-  test.each([401, 403, 404])(
-    "an Optimizer call answered %i stops each Lane at once (optimizer-failed): nothing more is billed, its best Candidate stands",
-    async (status) => {
+  test.each(rejections)(
+    "an Optimizer call answered $what stops each Lane at once (optimizer-failed): nothing more is billed, its best Candidate stands",
+    async ({ vendor: vendorName, model, env, answer, detail }) => {
       const key = "SENTINEL-OPTIMIZER-KEY-0123456789";
-      const vendor = fakeVendorServer(() => turnedAway(status, key));
+      const vendor = fakeVendorServer(() => answer(key));
       const { application, databasePath } = await runApplication(
         twoLaneImages().layer,
         undefined,
         fakeJudges().layer,
-        optimizersOnFakeAnthropic(vendor.origin),
+        optimizersOnFakeVendor(vendor.origin, vendorName),
       );
       try {
-        const { runId, lanes } = await withEnvironment({ ANTHROPIC_API_KEY: key }, () =>
-          application.start(twoLanes()),
+        const { runId, lanes } = await withEnvironment({ [env]: key }, () =>
+          application.start({
+            ...twoLanes(),
+            optimizer: { ...DEFAULT_OPTIMIZER, model: model ?? DEFAULT_OPTIMIZER.model },
+          }),
         );
         expect(lanes.map(({ stopReason }) => stopReason)).toEqual([
           "optimizer-failed",
@@ -2440,7 +2490,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
         for (const lane of report.lanes) {
           expect(lane).toMatchObject({
             stopReason: "optimizer-failed",
-            stopDetail: `Optimizer HTTP ${status}: invalid x-api-key [redacted]`,
+            stopDetail: `Optimizer ${detail}`,
             iterations: 1,
             best: { iteration: 1, candidate: 0 },
           });
@@ -2458,28 +2508,31 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
     60_000,
   );
 
-  test.each([401, 403, 404])(
-    "a Judge call answered %i stops each Lane in its first Iteration (judge-failed); a Candidate judged before keeps its score",
-    async (status) => {
+  test.each(rejections)(
+    "a Judge call answered $what stops each Lane in its first Iteration (judge-failed); a Candidate judged before keeps its score",
+    async ({ vendor: vendorName, model, env, answer, detail }) => {
       const key = "SENTINEL-JUDGE-KEY-0123456789";
       // The Run's first Judge call is answered; every later one is turned away.
       let answered = false;
       const vendor = fakeVendorServer(() => {
-        if (answered) return turnedAway(status, key);
+        if (answered) return answer(key);
         answered = true;
-        return vendorAnswer("anthropic", JSON.stringify(FAKE_VERDICT));
+        return vendorAnswer(vendorName, JSON.stringify(FAKE_VERDICT));
       });
       const images = twoLaneImages();
       const optimizer = fakeOptimizers();
       const { application, databasePath } = await runApplication(
         images.layer,
         undefined,
-        judgesOnFakeAnthropic(vendor.origin),
+        judgesOnFakeVendor(vendor.origin, vendorName),
         optimizer.layer,
       );
       try {
-        const { runId, lanes } = await withEnvironment({ ANTHROPIC_API_KEY: key }, () =>
-          application.start(twoLanes()),
+        const { runId, lanes } = await withEnvironment({ [env]: key }, () =>
+          application.start({
+            ...twoLanes(),
+            judge: { ...DEFAULT_JUDGE, model: model ?? DEFAULT_JUDGE.model },
+          }),
         );
         expect(lanes.map(({ stopReason }) => stopReason)).toEqual(["judge-failed", "judge-failed"]);
         // Iteration 1's calls settled (2 images and 2 Judge calls per Lane); nothing after them.
@@ -2498,7 +2551,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
         for (const lane of report.lanes) {
           expect(lane).toMatchObject({
             stopReason: "judge-failed",
-            stopDetail: `Judge HTTP ${status}: invalid x-api-key [redacted]`,
+            stopDetail: `Judge ${detail}`,
             iterations: 1,
           });
         }
@@ -2528,7 +2581,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
     const { application, databasePath, dataDirectory } = await runApplication(
       fakeImageModels(["same"]).layer,
       undefined,
-      judgesOnFakeAnthropic(vendor.origin),
+      judgesOnFakeVendor(vendor.origin),
     );
     try {
       const { runId, lanes } = await withEnvironment({ ANTHROPIC_API_KEY: key }, () =>
@@ -2576,7 +2629,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
         fakeImageModels(["same", "same"]).layer,
         undefined,
         fakeJudges().layer,
-        optimizersOnFakeAnthropic(vendor.origin),
+        optimizersOnFakeVendor(vendor.origin),
       );
       try {
         const { runId, lanes } = await withEnvironment({ ANTHROPIC_API_KEY: key }, () =>
@@ -2602,6 +2655,83 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
     60_000,
   );
 
+  test("a google/ Optimizer call answered 400 for another reason keeps the last Prompt: the Lane runs on", async () => {
+    const vendor = fakeVendorServer(googleRejectsRequest);
+    const { application, databasePath } = await runApplication(
+      fakeImageModels(["same", "same"]).layer,
+      undefined,
+      fakeJudges().layer,
+      optimizersOnFakeVendor(vendor.origin, "google"),
+    );
+    try {
+      const { runId, lanes } = await withEnvironment(
+        { GOOGLE_GENERATIVE_AI_API_KEY: "test-google-key-0123456789" },
+        () =>
+          application.start(
+            loop({
+              optimizer: { model: GOOGLE_MODEL, effort: "low" },
+              ...rules({ maxIterations: 2 }),
+            }),
+          ),
+      );
+      expect(lanes[0]).toMatchObject({ stopReason: "iteration-limit", iterations: 2 });
+      expect(
+        storedCalls(databasePath, runId)
+          .filter(({ purpose }) => purpose === "optimize")
+          .map(({ result }) => result),
+      ).toEqual(["failed"]);
+      const [lane] = (await application.report(runId)).lanes;
+      expect(lane).not.toHaveProperty("stopDetail");
+      expect(lane!.prompts[1]).toMatchObject({
+        source: "kept",
+        reason: "Optimizer HTTP 400: Request contains an invalid argument.",
+      });
+    } finally {
+      await application.close();
+      await vendor.stop();
+    }
+  }, 60_000);
+
+  test("a google/ Judge call answered 400 for another reason fails only that judging: the Lane runs on", async () => {
+    const vendor = fakeVendorServer(googleRejectsRequest);
+    const { application, databasePath } = await runApplication(
+      fakeImageModels(["same", "same"]).layer,
+      undefined,
+      judgesOnFakeVendor(vendor.origin, "google"),
+    );
+    try {
+      const { runId, lanes } = await withEnvironment(
+        { GOOGLE_GENERATIVE_AI_API_KEY: "test-google-key-0123456789" },
+        () =>
+          application.start(
+            loop({
+              judge: { ...DEFAULT_JUDGE, model: GOOGLE_MODEL },
+              ...rules({ maxIterations: 2 }),
+            }),
+          ),
+      );
+      expect(lanes[0]).toMatchObject({ stopReason: "iteration-limit", iterations: 2 });
+      expect(
+        storedCalls(databasePath, runId)
+          .filter(({ purpose }) => purpose === "judge")
+          .map(({ result }) => result),
+      ).toEqual(["failed", "failed"]);
+      const [lane] = (await application.report(runId)).lanes;
+      expect(lane).not.toHaveProperty("stopDetail");
+      expect(lane!.candidates.map(({ judgement }) => judgement)).toEqual([
+        expect.objectContaining({
+          status: "judge-failed",
+          cause: "failed",
+          reason: "Judge HTTP 400: Request contains an invalid argument.",
+        }),
+        expect.objectContaining({ status: "judge-failed", cause: "failed" }),
+      ]);
+    } finally {
+      await application.close();
+      await vendor.stop();
+    }
+  }, 60_000);
+
   test("a cancel in the Iteration whose Judge call was turned away stops the Lane cancelled", async () => {
     const key = "SENTINEL-JUDGE-KEY-0123456789";
     // The first Judge call is turned away; the second answers only when aborted.
@@ -2614,7 +2744,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
     const { application, databasePath } = await runApplication(
       fakeImageModels(["same", "same"]).layer,
       undefined,
-      judgesOnFakeAnthropic(vendor.origin),
+      judgesOnFakeVendor(vendor.origin),
     );
     try {
       await withEnvironment({ ANTHROPIC_API_KEY: key }, async () => {

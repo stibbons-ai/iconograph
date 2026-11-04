@@ -8,7 +8,7 @@
  */
 import { DEFAULT_TARGET_LOOK, Judges } from "@iconograph/domain";
 import { Effect } from "effect";
-import { judgesOnFakeAnthropic } from "./fake-judges";
+import { judgesOnFakeVendor } from "./fake-judges";
 
 const origin = process.argv[2]!;
 const image = { bytes: new Uint8Array([0xff, 0xd8, 0xff]), mimeType: "image/jpeg" } as const;
@@ -19,7 +19,7 @@ const judged = Effect.gen(function* () {
     candidate: image,
     targetLook: DEFAULT_TARGET_LOOK,
   });
-}).pipe(Effect.provide(judgesOnFakeAnthropic(origin)), Effect.runPromise);
+}).pipe(Effect.provide(judgesOnFakeVendor(origin)), Effect.runPromise);
 const plainFetch = fetch(origin).then(
   () => "answered",
   (error: Error) => error.name,

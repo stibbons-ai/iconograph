@@ -109,7 +109,7 @@ export function errorLine(error: unknown): string {
   })}\n`;
 }
 
-/** How many links of an error's `cause` chain `statusOf`, `codeOf` and `hasErrorNamed` search. */
+/** How many links of an error's `cause` chain `statusOf`, `codeOf`, `responseBodyOf` and `hasErrorNamed` search. */
 const LOOKUP_DEPTH = 4;
 
 /** The first integer HTTP `statusCode` on the error or its cause chain; undefined when none. */
@@ -117,6 +117,18 @@ export function statusOf(error: unknown): number | undefined {
   for (const link of causeChain(error, LOOKUP_DEPTH)) {
     const status = Number(field(link, "statusCode"));
     if (Number.isInteger(status)) return status;
+  }
+  return undefined;
+}
+
+/**
+ * The first string `responseBody` (the vendor's raw error body, as the AI
+ * SDK's `APICallError` keeps it) on the error or its cause chain.
+ */
+export function responseBodyOf(error: unknown): string | undefined {
+  for (const link of causeChain(error, LOOKUP_DEPTH)) {
+    const body = field(link, "responseBody");
+    if (typeof body === "string") return body;
   }
   return undefined;
 }

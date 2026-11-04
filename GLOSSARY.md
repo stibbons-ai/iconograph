@@ -38,7 +38,7 @@ One generate–score–rewrite cycle within a Lane: its Candidates are generated
 _Avoid_: Round, step, epoch
 
 **Stop Reason**:
-Why a Lane stopped iterating: `cancelled`, `optimizer-failed` or `judge-failed` (the vendor turned the Optimizer's or Judge's call away for good with HTTP 401, 403 or 404, e.g. a rejected key; stored with the vendor's reason), `target-score`, `budget-exhausted` (a billable call didn't fit the Budget), `repeated-failures` (two Iterations in a row whose Candidates were all Refused or Failed), `patience` (too many Iterations without the best score rising enough) or `iteration-limit`; when several hold at once, the first in this order. A Lane's first recorded Stop Reason stands.
+Why a Lane stopped iterating: `cancelled`, `optimizer-failed` or `judge-failed` (the vendor turned the Optimizer's or Judge's call away for good with HTTP 401, 402, 403 or 404, e.g. a rejected key or no credit left, or with Google's 400 for a bad key; stored with the vendor's reason), `target-score`, `budget-exhausted` (a billable call didn't fit the Budget), `repeated-failures` (two Iterations in a row whose Candidates were all Refused or Failed), `patience` (too many Iterations without the best score rising enough) or `iteration-limit`; when several hold at once, the first in this order. A Lane's first recorded Stop Reason stands.
 _Avoid_: Exit code, termination status
 
 **Prompt**:

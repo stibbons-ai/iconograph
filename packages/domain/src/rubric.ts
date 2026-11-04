@@ -248,8 +248,9 @@ const Score = Schema.Finite.check(Schema.isBetween({ minimum: 0, maximum: MAX_LI
  * `failed` (an error not worth retrying, or an answer outside the verdict
  * schema); it `gave-up` after transient errors; a call or retry was
  * `budget-exhausted` (didn't fit the Budget, so it wasn't made); or the
- * vendor turned the call away for good, `non-recoverable` (HTTP 401, 403 or
- * 404), which stops the Lane (`judge-failed`).
+ * vendor turned the call away for good, `non-recoverable` (HTTP 401, 402,
+ * 403 or 404, or Google's 400 for a bad key), which stops the Lane
+ * (`judge-failed`).
  */
 export const JudgeFailure = Schema.Literals([
   "refused",

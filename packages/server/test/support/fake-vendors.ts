@@ -6,6 +6,7 @@
  * answering as a vendor API.
  */
 import type { LlmVendor } from "@iconograph/domain";
+import { type LlmFetch, LLM_BASE_URLS } from "../../src/llm";
 
 /**
  * A successful answer whose text is `text`, with 9,000 input and 300 output
@@ -62,6 +63,63 @@ export function vendorAnswer(vendor: LlmVendor, text: string, cutOff = false): R
 /** An Anthropic API error answer: `status`, with the error's `type` and `message`. */
 export const vendorError = (status: number, type: string, message: string): Response =>
   Response.json({ type: "error", error: { type, message } }, { status });
+
+/**
+ * A Google API error body (`google.rpc.Status`, https://google.aip.dev/193):
+ * HTTP `status` with its canonical status name (e.g. `INVALID_ARGUMENT`),
+ * `message` and `details`, as the Gemini API's `generateContent` answers.
+ */
+export const googleErrorBody = (
+  status: number,
+  canonicalStatus: string,
+  message: string,
+  details: readonly object[],
+) => ({ error: { code: status, message, status: canonicalStatus, details } });
+
+/** A Google API error answer: HTTP `status` with its `googleErrorBody`. */
+export const googleError = (
+  status: number,
+  canonicalStatus: string,
+  message: string,
+  details: readonly object[],
+): Response =>
+  Response.json(googleErrorBody(status, canonicalStatus, message, details), { status });
+
+/**
+ * Google's error body for a bad key, shaped as it answers: 400
+ * `INVALID_ARGUMENT` whose details are an `ErrorInfo` with reason
+ * `API_KEY_INVALID`, then a `LocalizedMessage`, which has no reason.
+ */
+export const googleBadKeyBody = (message: string) =>
+  googleErrorBody(400, "INVALID_ARGUMENT", message, [
+    {
+      "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+      reason: "API_KEY_INVALID",
+      domain: "googleapis.com",
+      metadata: { service: "generativelanguage.googleapis.com" },
+    },
+    { "@type": "type.googleapis.com/google.rpc.LocalizedMessage", locale: "en-US", message },
+  ]);
+
+/**
+ * The network of a real role (Judge, Optimizer) on a fake `vendor` API at
+ * `origin`: its calls to that vendor's API go there; a request to a loopback
+ * address goes there unchanged, so a local trap sees a misrouted call; any
+ * other request is refused before it leaves, so no test reaches a live vendor.
+ */
+export function fakeVendorFetch(origin: string, role: string, vendor: LlmVendor): LlmFetch {
+  const vendorOrigin = new URL(LLM_BASE_URLS[vendor]).origin;
+  return async (input, init) => {
+    const url = new URL(String(input));
+    if (url.origin === vendorOrigin) return fetch(`${origin}${url.pathname}${url.search}`, init);
+    if (["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)) return fetch(url, init);
+    // ERR_INVALID_URL: classified as failed at $0 and not retried, like a local refusal.
+    throw Object.assign(
+      new TypeError(`The fake ${vendor} ${role} refused a request to ${url.origin}`),
+      { code: "ERR_INVALID_URL" },
+    );
+  };
+}
 
 /**
  * A local server answering every request with `answer` (given the request and

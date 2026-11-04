@@ -122,9 +122,9 @@ Judge notes (text, no photos) to the Optimizer's.
 
 A Lane stops with the first of: "cancelled"; "optimizer-failed" or
 "judge-failed" (the vendor rejected the Optimizer's or Judge's call with HTTP
-401, 403 or 404, e.g. a bad key; Google reports a bad key as 400, which isn't
-caught: an Optimizer rejection stops the Lane at once, a Judge rejection once
-the Iteration's calls settle); "target-score"; "budget-exhausted" (a billable
+401, 402, 403 or 404, or Google's 400 for a bad key (API_KEY_INVALID); an
+Optimizer rejection stops the Lane at once, a Judge rejection once the
+Iteration's calls settle); "target-score"; "budget-exhausted" (a billable
 call didn't fit the Budget, so it wasn't made); "repeated-failures" (two
 Iterations in a row whose Candidates were all Refused or Failed); "patience";
 "iteration-limit".

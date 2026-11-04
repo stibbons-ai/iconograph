@@ -10,14 +10,15 @@ import {
   Judges,
   type JudgeVerdict,
   llmPriceModel,
+  type LlmVendor,
   type PriceQuote,
   Unpriced,
   type UnsuccessfulCall,
 } from "@iconograph/domain";
 import { Effect, Layer } from "effect";
 import { MastraJudges } from "../../src/judge";
-import { type LlmFetch, LLM_BASE_URLS } from "../../src/llm";
 import { FAKE_PRICE, untilAborted } from "./fake-image-models";
+import { fakeVendorFetch } from "./fake-vendors";
 
 export const FAKE_JUDGE_ESTIMATE_MICROS = 10_000;
 export const FAKE_JUDGE_ACTUAL_MICROS = 5_000;
@@ -190,31 +191,13 @@ export const fakeLlmGetPrice = (
 };
 
 /**
- * The network of a real role (Judge, Optimizer) on the fake Anthropic API at
- * `origin`: its calls to the Anthropic API go there; a request to a loopback
- * address goes there unchanged, so a local trap sees a misrouted call; any
- * other request is refused before it leaves, so no test reaches a live vendor.
+ * The real Judges, priced at `FAKE_JUDGE_PRICING`, on the fake `vendor` API
+ * (Anthropic unless given) at `origin`.
  */
-export const fakeAnthropicFetch =
-  (origin: string, role: string): LlmFetch =>
-  async (input, init) => {
-    const url = new URL(String(input));
-    if (url.origin === new URL(LLM_BASE_URLS.anthropic).origin) {
-      return fetch(`${origin}${url.pathname}${url.search}`, init);
-    }
-    if (["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)) return fetch(url, init);
-    // ERR_INVALID_URL: classified as failed at $0 and not retried, like a local refusal.
-    throw Object.assign(
-      new TypeError(`The fake Anthropic ${role} refused a request to ${url.origin}`),
-      { code: "ERR_INVALID_URL" },
-    );
-  };
-
-/** The real Judges, priced at `FAKE_JUDGE_PRICING`, on the fake Anthropic API at `origin`. */
-export const judgesOnFakeAnthropic = (origin: string) =>
+export const judgesOnFakeVendor = (origin: string, vendor: LlmVendor = "anthropic") =>
   MastraJudges({
     prices: { lookup: (model) => Effect.succeed(fakeLlmPrice(model)) },
-    fetch: fakeAnthropicFetch(origin, "Judge"),
+    fetch: fakeVendorFetch(origin, "Judge", vendor),
   });
 
 /**
@@ -224,5 +207,5 @@ export const judgesOnFakeAnthropic = (origin: string) =>
  */
 export const fakeJudgesFromEnv = (script: readonly FakeJudgeResponse[] = []) => {
   const origin = process.env.FAKE_ANTHROPIC_ORIGIN;
-  return origin ? judgesOnFakeAnthropic(origin) : fakeJudges(script).layer;
+  return origin ? judgesOnFakeVendor(origin) : fakeJudges(script).layer;
 };

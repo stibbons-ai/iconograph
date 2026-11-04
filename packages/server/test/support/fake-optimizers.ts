@@ -1,4 +1,5 @@
 import {
+  type LlmVendor,
   type OptimizerCallResult,
   type OptimizerConfig,
   type OptimizerRequest,
@@ -8,13 +9,8 @@ import {
 import { Effect, Layer } from "effect";
 import { MastraOptimizers } from "../../src/optimizer";
 import { untilAborted } from "./fake-image-models";
-import {
-  fakeAnthropicFetch,
-  fakeLlmCost,
-  fakeLlmGetPrice,
-  fakeLlmPrice,
-  fakeUnsuccessful,
-} from "./fake-judges";
+import { fakeLlmCost, fakeLlmGetPrice, fakeLlmPrice, fakeUnsuccessful } from "./fake-judges";
+import { fakeVendorFetch } from "./fake-vendors";
 
 export const FAKE_OPTIMIZER_ESTIMATE_MICROS = 20_000;
 /** What a call that answers costs: its usage report at `FAKE_JUDGE_PRICING`. */
@@ -106,11 +102,14 @@ export function fakeOptimizers(
   };
 }
 
-/** The real Optimizers, priced at `FAKE_JUDGE_PRICING`, on the fake Anthropic API at `origin`. */
-export const optimizersOnFakeAnthropic = (origin: string) =>
+/**
+ * The real Optimizers, priced at `FAKE_JUDGE_PRICING`, on the fake `vendor`
+ * API (Anthropic unless given) at `origin`.
+ */
+export const optimizersOnFakeVendor = (origin: string, vendor: LlmVendor = "anthropic") =>
   MastraOptimizers({
     prices: { lookup: (model) => Effect.succeed(fakeLlmPrice(model)) },
-    fetch: fakeAnthropicFetch(origin, "Optimizer"),
+    fetch: fakeVendorFetch(origin, "Optimizer", vendor),
   });
 
 /**
@@ -120,5 +119,5 @@ export const optimizersOnFakeAnthropic = (origin: string) =>
  */
 export const fakeOptimizersFromEnv = (script: readonly FakeOptimizerResponse[] = []) => {
   const origin = process.env.FAKE_ANTHROPIC_ORIGIN;
-  return origin ? optimizersOnFakeAnthropic(origin) : fakeOptimizers(script).layer;
+  return origin ? optimizersOnFakeVendor(origin) : fakeOptimizers(script).layer;
 };

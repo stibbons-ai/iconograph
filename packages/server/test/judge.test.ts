@@ -25,8 +25,13 @@ import { withEnvironment } from "../../adapters/test/git-environment";
 import { MastraJudges } from "../src/judge";
 import type { LlmAgentsOptions } from "../src/llm";
 import { faceFixture } from "./support/fake-image-models";
-import { FAKE_VERDICT, judgesOnFakeAnthropic } from "./support/fake-judges";
-import { fakeVendorServer, vendorAnswer, vendorError } from "./support/fake-vendors";
+import { FAKE_VERDICT, judgesOnFakeVendor } from "./support/fake-judges";
+import {
+  fakeVendorServer,
+  googleBadKeyBody,
+  vendorAnswer,
+  vendorError,
+} from "./support/fake-vendors";
 
 const KEY = "SENTINEL-JUDGE-KEY-0123456789";
 
@@ -314,7 +319,7 @@ describe("Mastra Judge", () => {
     const vendor = fakeVendorServer(() => vendorAnswer("anthropic", JSON.stringify(FAKE_VERDICT)));
     try {
       const result = await withEnvironment({ OPENAI_API_KEY: KEY }, async () =>
-        call(await getJudge(judgesOnFakeAnthropic(vendor.origin), "openai/gpt-5.5")),
+        call(await getJudge(judgesOnFakeVendor(vendor.origin), "openai/gpt-5.5")),
       );
       // Failed at $0 and not retried, so no test can reach a live vendor by accident.
       expect(result).toMatchObject({ kind: "failed", costMicros: 0 });
@@ -435,6 +440,26 @@ describe("Mastra Judge", () => {
     ["status 529", { statusCode: 529 }, "transient", 0],
     ["status 429", { statusCode: 429 }, "transient", 0],
     ["status 400", { statusCode: 400 }, "failed", 0],
+    [
+      "status 400 whose body on its cause is Google's API_KEY_INVALID",
+      {
+        cause: {
+          statusCode: 400,
+          responseBody: JSON.stringify(
+            googleBadKeyBody("API key not valid. Please pass a valid API key."),
+          ),
+        },
+      },
+      "non-recoverable",
+      0,
+    ],
+    [
+      "status 400 whose body isn't JSON",
+      { statusCode: 400, responseBody: "<html>Bad Request</html>" },
+      "failed",
+      0,
+    ],
+    ["status 402", { statusCode: 402 }, "non-recoverable", 0],
     ["status 503 on its cause", { cause: { statusCode: 503 } }, "transient", 0],
     ["status 401 on its cause", { cause: { statusCode: 401 } }, "non-recoverable", 0],
     ["status 403", { statusCode: 403 }, "non-recoverable", 0],
@@ -450,7 +475,7 @@ describe("Mastra Judge", () => {
       null,
     ],
   ] as const)(
-    "an error with %s is %s at cost %s, made once, and never quotes the key",
+    "an error with %s (%o) is %s at cost %p, made once, and never quotes the key",
     async (_, fields, kind, costMicros) => {
       const fake = judges(async () => {
         throw Object.assign(new Error(`upstream said no to ${KEY}`), {

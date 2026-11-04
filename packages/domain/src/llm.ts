@@ -88,8 +88,9 @@ export function callTimeoutMs(effort: Effort): number {
 }
 
 /**
- * A language-model call the vendor turned away for good: HTTP 401, 403 or 404
- * (a rejected key, no access to the model, or no such model). Every later
+ * A language-model call the vendor turned away for good: HTTP 401, 402, 403
+ * or 404 (a rejected key, no credit left, no access to the model, or no such
+ * model), or Google's HTTP 400 for a bad key (`API_KEY_INVALID`). Every later
  * call of the role would be turned away too, so it is never retried and the
  * Lane stops (`optimizer-failed`, `judge-failed`). Vendors don't bill it.
  */

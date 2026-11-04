@@ -13,6 +13,7 @@ export {
   errorLine,
   errorMessage,
   hasErrorNamed,
+  responseBodyOf,
   statusOf,
   withCleanup,
 } from "./errors";
