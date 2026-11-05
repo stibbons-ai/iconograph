@@ -52,8 +52,9 @@ describe("Gemini adapter against recorded responses", () => {
     expect(body).toMatchObject({
       model: "gemini-nano-banana-2.1",
       store: false,
-      response_format: { type: "image", image_size: "2K", delivery: "inline" },
+      response_format: { type: "image", image_size: "2K", mime_type: "image/jpeg" },
     });
+    expect(body.response_format).not.toHaveProperty("delivery");
     expect(body.input[0]).toEqual({ type: "text", text: request.prompt });
     const images = body.input.slice(1);
     expect(images).toHaveLength(4);

@@ -18,7 +18,8 @@ import {
 import type { WorkflowRunStatus } from "@mastra/core/workflows";
 import { type HonoBindings, type HonoVariables, MastraServer } from "@mastra/hono";
 import { Hono } from "hono";
-import { nativeVendors, type RunCliDependencies } from "./cli";
+import type { RunCliDependencies } from "./cli";
+import { nativeVendors } from "./vendors";
 import { createRunApplication, RUN_WORKFLOW_ID } from "./index";
 import { listenAddress, urlHost, WILDCARD_HOSTS } from "./listen-address";
 import { JsonLineLogger } from "./mastra-logger";

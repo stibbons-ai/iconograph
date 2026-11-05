@@ -1,5 +1,6 @@
 import { type CallRecord, candidateKeyOf, imagePath, RunStore } from "@iconograph/adapters";
 import {
+  callCosts,
   type CandidateOutcome,
   type Judgement,
   llmVendor,
@@ -10,17 +11,6 @@ import {
 } from "@iconograph/domain";
 import { Effect } from "effect";
 import { bestCandidateView, RunConfig } from "./run-steps";
-
-/** Estimated and actual USD of some calls; `unknownCostCalls` count at their estimate in the Budget. */
-function costs(calls: readonly CallRecord[]) {
-  const estimated = calls.reduce((sum, call) => sum + call.estimateMicros, 0);
-  const actual = calls.reduce((sum, call) => sum + (call.actualMicros ?? 0), 0);
-  return {
-    estimatedUsd: toUsd(estimated),
-    actualUsd: toUsd(actual),
-    unknownCostCalls: calls.filter((call) => call.actualMicros === null).length,
-  };
-}
 
 /** An Outcome variant as report fields: its tag as `outcome`, then its details. */
 type OutcomeFields<O> = O extends { _tag: infer Tag } ? { outcome: Tag } & Omit<O, "_tag"> : never;
@@ -48,7 +38,7 @@ const callView = (call: CallRecord) => ({
 
 /** Calls and their costs, as shown for one purpose of a Candidate. */
 const callsView = (calls: readonly CallRecord[]) => ({
-  ...costs(calls),
+  ...callCosts(calls),
   calls: calls.map(callView),
 });
 
@@ -95,8 +85,9 @@ const priceView = ({ _tag, ...age }: PriceQuote["source"]) => ({ source: _tag, .
  * Everything the operator needs about a Run, read back from the Run tables:
  * per Candidate its Iteration (from 1), index (from 0), Outcome, Likeness,
  * reason, stored image and generation costs, its judgement and Judge costs;
- * per Lane its stop reason (with `stopDetail`, the vendor's reason, when the
- * Optimizer or the Judge was turned away for good), how many Iterations it
+ * per Lane `resample: true` for a Resample Lane, its stop reason (with
+ * `stopDetail`, the vendor's reason, when the Optimizer or the Judge was
+ * turned away for good), how many Iterations it
  * began (each has its Prompt stored; the last may have made no call, if the
  * Run was cancelled or its first calls didn't fit the Budget), its best
  * Candidate, and its Prompt history (each Iteration's Prompt, where it came
@@ -171,6 +162,7 @@ export const runReport = (runId: string, workflowCancelled = false) =>
         return {
           lane: lane.lane,
           model: lane.model,
+          ...(run.request.lanes[lane.lane]?.resample && { resample: true as const }),
           // A Run Mastra stored as cancelled whose cancel wasn't recorded yet.
           stopReason: lane.stopReason ?? (workflowCancelled ? "cancelled" : null),
           ...(lane.stopDetail !== null && { stopDetail: lane.stopDetail }),
@@ -204,7 +196,7 @@ export const runReport = (runId: string, workflowCancelled = false) =>
             judgement: judgementView(judgement),
             judgeCost: callsView(calls.filter(({ purpose }) => purpose === "judge")),
           })),
-          ...costs(ledger.filter((call) => call.lane === lane.lane)),
+          ...callCosts(ledger.filter((call) => call.lane === lane.lane)),
         };
       }),
       unattributedCalls: unattributed.map((call) => ({
@@ -215,7 +207,7 @@ export const runReport = (runId: string, workflowCancelled = false) =>
       })),
       totals: {
         budgetUsd: toUsd(run.budgetMicros),
-        ...costs(ledger),
+        ...callCosts(ledger),
         remainingUsd: toUsd(remainingMicros(run.budgetMicros, ledger)),
       },
     };

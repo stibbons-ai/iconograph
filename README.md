@@ -113,6 +113,10 @@ bun run run --budget 0.50 me-1.jpg me-2.jpg me-3.jpg
 # Print a stored Run again from the database.
 bun run run read --run-id RUN_ID
 
+# Compare the Optimizer loop with resampling the starting Prompt (see "Eval harness"); by hand only,
+# with real keys.
+bun run eval --out ~/eval-out ~/subjects
+
 # The HTTP server on 127.0.0.1:4111 (see "Server and container").
 bun run serve
 bun run build:server  # bundle + pruned externals in dist/server, for this machine
@@ -318,10 +322,12 @@ reaches the threshold. The threshold (0.52, calibrated on real pairs in issue #1
 [`packages/adapters/src/held-out-embedder.ts`](packages/adapters/src/held-out-embedder.ts).
 
 **Never used by the Optimizer loop:** the held-out embedder is its own service
-(`HeldOutFaceEmbedder`, not a `FaceEmbedder`) and is not exported from `@iconograph/adapters`,
-whose `exports` field exposes only its index, so the server and its run workflow cannot import or
-provide it; `packages/server/test/held-out-isolation.test.ts` checks this (`faces:calibrate` below
-is the other command that loads it).
+(`HeldOutFaceEmbedder`, not a `FaceEmbedder`) and is not exported from the `@iconograph/adapters`
+index. Its module is also reachable as `@iconograph/adapters/held-out`, for the eval harness, which
+scores Candidates only after their Run has ended; that subpath resolves from the server too, so lint
+forbids it in `packages/server/**` and the import-graph test in
+`packages/server/test/held-out-isolation.test.ts` fails on any server module that imports it
+(`faces:calibrate` below and the eval harness are the other commands that load it).
 
 ### Calibrating the face thresholds
 
@@ -670,7 +676,8 @@ Judge's in the Lane's first Iteration with a Scored Candidate.
   stored; the last may have made no call, after a cancel or when its first calls didn't fit —
   `best` Candidate — `iteration` from 1, `candidate` index from 0 within it, and
   `score`, or null when none was judged — its `prompts`, one per Iteration with the Prompt, its
-  `source` (`initial`, `optimizer`, or `kept` with a `reason`) and the `optimizerCost` of that
+  `source` (`initial`, `optimizer`, `kept` with a `reason`, or `resampled` in an eval harness
+  Resample Lane, marked `resample: true`) and the `optimizerCost` of that
   Iteration's Optimizer calls, which wrote the next Iteration's Prompt; character references and
   price source): per Candidate its Iteration, index and Outcome —
   `Refused` or `Failed` with a reason, `Gated` (`no-face` or `below-gate`, with the best face's
@@ -687,7 +694,8 @@ Judge's in the Lane's first Iteration with a Scored Candidate.
   `warnings` (branch on `code`, e.g. `judge-same-vendor`, never on the message); the Reference
   Photo warnings. `actualUsd` counts calls of unknown cost (`unknownCostCalls`) as $0, while the
   remaining Budget counts them at their estimate, so `budgetUsd − actualUsd` can exceed
-  `remainingUsd`. Calls whose Candidate was never saved (the Run failed or was cancelled
+  `remainingUsd`; `committedUsd`, beside every `actualUsd`, counts them at their estimate too.
+  Calls whose Candidate was never saved (the Run failed or was cancelled
   mid-call) are listed in `unattributedCalls` and still counted. With several faces in a
   Candidate, the best match to the
   Identity Anchor counts. A Run that fails after it started prints its `runId` in the stderr error,
@@ -707,7 +715,109 @@ Judge's in the Lane's first Iteration with a Scored Candidate.
   Lane whose stop is recorded: a call whose result was stored is never made again; one whose call
   ran but whose result was lost is made again, under the next attempt number, and billed again.
   A database written before the Judge or the Optimizer existed is refused (its cost records have
-  no purpose, or can't hold an Optimizer call); use a new `--db` file.
+  no purpose, or can't hold an Optimizer call); use a new `--db` file. On one written before
+  Resample Lanes (its Prompt sources lack `resampled`), every other Run works and a Run with a
+  Resample Lane is refused before anything billable.
+
+### Eval harness
+
+`bun run eval` answers Milestone 0's question: does the Optimizer loop beat resampling the
+starting Prompt at the same Budget? For every Subject and Image Model it runs two Arms, one Run
+each, then scores every generated image of both with judges the loop never sees.
+
+```sh
+GEMINI_API_KEY=… OPENAI_API_KEY=… ANTHROPIC_API_KEY=… \
+  bun run eval --out ~/eval-out --budget 2 --candidates 3 ~/subjects
+```
+
+- **Run by hand only, with real keys: it costs money.** About (Subjects × Image Models × 2) ×
+  `--budget` goes to the Arms (a call that costs more than its estimate can overshoot a Run's
+  Budget); the second Judge's spend comes on top, outside that Budget, and is reported separately.
+  Both Judges' keys and prices, every Image Model's and, unless `--max-iterations 1`, the
+  Optimizer's are checked, the photos validated and the face models loaded before the first
+  billable call, and the plan (Runs, the Arms' total Budget) prints first. Until all of that has
+  passed, nothing is written to the output folder (the price cache and the checked photos' copies
+  go to a scratch folder that is removed afterwards), so the same `--out` works again; the output
+  folder is created then, and never removed. CI never runs it: its tests use fake vendors only
+  (`packages/eval-harness/test`).
+- **Subjects folder** (required, outside this repository): one folder per consenting Subject with
+  1 to 8 Reference Photos (JPEG, PNG or HEIC), numbered in name order with numbers compared as
+  numbers (`2.jpg` before `10.jpg`) and validated as by `photos:validate`; every photo must be
+  accepted. Optional files, matched without case: `look.json` (the Target Look, as `--look` of
+  `bun run run`), `prompt.txt` (the starting Prompt of both Arms, not empty; default the Prompt
+  built from the Target Look) and `faces.json` (`{"group.jpg": 2}`: face 2 of that photo, numbered
+  as by `photos:validate`). Hidden entries are ignored.
+
+  ```text
+  subjects/
+    ada/1.jpg  ada/2.heic  ada/look.json  ada/prompt.txt
+    bob/1.jpg  bob/2.png   bob/faces.json
+  ```
+
+- **Arms:** `optimizer` is the normal Run (the Optimizer rewrites the Prompt between Iterations);
+  `resample` is a Run whose single Lane is a Resample Lane (`resample: true` in its Lane request): it
+  sends the starting Prompt every Iteration and never calls the Optimizer, so it is best-of-N
+  sampling with the same Judge. Equal Budget means each Arm's Run gets the same `--budget` cap,
+  Candidates per Iteration and Judge, and the same stopping rules except patience, which is off for
+  the Resample Arm (set above the Iteration limit): patience stops an Optimizer that no longer
+  improves, and a fixed Prompt never tries to, so it would end Resample Runs early with fewer
+  images. The schema caps patience at 50, so at `--max-iterations 50` it is 50: it can then fire
+  only in the last Iteration, and only when no Iteration scored. When the Budget, not the Iteration
+  limit, ends its Runs, the Resample Arm spends what the Optimizer would have cost on more images.
+  Each Arm's images and spend are reported beside its scores; `report.json` has each Arm's
+  stopping rules (`settings.armStopRules`) and the second Judge's weights
+  (`settings.evalJudgeWeights`).
+- **Options:** `--out DIR` (new or empty, outside the repository; default `SUBJECTS/.eval-TIMESTAMP`)
+  receives the Runs' database (`runs.db`, readable with `bun run run read --db DIR/runs.db --data-dir
+  DIR/data --run-id ID`), their images (`data/`), every evaluated Run as soon as
+  it finishes (`runs.jsonl`, one JSON line each) and `report.json`; nothing is written into the
+  repository. `--model NAME` (repeatable: `gemini`, `openai`, `openai:sunburst`, `openai:flare`;
+  default `gemini` and `openai`), `--budget`, `--candidates`, the loop's `--judge-*` and
+  `--optimizer-*` and the stopping rules as for `bun run run` (`--patience` for the Optimizer Arm
+  only); `--eval-judge-model ID` and `--eval-judge-effort LEVEL` (default: `openai/gpt-5.5`, or
+  `google/gemini-3.1-pro-preview` when the loop's Judge is OpenAI's, at low effort); `--data-dir`
+  holds the face-model weights (FaceNet built with `models:export-facenet`).
+- **Held-out scores:** every Candidate with an image is scored by FaceNet (its best face's cosine
+  similarity to the held-out anchor of the Subject's accepted Reference Photos, and whether it
+  reaches the threshold, 0.52) and by the second Judge, which must come from another vendor than the
+  loop's Judge (the same vendor is an error). It scores against the same Rubric with the existing
+  Judge code and sees the Reference Photos the loop's Judge sees; its score is the Rubric's weighted
+  total without Likeness (the default weights with Likeness at 0, the rest scaled to sum to 1), so
+  the loop's face model never enters it. An image the held-out decode can't read is `unreadable`
+  for both and not sent to the second Judge. A warning (`eval-judge-same-vendor`) names Image Models
+  from the second Judge's vendor, whose images it may favour. Images without a face, unreadable
+  images and Judge failures are counted, never averaged in; Candidates without an image (Refused,
+  Failed) have no held-out score.
+- **Failures:** the evaluation fails fast. A vendor's answer about one image (refused, failed, no
+  face, unusable) is a score; anything else stops the evaluation after that Run: a Run that fails
+  or can't be read back, a fault while scoring (the face models, a file, a bug), and a Run the
+  vendor stopped because it rejected the loop's Judge or Optimizer for good (`judge-failed`,
+  `optimizer-failed`: HTTP 401, 402, 403 or 404, i.e. its key, its model or the account's credit),
+  since every later Run would pay for images it can't judge or improve. The Run that stopped it is
+  listed with what it stored and spent (`complete: false`, and `armCost: null` when its spend
+  couldn't be read back: unknown, not $0). When the second Judge's vendor rejects a call that way, a
+  warning (`eval-judge-rejected`) prints at once and the remaining images are `skipped` by it; its
+  calls run one at a time until its vendor has answered one (judged or refused), so a rejected key
+  costs one call, and up to 4 at a time after that. Once a Run has started, `report.json` is always
+  written: `incomplete` and `incompleteReason` (null when complete), and the command exits nonzero
+  when it is incomplete. What stopped it stays the reason: errors after it (closing the vendors,
+  writing the report) are attached to it; failing to remove the scratch folder is only a warning
+  (`scratch-cleanup-failed`).
+- **Report:** two tables on stdout and `report.json` with, per Arm, overall, per Image Model and per
+  Subject and Image Model: Runs, images, FaceNet best, mean, mean of the Subjects' means (every
+  Subject alike, where the mean weighs every image alike), mean of each Run's best (with how many
+  Runs it covers in `report.json`), how many pass, images without a face, unreadable images; the
+  same four for the second Judge with its failed and skipped judgings; the Arm's spend and the
+  evaluation's spend; then the loop's own scores (its Judge's weighted total and SFace Likeness),
+  kept apart. Only complete pairs (both Arms of a Subject and Image Model, neither stopped by a
+  rejected Judge or Optimizer) are compared
+  (`pairs.compared` of `pairs.planned`); every Run is listed and counted in the totals. Spend is
+  what the vendors reported; with calls of unknown cost the table adds `~` the committed figure,
+  which counts those at their estimate (`committedUsd` in `report.json`; a call can still cost
+  more). `report.json` adds the settings, every Run (its id, null when it was never stored; stop
+  reason, Iterations, costs, price sources and each Candidate's scores) and the warnings (price
+  refresh failures, the Run engine's warnings, the second Judge's). Progress and each Run's
+  estimate print as JSON lines on stderr.
 
 ### ADR validation and commits
 

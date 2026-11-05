@@ -104,12 +104,18 @@ export function fakeOptimizers(
 
 /**
  * The real Optimizers, priced at `FAKE_JUDGE_PRICING`, on the fake `vendor`
- * API (Anthropic unless given) at `origin`.
+ * API (Anthropic unless given) at `origin`; keys from `env` (default: the
+ * process environment).
  */
-export const optimizersOnFakeVendor = (origin: string, vendor: LlmVendor = "anthropic") =>
+export const optimizersOnFakeVendor = (
+  origin: string,
+  vendor: LlmVendor = "anthropic",
+  env?: Record<string, string | undefined>,
+) =>
   MastraOptimizers({
     prices: { lookup: (model) => Effect.succeed(fakeLlmPrice(model)) },
     fetch: fakeVendorFetch(origin, "Optimizer", vendor),
+    ...(env && { env }),
   });
 
 /**

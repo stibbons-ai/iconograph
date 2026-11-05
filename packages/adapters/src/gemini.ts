@@ -319,11 +319,12 @@ export function geminiImageModel(options: GeminiImageModelOptions): ImageModel {
           data: base64Of(bytes),
         })),
       ],
+      // No `delivery`: the live API answers 400 "Image delivery mode is not supported" although the
+      // OpenAPI spec lists it; images come back inline by default.
       response_format: {
         type: "image",
         image_size: request.size,
         mime_type: "image/jpeg",
-        delivery: "inline",
       },
       store: false,
     }),

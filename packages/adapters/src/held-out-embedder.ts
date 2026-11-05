@@ -17,11 +17,14 @@ import type { Fetch } from "./models";
  * Held-out face model (ADR-0008). The Optimizer must never see this model, or it
  * would drift towards it as it does towards its own scorer. Isolation is
  * structural: `HeldOutFaceEmbedder` is its own service, not a `FaceEmbedder`,
- * and nothing here is exported from `@iconograph/adapters` (whose `exports`
- * field is its index only), so the server and its workflow cannot import or
- * provide it. Only the `faces:heldout` and `faces:calibrate` commands
- * (`heldout-cli.ts`, `calibrate-cli.ts`) use it.
- * `packages/server/test/held-out-isolation.test.ts` proves it.
+ * and nothing here is exported from the `@iconograph/adapters` index. This
+ * module is also reachable as `@iconograph/adapters/held-out`, for the eval
+ * harness, which scores a Run's Candidates after the Run has ended; that
+ * subpath resolves from the server too, so lint forbids it there and the
+ * server's import-graph test fails on any import of it. Only the
+ * `faces:heldout` and `faces:calibrate` commands (`heldout-cli.ts`,
+ * `calibrate-cli.ts`) and `bun run eval` use it.
+ * `packages/server/test/held-out-isolation.test.ts` checks this.
  */
 
 /** Configuration of the held-out FaceNet backend; its thresholds live here only. */

@@ -1,6 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import type { EncodedImage } from "@iconograph/domain";
+import { type EncodedImage, JUDGE_IMAGE_MAX_SIDE } from "@iconograph/domain";
 import sharp from "sharp";
 import { imagesDirectory } from "./data-directory";
 import { writeFileAtomically } from "./files";
@@ -73,3 +73,10 @@ export async function readImageAtMost(
     .toBuffer();
   return { bytes: resized, mimeType: "image/jpeg" };
 }
+
+/**
+ * A stored image as every Judge sees it (the loop's and the eval harness's
+ * second Judge): normalised to JPEG, at most `JUDGE_IMAGE_MAX_SIDE` px.
+ */
+export const readForJudge = (path: string) =>
+  readImageAtMost(path, "image/jpeg", JUDGE_IMAGE_MAX_SIDE, { normalise: true });
