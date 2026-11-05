@@ -788,6 +788,17 @@ GEMINI_API_KEY=… OPENAI_API_KEY=… ANTHROPIC_API_KEY=… \
   from the second Judge's vendor, whose images it may favour. Images without a face, unreadable
   images and Judge failures are counted, never averaged in; Candidates without an image (Refused,
   Failed) have no held-out score.
+- **Flat second Judge:** a second Judge that gives (nearly) every image the same score can't tell
+  the Arms apart (in the #14 run, 66 of 68 images got 7.50). Whenever `report.json` is written
+  (also when the evaluation stopped early), a warning (`eval-judge-flat`) fires when at least 80%
+  of at least 10 images it judged share one score, rounded to hundredths, the tables' precision. It
+  counts the images of every Run of both Arms, the one that stopped the evaluation included, and
+  only those it judged: failed, skipped and unreadable judgings count neither in the share nor in
+  the 10. It checks all images and, when more than one Image Model has judged images, each Image
+  Model's alone, one warning per flat scope, with the second Judge (`judge`), the scope
+  (`imageModel`, null for all images), the dominant `score`, its `share` (0 to 1) and the judged
+  `images`. Its second Judge comparison is then weak evidence: lean on FaceNet, or rerun with
+  another second Judge or effort.
 - **Failures:** the evaluation fails fast. A vendor's answer about one image (refused, failed, no
   face, unusable) is a score; anything else stops the evaluation after that Run: a Run that fails
   or can't be read back, a fault while scoring (the face models, a file, a bug), and a Run the
@@ -817,7 +828,8 @@ GEMINI_API_KEY=… OPENAI_API_KEY=… ANTHROPIC_API_KEY=… \
   more). `report.json` adds the settings, every Run (its id, null when it was never stored; stop
   reason, Iterations, costs, price sources and each Candidate's scores) and the warnings (price
   refresh failures, the Run engine's warnings, the second Judge's). Progress and each Run's
-  estimate print as JSON lines on stderr.
+  estimate print as JSON lines on stderr. Below the tables, stdout repeats each `eval-judge-flat`
+  warning's message, so a reader of the tables sees it.
 
 ### ADR validation and commits
 

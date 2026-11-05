@@ -1,5 +1,6 @@
 import { addCallCosts, type CallCosts, LANE_STOPS_WITH_DETAIL } from "@iconograph/domain";
 import { ARMS, type Arm, type ArmRun, type EvaluatedCandidate } from "./arms";
+import type { EvalWarning } from "./evaluate";
 
 /*
  * The eval report: pure aggregation of what every Arm's Runs produced and how
@@ -194,6 +195,63 @@ export function compareArms(runs: readonly ArmRun[], planned: number): Compariso
       evalCost: addCallCosts(runs.map(({ evalCost }) => evalCost)),
     },
   };
+}
+
+/** The share of judged images at one score from which the second Judge counts as flat. */
+export const FLAT_JUDGE_SHARE = 0.8;
+/** The fewest judged images in a scope for the flat check: below it, one score is no signal. */
+export const FLAT_JUDGE_MIN_IMAGES = 10;
+
+/**
+ * `eval-judge-flat` warnings: where at least `FLAT_JUDGE_SHARE` of at least
+ * `FLAT_JUDGE_MIN_IMAGES` images the second Judge (`judge`) judged in `runs`
+ * share one score (rounded to hundredths, the tables' precision), it can
+ * hardly tell the Arms apart. Checked over all images and, when more than one
+ * Image Model has judged images, over each Image Model's (in the order of
+ * their first judged image). Failed, skipped and unreadable judgings don't
+ * count.
+ */
+export function flatJudgeWarnings(runs: readonly ArmRun[], judge: string): EvalWarning[] {
+  // Each judged score in hundredths, all together and per Image Model (in first-judged order).
+  const all: number[] = [];
+  const byModel = new Map<string, number[]>();
+  for (const { model, candidates } of runs) {
+    for (const { evalJudge } of candidates) {
+      if (evalJudge?.status !== "judged") continue;
+      const cents = Math.round(evalJudge.score * 100);
+      all.push(cents);
+      const modelCents = byModel.get(model);
+      if (modelCents) modelCents.push(cents);
+      else byModel.set(model, [cents]);
+    }
+  }
+  const scopes: { imageModel: string | null; cents: number[] }[] = [
+    { imageModel: null, cents: all },
+  ];
+  if (byModel.size > 1) {
+    for (const [imageModel, cents] of byModel) scopes.push({ imageModel, cents });
+  }
+  return scopes.flatMap(({ imageModel, cents }) => {
+    const images = cents.length;
+    if (images < FLAT_JUDGE_MIN_IMAGES) return [];
+    const counts = new Map<number, number>();
+    for (const value of cents) counts.set(value, (counts.get(value) ?? 0) + 1);
+    const [top, count] = [...counts].reduce((most, entry) => (entry[1] > most[1] ? entry : most));
+    const share = count / images;
+    if (share < FLAT_JUDGE_SHARE) return [];
+    const dominant = top / 100;
+    return [
+      {
+        code: "eval-judge-flat",
+        message: `The second Judge ${judge} gave ${Math.floor((count * 100) / images)}% of the ${images} judged images (${imageModel ?? "all Image Models"}) the same score, ${dominant.toFixed(2)}: its comparison of the Arms is weak evidence`,
+        judge,
+        imageModel,
+        score: dominant,
+        share,
+        images,
+      },
+    ];
+  });
 }
 
 const score = (value: number | null, digits: number) =>
