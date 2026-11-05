@@ -150,13 +150,16 @@ describe("Rubric v2", () => {
     }
   });
 
-  test("Resemblance counts apparent age either way as a difference, retouching within the facet not", () => {
+  test("Resemblance counts apparent age either way and retouching beyond the facet as differences, retouching within it not", () => {
     const { question, anchors } = RUBRIC_V2.criteria.resemblance;
     expect(question).toContain("neither older nor younger");
     expect(question).toContain(
-      "Retouching within the Target Look's retouching is not a difference",
+      "Retouching within what the Target Look's retouching allows is not a difference; retouching beyond it (e.g. any smoothing or whitening when it says none)",
     );
     expect(anchors[2]).toContain("clearly older or younger, e.g. obviously younger skin");
+    expect(anchors[3]).toContain(
+      "slight retouching beyond what the Target Look's retouching allows",
+    );
     expect(anchors[3]).not.toContain("idealised or smoothed");
   });
 

@@ -21,6 +21,7 @@ import {
   type CallEstimate,
   type CallGate,
   type CandidateOutcome,
+  CURRENT_RUBRIC,
   DEFAULT_RETRY_POLICY,
   FaceEmbedder,
   fitsBudget,
@@ -83,6 +84,16 @@ export const defaultRunConfig = (dataDirectory: string): RunConfig["Service"] =>
 
 /** A Run that can't proceed, for a reason the operator can fix. */
 export class RunError extends Data.TaggedError("RunError")<{ message: string; cause?: unknown }> {}
+
+/** A Run keeps its Rubric: one judged with another version than this build's can't go on. */
+const keepsRubric = (runId: string, recorded: string, current: string) =>
+  recorded === current
+    ? Effect.void
+    : Effect.fail(
+        new RunError({
+          message: `Run ${runId} was judged with ${recorded}; this build judges only with ${current}`,
+        }),
+      );
 
 /** The stored (stripped) copies of the given accepted Reference Photos, in order. */
 const storedPhotos = (photoReport: ReferencePhotoReport, photos: readonly number[]) => {
@@ -578,11 +589,7 @@ export const judgeIteration = (input: LaneState) =>
     const record = yield* store.loadJudge(input.runId);
     if (!record) return yield* new RunError({ message: `Run ${input.runId} has no Judge` });
     const judge = yield* (yield* Judges).get(run.request.judge, record.price);
-    if (judge.rubric.version !== record.rubricVersion) {
-      return yield* new RunError({
-        message: `Run ${input.runId} was judged with ${record.rubricVersion}; this build judges only with ${judge.rubric.version}`,
-      });
-    }
+    yield* keepsRubric(input.runId, record.rubricVersion, judge.rubric.version);
     const pending = (yield* store.loadCandidates(input.runId, input.lane)).filter(
       (candidate): candidate is ScoredCandidate =>
         candidate.iteration === input.iteration &&
@@ -765,9 +772,13 @@ export const optimizeIteration = (input: LaneState) =>
  */
 export const runIteration = (input: LaneState) =>
   Effect.gen(function* () {
-    const lanes = yield* (yield* RunStore).loadLanes(input.runId);
+    const store = yield* RunStore;
+    const lanes = yield* store.loadLanes(input.runId);
     const stopped = lanes.find(({ lane }) => lane === input.lane)?.stopReason;
     if (stopped) return { ...input, stopReason: stopped } satisfies LaneState;
+    // Checked before any image is paid for; the judge phase checks the Judge it gets again.
+    const record = yield* store.loadJudge(input.runId);
+    if (record) yield* keepsRubric(input.runId, record.rubricVersion, CURRENT_RUBRIC.version);
     return yield* generateIteration(input).pipe(
       Effect.flatMap(scoreIteration),
       Effect.flatMap(judgeIteration),

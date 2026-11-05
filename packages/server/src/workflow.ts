@@ -1,5 +1,5 @@
 import { errorMessage, toMastraSchema } from "@iconograph/adapters";
-import { RunRequest } from "@iconograph/domain";
+import { RunRequest, TargetLook } from "@iconograph/domain";
 import { createStep, createWorkflow } from "@mastra/core/workflows";
 import { Effect, type ManagedRuntime, Schema } from "effect";
 import { laneResult, prepareRun, recordCancelledLanes, runIteration } from "./run-steps";
@@ -15,6 +15,29 @@ export const LANE_CONCURRENCY = 4;
 /** `foreach` needs a mutable array type between steps. */
 const Lanes = Schema.mutable(Schema.Array(LaneState));
 const LaneResults = Schema.mutable(Schema.Array(LaneResult));
+
+const facets: readonly string[] = Object.keys(TargetLook.fields);
+
+/**
+ * The Run request as the API takes it: `RunRequest`, except that a Target Look
+ * key that is no facet fails instead of being dropped. `retouching` is the one
+ * facet a request may leave out (it is then `NO_RETOUCHING`), so a misspelled
+ * `retouching` must not pass as a missing one. Stored Runs keep decoding with
+ * `RunRequest`.
+ */
+export const RunRequestInput = RunRequest.mapFields(
+  (fields) => ({
+    ...fields,
+    targetLook: Schema.StructWithRest(TargetLook, [
+      Schema.Record(
+        Schema.String.check(Schema.makeFilter((key: string) => !facets.includes(key))),
+        Schema.Unknown.check(Schema.makeFilter(() => "Unknown Target Look facet")),
+      ),
+    ]),
+  }),
+  // The request's own check reads only `photos` and `lanes`, which this leaves as they are.
+  { unsafePreserveChecks: true },
+);
 
 /**
  * Recording cancelled Runs' Lanes, so closing the application can wait for it.
@@ -168,7 +191,7 @@ export function createRunWorkflow(
   return (
     createWorkflow({
       id: RUN_WORKFLOW_ID,
-      inputSchema: toMastraSchema(RunRequest),
+      inputSchema: toMastraSchema(RunRequestInput),
       outputSchema: toMastraSchema(RunResult),
       options: {
         validateInputs: true,

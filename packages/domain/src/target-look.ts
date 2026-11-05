@@ -10,8 +10,9 @@ const Facet = Schema.String.check(Schema.isTrimmed(), Schema.isNonEmpty(), Schem
 export const HAIRSTYLE_AS_IN_REFERENCE_PHOTOS = "as in the Reference Photos";
 
 /**
- * The retouching of a Run stored before the `retouching` facet existed (ADR
- * 0015): those Runs were generated and judged without any retouching.
+ * The retouching of a Target Look that leaves the facet out (ADR 0015): a Run
+ * stored before the facet existed, generated and judged without retouching,
+ * and an API request that doesn't give it.
  */
 export const NO_RETOUCHING = "none";
 
@@ -36,8 +37,9 @@ export const DEFAULT_TARGET_LOOK = {
  * The desired appearance of the headshot (GLOSSARY "Target Look"), one text per
  * fixed facet. `lighting` covers lighting and colour; `retouching` how far the
  * Subject's skin and teeth may be retouched. A Run stores the decoded value
- * when it starts and never changes it; a stored Run without `retouching`
- * (stored before the facet existed) reads as `NO_RETOUCHING`.
+ * when it starts and never changes it. Without `retouching` (a Run stored
+ * before the facet existed, or an API request that leaves it out) it reads as
+ * `NO_RETOUCHING`.
  */
 export const TargetLook = Schema.Struct({
   pose: Facet,
@@ -106,7 +108,7 @@ export function initialPrompt(look: TargetLook): string {
       : look.hairstyle;
   return [
     "A photorealistic professional headshot of the person shown in the attached reference photos.",
-    "Keep their identity exactly: the same facial features, face shape, proportions, skin tone, age and any distinctive marks, and the same beard and hair colour, including any grey. Retouching never changes these; it may only soften what the Retouching line below allows.",
+    "Keep their identity exactly: the same facial features, face shape, proportions, skin tone, age and any distinctive marks, and the same beard and hair colour, including any grey, unless the Hairstyle line asks otherwise. Retouching never changes these; it may only change what the Retouching line below allows.",
     `Pose: ${look.pose}.`,
     `Hairstyle: ${hairstyle}.`,
     `Clothing: ${look.clothing}.`,

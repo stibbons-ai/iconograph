@@ -50,7 +50,8 @@ Options:
                       clothing, framing, retouching; each a text. Missing facets
                       take their defaults; hairstyle defaults to "as in the
                       Reference Photos", retouching to natural professional
-                      retouching (the Subject at their real age); "none" for none.
+                      retouching (the Subject at their real age); "none" for no
+                      retouching.
   --lane SPEC         One Lane per use; repeatable (default: one gemini Lane).
                       Up to ${LANE_CONCURRENCY} Lanes run at a time; more wait their turn.
                       SPEC is NAME[,photos=N+N...][,prompt=FILE]:

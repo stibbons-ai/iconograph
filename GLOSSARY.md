@@ -20,7 +20,7 @@ The desired appearance of the headshot, expressed as fixed facets (pose, backgro
 _Avoid_: Style, spec, target spec
 
 **Retouching**:
-The Target Look facet saying how far the Subject's skin and teeth may be softened or brightened; by default natural professional retouching that keeps the Subject at their real age as in the Reference Photos. It never changes identity (features, face shape, permanent marks, beard and hair colour).
+The Target Look facet saying how far the Subject's skin and teeth may be retouched; by default natural professional retouching that keeps the Subject at their real age as in the Reference Photos. It never changes identity (features, face shape, distinctive marks, beard and hair colour).
 _Avoid_: Beautification, idealisation
 
 ## Run structure

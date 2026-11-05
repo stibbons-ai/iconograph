@@ -2125,6 +2125,27 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
     return { images, judge, optimizer, runtime, iteration };
   };
 
+  test("a Run judged with another Rubric version fails its Iteration before any image is paid for", async () => {
+    const { application, databasePath, dataDirectory } = await setup(["same"]);
+    const { runId } = await application.start(loop(rules({ maxIterations: 1 })));
+    await application.close();
+    // A Run started under Rubric v1, before this build, restarted with Iteration 1 to generate.
+    tamper(databasePath, "UPDATE judges SET rubric_version = 'rubric-v1'");
+    tamper(databasePath, "DELETE FROM judgements");
+    tamper(databasePath, "DELETE FROM cost_records");
+    tamper(databasePath, "DELETE FROM candidates");
+    tamper(databasePath, "UPDATE lanes SET stop_reason = NULL");
+    const again = stepsOn(databasePath, dataDirectory, ["same"]);
+    try {
+      await expect(again.iteration(lane0Iteration1(runId))).rejects.toThrow(
+        "was judged with rubric-v1; this build judges only with rubric-v2",
+      );
+      expect(again.images.requests).toHaveLength(0);
+    } finally {
+      await again.runtime.dispose();
+    }
+  }, 60_000);
+
   test("an interrupt that lands while a call is being reserved leaves no reservation unsettled", async () => {
     const { application, databasePath, dataDirectory } = await setup(["same"]);
     const { runId } = await application.start(loop(rules({ maxIterations: 1 })));

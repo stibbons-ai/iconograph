@@ -988,6 +988,28 @@ describe("HTTP server Runs", () => {
     expect(outside.status).toBe(400);
   }, 60_000);
 
+  test("an API request without retouching gets none, and a Target Look key that is no facet is refused", async () => {
+    const data = await volumeWithPhotos();
+    const fake = fakeImageModels({ "gemini-nano-banana-2.1": ["same"] });
+    const { server } = await serve(data, fake.layer);
+    await server.booted;
+    const { retouching: _, ...sixFacets } = DEFAULT_TARGET_LOOK;
+    // A misspelled `retouching` must not pass as a missing one.
+    const misspelled = await post(server.url, "/api/workflows/run/start-async", {
+      inputData: { ...runInput(), targetLook: { ...sixFacets, retoucing: "none" } },
+    });
+    expect(misspelled.status).toBe(400);
+    expect(await misspelled.text()).toContain("Unknown Target Look facet");
+    expect(fake.requests).toHaveLength(0);
+    const result = await startRun(
+      server.url,
+      runInput({ candidates: 1, targetLook: sixFacets as RunRequest["targetLook"] }),
+    );
+    expect(result.status).toBe("success");
+    const report = await readRunReport(runsDatabase(data), data, result.result!.runId);
+    expect(report.targetLook.retouching).toBe("none");
+  }, 60_000);
+
   test("rejects Reference Photos outside the data volume before the Judge or any Image Model is asked", async () => {
     const data = await volumeWithPhotos();
     const outside = await temporaryDirectory();

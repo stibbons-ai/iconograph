@@ -94,8 +94,9 @@ describe("the Judge's instructions", () => {
     const instructions = judgeInstructions(CURRENT_RUBRIC);
     expect(instructions).toContain("Rubric rubric-v2:");
     expect(instructions).toContain(
-      "Judge retouching against the Target Look's retouching through Resemblance and Realism",
+      "in Resemblance, retouching within what it allows is not a difference from the Reference Photos, while retouching beyond it (e.g. any smoothing or whitening when it says none)",
     );
+    expect(instructions).toContain("in Realism, visible over-editing is an artefact");
   });
 
   test("the Target Look the Judge sees ends with its retouching", () => {

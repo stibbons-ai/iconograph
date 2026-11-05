@@ -419,6 +419,7 @@ test("help documents the arguments, the Budget and the key", async () => {
     "--budget USD",
     "--candidates N",
     "--look FILE",
+    "retouching",
     "--pin PHOTO",
     "--lane SPEC",
     "openai:flare",

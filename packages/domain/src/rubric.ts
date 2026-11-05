@@ -1,6 +1,5 @@
 import { Schema } from "effect";
 import { MAX_LIKENESS } from "./likeness";
-import type { TargetLook } from "./target-look";
 
 /**
  * The criteria the Judge scores, in the order the Rubric lists them. Likeness
@@ -57,7 +56,7 @@ export interface Rubric {
 /** A facet criterion: how well the Candidate matches that Target Look facet. */
 const facetCriterion = (
   title: string,
-  facet: keyof TargetLook,
+  facet: Exclude<JudgedCriterion, "resemblance" | "realism">,
   described: string,
 ): RubricCriterion => ({
   title,
@@ -114,8 +113,9 @@ export const RUBRIC_V1: Rubric = {
 /**
  * Rubric v2 (ADR 0015): v1 with Resemblance and Realism rewritten for
  * retouching. Apparent age older or younger than in the Reference Photos is a
- * difference; retouching within the Target Look's `retouching` facet is not,
- * and visible over-editing is an artefact. The facet criteria are v1's.
+ * difference, and so is retouching beyond what the Target Look's `retouching`
+ * facet allows; retouching within it is not, and visible over-editing is a
+ * Realism artefact. The facet criteria are v1's.
  */
 export const RUBRIC_V2: Rubric = {
   version: "rubric-v2",
@@ -124,13 +124,13 @@ export const RUBRIC_V2: Rubric = {
     resemblance: {
       title: "Resemblance",
       question:
-        "Is the person in the Candidate unmistakably the Subject shown in the Reference Photos, at the same apparent age, neither older nor younger? Retouching within the Target Look's retouching is not a difference; changed features or face shape are.",
+        "Is the person in the Candidate unmistakably the Subject shown in the Reference Photos, at the same apparent age, neither older nor younger? Retouching within what the Target Look's retouching allows is not a difference; retouching beyond it (e.g. any smoothing or whitening when it says none), changed features or face shape are.",
       anchors: [
         "a different person",
         "shares some traits with the Subject but would not be recognised as them",
         "plausibly the Subject, but with noticeable differences in facial features, face shape, proportions or apparent age (clearly older or younger, e.g. obviously younger skin)",
-        "clearly the Subject, with minor differences in features or apparent age; retouching within the Target Look's retouching is not a difference",
-        "unmistakably the Subject at the same apparent age, as recognisable as in their own Reference Photos",
+        "clearly the Subject, with minor differences in features or apparent age, or slight retouching beyond what the Target Look's retouching allows; retouching within it is not a difference",
+        "unmistakably the Subject at the same apparent age, as recognisable as in their own Reference Photos; any retouching stays within what the Target Look's retouching allows",
       ],
     },
     realism: {
@@ -157,7 +157,7 @@ interface RubricRules {
   readonly isDisputed: (likeness: number, resemblance: number) => boolean;
 }
 
-/** Likeness and Resemblance disagree when they differ by more than this many points (v1). */
+/** Likeness and Resemblance disagree when they differ by more than this many points (v1; v2 keeps it). */
 export const DISPUTED_GAP = 4;
 
 /** Rubric v1's rules, kept by every later version that doesn't change them. */

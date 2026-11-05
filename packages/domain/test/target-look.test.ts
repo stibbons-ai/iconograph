@@ -80,10 +80,12 @@ describe("initial Prompt", () => {
       "skin tone",
       "age",
       "distinctive marks",
-      "beard and hair colour, including any grey",
+      "beard and hair colour, including any grey, unless the Hairstyle line asks otherwise",
     ]) {
       expect(identity).toContain(kept);
     }
+    // Retouching may change (e.g. brighten teeth), not only soften, what its line allows.
+    expect(identity).toContain("it may only change what the Retouching line below allows");
   });
 
   test("the default hairstyle asks for the Reference Photos' hair, not the placeholder text", () => {
