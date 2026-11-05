@@ -157,6 +157,9 @@ describe("Rubric v2", () => {
       "Retouching within what the Target Look's retouching allows is not a difference; retouching beyond it (e.g. any smoothing or whitening when it says none)",
     );
     expect(anchors[2]).toContain("clearly older or younger, e.g. obviously younger skin");
+    expect(anchors[2]).toContain(
+      "clear retouching beyond what the Target Look's retouching allows",
+    );
     expect(anchors[3]).toContain(
       "slight retouching beyond what the Target Look's retouching allows",
     );

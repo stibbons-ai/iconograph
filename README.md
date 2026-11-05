@@ -506,9 +506,10 @@ Judge's in the Lane's first Iteration with a Scored Candidate.
   real age as in the Reference Photos, never older or younger (the text is
   `DEFAULT_TARGET_LOOK.retouching` in `packages/domain/src/target-look.ts`); `"none"` for no
   retouching. Retouching never changes facial features, face shape, distinctive marks or the
-  beard and hair colour (unless `hairstyle` asks otherwise). A Run stored before the facet existed
-  reads with `retouching` `"none"`. Unknown facets are rejected, and so is text with leading or
-  trailing spaces. The look is frozen with the Run, and the first Prompt is built from it.
+  beard and hair colour (unless `hairstyle` asks otherwise), including any grey. A Run stored before
+  the facet existed reads with `retouching` `"none"`. Unknown facets are rejected, and so is text
+  with leading or trailing spaces. The look is frozen with the Run, and the first Prompt is built
+  from it.
 - **Character references:** each Image Model keeps a character's identity from a limited number of
   reference images (Gemini 4, OpenAI 16), chosen from the Lane's accepted photos: pinned photos
   first (pins apply to every Lane, must be among each Lane's photos, and more than the model takes

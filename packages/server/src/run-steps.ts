@@ -776,7 +776,8 @@ export const runIteration = (input: LaneState) =>
     const lanes = yield* store.loadLanes(input.runId);
     const stopped = lanes.find(({ lane }) => lane === input.lane)?.stopReason;
     if (stopped) return { ...input, stopReason: stopped } satisfies LaneState;
-    // Checked before any image is paid for; the judge phase checks the Judge it gets again.
+    // Checked before any image is paid for, against CURRENT_RUBRIC: every Judge is built on it.
+    // The judge phase checks the Judge it gets again.
     const record = yield* store.loadJudge(input.runId);
     if (record) yield* keepsRubric(input.runId, record.rubricVersion, CURRENT_RUBRIC.version);
     return yield* generateIteration(input).pipe(

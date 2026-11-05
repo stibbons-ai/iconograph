@@ -108,7 +108,7 @@ export function initialPrompt(look: TargetLook): string {
       : look.hairstyle;
   return [
     "A photorealistic professional headshot of the person shown in the attached reference photos.",
-    "Keep their identity exactly: the same facial features, face shape, proportions, skin tone, age and any distinctive marks, and the same beard and hair colour, including any grey, unless the Hairstyle line asks otherwise. Retouching never changes these; it may only change what the Retouching line below allows.",
+    "Keep their identity exactly: the same facial features, face shape, proportions, skin tone, age and any distinctive marks, and the same beard and hair colour (unless the Hairstyle line asks otherwise), including any grey. Retouching never changes these; it may only change what the Retouching line below allows.",
     `Pose: ${look.pose}.`,
     `Hairstyle: ${hairstyle}.`,
     `Clothing: ${look.clothing}.`,

@@ -80,7 +80,7 @@ describe("initial Prompt", () => {
       "skin tone",
       "age",
       "distinctive marks",
-      "beard and hair colour, including any grey, unless the Hairstyle line asks otherwise",
+      "beard and hair colour (unless the Hairstyle line asks otherwise), including any grey",
     ]) {
       expect(identity).toContain(kept);
     }

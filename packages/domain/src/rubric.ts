@@ -128,7 +128,7 @@ export const RUBRIC_V2: Rubric = {
       anchors: [
         "a different person",
         "shares some traits with the Subject but would not be recognised as them",
-        "plausibly the Subject, but with noticeable differences in facial features, face shape, proportions or apparent age (clearly older or younger, e.g. obviously younger skin)",
+        "plausibly the Subject, but with noticeable differences in facial features, face shape, proportions or apparent age (clearly older or younger, e.g. obviously younger skin), or clear retouching beyond what the Target Look's retouching allows",
         "clearly the Subject, with minor differences in features or apparent age, or slight retouching beyond what the Target Look's retouching allows; retouching within it is not a difference",
         "unmistakably the Subject at the same apparent age, as recognisable as in their own Reference Photos; any retouching stays within what the Target Look's retouching allows",
       ],
