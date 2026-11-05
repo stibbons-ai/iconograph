@@ -48,6 +48,54 @@ for that local policy. The explicitly reviewed initial install used
 policy still rejects these exact pins, wait for the release age or make an explicit, reviewed
 one-command exception rather than weakening shared configuration.
 
+### Vendor keys
+
+Live Runs need vendor API keys; tests and CI never do. [SecretSpec](https://secretspec.dev)
+declares them in the committed `secretspec.toml`, and the development shell exports them from
+1Password on entry, so `bun run run` (and every other command in the shell) finds them in its
+environment. The shell supplies the `secretspec` command (it ships with devenv); the 1Password
+CLI (`op`) comes from the host.
+
+The keys are Secure Notes `secretspec/iconograph/default/<KEY>` in the vault `Iconograph` of the
+1Password account `my.1password.com`. The shell reads them as a **read-only service account**
+(provider `onepassword_service`), so no Touch ID is needed and unattended shells get the keys
+too. One-time setup:
+
+1. In 1Password, create a service account with read access to the `Iconograph` vault only.
+2. Store its token in the macOS Keychain: `secretspec config provider login onepassword_service`.
+3. Add each key with your own account; the read-only service account can't write, so
+   `secretspec set` fails. A key is a Secure Note titled `secretspec/iconograph/default/<KEY>`
+   whose `value` field holds the key (fish; `read -s` keeps it off the screen and out of history):
+
+   ```fish
+   read -s -P "ANTHROPIC_API_KEY: " value
+   op item create --account my.1password.com --vault Iconograph --category "Secure Note" \
+       --title "secretspec/iconograph/default/ANTHROPIC_API_KEY" --tags automated,iconograph \
+       "project[text]=iconograph" "key[text]=ANTHROPIC_API_KEY" "value[concealed]=$value"
+   set -e value
+   ```
+
+4. Check without printing any key, then reload the shell (`direnv reload`, or leave and re-enter
+   `devenv shell`):
+
+   ```sh
+   secretspec check --explain
+   ```
+
+The keys are `ANTHROPIC_API_KEY` (the default Judge and Optimizer), `OPENAI_API_KEY` (OpenAI
+Lanes, an `openai/` Judge or Optimizer) and `GEMINI_API_KEY` (Gemini Lanes).
+`GOOGLE_GENERATIVE_AI_API_KEY`, read by a `google/` Judge or Optimizer, is derived from
+`GEMINI_API_KEY` and is never stored. All are optional, and a missing or rejected service token
+only warns: the shell still opens, and a Run names the key it is missing.
+
+How it works: `enterShell` in `devenv.nix` runs `secretspec export` and exports the result into
+the live shell. The keys are never set through devenv's `env`, which would write them into the
+world-readable Nix store, and devenv's own SecretSpec integration (`secretspec.enable`) stays off:
+it would fetch the keys a second time and refuse to open the shell when the token is missing.
+Every process in the shell, including an AI coding agent started there, sees the keys. To read
+them from another store, set the provider on entry, for example
+`SECRETSPEC_PROVIDER=keyring devenv shell`.
+
 ## Commands
 
 The development shell supplies both telemetry opt-out variables to tooling through environment
@@ -59,7 +107,7 @@ Outside the shell, set both variables when invoking Bun or Mastra directly inste
 
 ```sh
 # Start a Run (see "Runs" below); needs GEMINI_API_KEY (and OPENAI_API_KEY for an OpenAI Lane) and
-# the Judge's key (ANTHROPIC_API_KEY).
+# the Judge's key (ANTHROPIC_API_KEY), which the shell exports (see "Vendor keys").
 bun run run --budget 0.50 me-1.jpg me-2.jpg me-3.jpg
 
 # Print a stored Run again from the database.
@@ -376,23 +424,16 @@ Rubric, then stop the Lane or have the Optimizer write its next Prompt. It print
 their costs. Without `--lane` the Run has one Gemini Lane (`gemini-nano-banana-2.1`).
 
 ```sh
-GEMINI_API_KEY="op://Freelancing/Gemini test run key/password" \
-ANTHROPIC_API_KEY="op://VAULT/ITEM/credential" \
-  op run --account my.1password.com -- \
-  bun run run --budget 0.50 --candidates 3 --look look.json --pin 2 me-1.jpg me-2.heic me-3.jpg
+bun run run --budget 0.50 --candidates 3 --look look.json --pin 2 me-1.jpg me-2.heic me-3.jpg
 
 # A Gemini Lane and an OpenAI Lane (Flare) with its own photos and Prompt, in one Run.
-GEMINI_API_KEY="op://Freelancing/Gemini test run key/password" \
-OPENAI_API_KEY="op://Freelancing/OpenAI test run key/password" \
-ANTHROPIC_API_KEY="op://VAULT/ITEM/credential" \
-  op run --account my.1password.com -- \
-  bun run run --budget 0.50 --candidates 1 \
-    --lane gemini --lane openai:flare,photos=1+3,prompt=openai-prompt.txt \
-    me-1.jpg me-2.heic me-3.jpg
+bun run run --budget 0.50 --candidates 1 \
+  --lane gemini --lane openai:flare,photos=1+3,prompt=openai-prompt.txt \
+  me-1.jpg me-2.heic me-3.jpg
 ```
 
-`op run` resolves the 1Password references into the environment of that one process, so no key is
-written to disk; any other way of setting the variables works too. A Run needs only the keys of its
+The development shell exports the keys (see "Vendor keys"); any other way of setting the
+variables works too. A Run needs only the keys of its
 Lanes' vendors, its Judge's vendor and, for more than one Iteration, its Optimizer's vendor. Keys
 are read only from the environment and sent only in request headers; they never enter the
 database, the output or an error. In an OpenAI Lane's
