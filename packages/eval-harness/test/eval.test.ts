@@ -458,6 +458,37 @@ describe("eval harness with fake vendors", () => {
     expect(result.runs[1].armCost.actualUsd).toBeGreaterThan(0);
   }, 120_000);
 
+  test("an evaluation that stops early still warns of a flat second Judge over the images judged before", async () => {
+    const subjects = await subjectsFolder();
+    const out = join(await temporaryDirectory(), "out");
+    // Gemini's two Runs take the 10 scripted images, which the fake second Judge scores alike;
+    // OpenAI's first Run calls beyond the script and stops the evaluation.
+    const { stdout, error } = await evaluate(
+      [
+        "--out",
+        out,
+        "--model",
+        "gemini",
+        "--model",
+        "openai",
+        "--candidates",
+        "5",
+        "--max-iterations",
+        "1",
+        subjects,
+      ],
+      { script: Array<"same">(10).fill("same") },
+    );
+    expect((error as Error).message).toContain("beyond its script");
+    const result = await report(out);
+    expect(result).toMatchObject({ incomplete: true });
+    const flat = result.warnings.filter(({ code }: { code: string }) => code === "eval-judge-flat");
+    // Only Gemini's images were judged: one scope.
+    expect(flat).toEqual([expect.objectContaining({ imageModel: null, share: 1, images: 10 })]);
+    // Below the tables, before the reason the evaluation stopped.
+    expect(stdout).toContain(`Warning: ${flat[0].message}\nIncomplete: `);
+  }, 120_000);
+
   test("a Run that fails before it is stored stops the evaluation with no Run id and unknown spend", async () => {
     const subjects = await subjectsFolder();
     const out = join(await temporaryDirectory(), "out");
@@ -806,6 +837,80 @@ describe("eval harness with fake vendors", () => {
     }
   }, 120_000);
 
+  test("a second Judge that gives 10 images one score warns on stderr, in the report and below the tables; varied scores don't", async () => {
+    const subjects = await subjectsFolder();
+    const args = (out: string) => [
+      ...common(out),
+      "--candidates",
+      "5",
+      "--max-iterations",
+      "1",
+      subjects,
+    ];
+    // The fake second Judge gives every image every criterion at level 4: one score.
+    const flatOut = join(await temporaryDirectory(), "out");
+    const flat = await evaluate(args(flatOut), { script: Array<"same">(10).fill("same") });
+    expect(flat.error).toBeUndefined();
+    const flatReport = await report(flatOut);
+    const flatWarnings = flatReport.warnings.filter(
+      ({ code }: { code: string }) => code === "eval-judge-flat",
+    );
+    // One Image Model: the overall warning alone.
+    expect(flatWarnings).toHaveLength(1);
+    const [warning] = flatWarnings;
+    expect(warning).toMatchObject({
+      judge: "openai/gpt-5.5",
+      imageModel: null,
+      share: 1,
+      images: 10,
+    });
+    expect(warning.score).toBeCloseTo(flatReport.arms.optimizer.evalJudge.best, 2);
+    expect(flat.stderr.map((line) => JSON.parse(line))).toContainEqual({ warning });
+    expect(flat.stdout).toContain(`Warning: ${warning.message}\n`);
+
+    const anthropic = fakeVendorServer(() =>
+      vendorAnswer("anthropic", JSON.stringify(FAKE_VERDICT)),
+    );
+    // Every criterion at 1, 2, 3, 4, 5, 1, ...: no score holds 80% of the images.
+    let calls = 0;
+    const openai = fakeVendorServer(() =>
+      vendorAnswer(
+        "openai",
+        JSON.stringify({
+          ...FAKE_VERDICT,
+          levels: levels(((calls++ % 5) + 1) as 1 | 2 | 3 | 4 | 5),
+        }),
+      ),
+    );
+    try {
+      const variedOut = join(await temporaryDirectory(), "out");
+      const varied = await evaluate(args(variedOut), {
+        script: Array<"same">(10).fill("same"),
+        judges: judgesOnFakeVendors({ anthropic: anthropic.origin, openai: openai.origin }, KEYS),
+      });
+      expect(varied.error).toBeUndefined();
+      expect(openai.requests).toHaveLength(10);
+      const variedReport = await report(variedOut);
+      // Every image judged, at five different scores (2 each): none holds 80%.
+      const variedScores = variedReport.runs.flatMap(
+        ({ candidates }: { candidates: { evalJudge: { status: string; score?: number } }[] }) =>
+          candidates.map(({ evalJudge }) => evalJudge),
+      );
+      expect(variedScores.map(({ status }: { status: string }) => status)).toEqual(
+        Array(10).fill("judged"),
+      );
+      expect(new Set(variedScores.map(({ score }: { score?: number }) => score)).size).toBe(5);
+      expect(variedReport.warnings.map(({ code }: { code: string }) => code)).not.toContain(
+        "eval-judge-flat",
+      );
+      expect(varied.stderr.join("")).not.toContain("eval-judge-flat");
+      expect(varied.stdout).not.toContain("Warning:");
+    } finally {
+      anthropic.stop();
+      openai.stop();
+    }
+  }, 120_000);
+
   test("a Reference Photo that isn't accepted stops the evaluation before any Run", async () => {
     const subjects = await subjectsFolder();
     await copyFile(faceFixture("earth-apollo17.jpg"), join(subjects, "biden", "3.jpg"));
@@ -940,9 +1045,12 @@ test("walkthrough: bun run eval prints the comparison, writes the report, and it
     const expected = (10 * DEFAULT_WEIGHTS.resemblance) / (1 - DEFAULT_WEIGHTS.likeness);
     expect(result.arms.resample.evalJudge.best).toBeCloseTo(expected, 9);
     expect(result.arms.resample.evalJudge.subjectMean).toBeCloseTo(expected, 9);
+    // Its second Judge gives every image the same score: overall only, each Image Model has 8 images.
     expect(result.warnings).toEqual([
       expect.objectContaining({ code: "eval-judge-same-vendor", models: ["gpt-image-2.5-flare"] }),
+      expect.objectContaining({ code: "eval-judge-flat", imageModel: null, share: 1, images: 16 }),
     ]);
+    expect(stdout).toContain(`Warning: ${result.warnings[1].message}\n`);
     for (const run of result.runs) {
       const read = await spawnWithoutKeys(runCli, [
         "read",

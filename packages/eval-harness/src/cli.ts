@@ -45,7 +45,13 @@ import {
   refuseInsideRepository,
 } from "./folders";
 import { judgeOnlyWeights } from "./scoring";
-import { compareArms, renderComparison } from "./report";
+import {
+  compareArms,
+  FLAT_JUDGE_MIN_IMAGES,
+  FLAT_JUDGE_SHARE,
+  flatJudgeWarnings,
+  renderComparison,
+} from "./report";
 import { FACES_FILE, LOOK_FILE, PROMPT_FILE, readSubjectsFolder } from "./subjects";
 
 /** The second Judge by default: the first of these from another vendor than the loop's Judge. */
@@ -155,10 +161,12 @@ Progress, each Run's estimate and warnings print as JSON lines on stderr. The
 comparison prints as tables on stdout: per Arm the images, the best and mean
 held-out scores (per image, per Subject and per Run's best), the Arm's and the
 evaluation's spend, then the loop's own scores; overall, per Image Model and per
-Subject. report.json holds the settings, every Run and Candidate and the
-warnings; once a Run has started it is always written, with incomplete and
-incompleteReason when the evaluation stopped early. Errors print JSON to
-stderr (the last line) and exit nonzero.
+Subject; below them a line per warning that the second Judge's scores are flat
+(eval-judge-flat: at least ${FLAT_JUDGE_SHARE * 100}% of at least ${FLAT_JUDGE_MIN_IMAGES} judged images, overall or
+of one Image Model, at one score). report.json holds the settings, every Run
+and Candidate and the warnings; once a Run has started it is always written,
+with incomplete and incompleteReason when the evaluation stopped early. Errors
+print JSON to stderr (the last line) and exit nonzero.
 `;
 
 /**
@@ -363,6 +371,9 @@ export async function main(args: string[], dependencies: EvalCliDependencies = {
 
   const incompleteReason = failure === undefined ? null : errorMessage(failure);
   try {
+    const flatJudge = flatJudgeWarnings(armRuns, settings.evalJudge.model);
+    for (const warning of flatJudge) warn(warning);
+    const flatJudgeLines = flatJudge.map(({ message }) => `Warning: ${message}\n`).join("");
     const comparison = compareArms(armRuns, planned);
     await Bun.write(
       output.report,
@@ -388,7 +399,7 @@ export async function main(args: string[], dependencies: EvalCliDependencies = {
       )}\n`,
     );
     stdout(
-      `${renderComparison(comparison, settings.evalJudge.model)}${incompleteReason === null ? "" : `Incomplete: ${incompleteReason}\n`}Report: ${output.report}\n`,
+      `${renderComparison(comparison, settings.evalJudge.model)}${flatJudgeLines}${incompleteReason === null ? "" : `Incomplete: ${incompleteReason}\n`}Report: ${output.report}\n`,
     );
   } catch (error) {
     // The fault that stopped the evaluation stays the error; reporting it failed too.
