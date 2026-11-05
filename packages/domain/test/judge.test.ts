@@ -3,6 +3,7 @@ import { Effect, Schema } from "effect";
 import {
   BudgetExhausted,
   byCriterion,
+  CURRENT_RUBRIC,
   DEFAULT_JUDGE,
   DEFAULT_WEIGHTS,
   DEFAULT_TARGET_LOOK,
@@ -88,6 +89,29 @@ describe("the Judge's Reference Photos", () => {
   });
 });
 
+describe("the Judge's instructions", () => {
+  test("judge with Rubric v2 and weigh retouching against the Target Look's retouching", () => {
+    const instructions = judgeInstructions(CURRENT_RUBRIC);
+    expect(instructions).toContain("Rubric rubric-v2:");
+    expect(instructions).toContain(
+      "Judge retouching against the Target Look's retouching through Resemblance and Realism",
+    );
+  });
+
+  test("the Target Look the Judge sees ends with its retouching", () => {
+    const image: EncodedImage = { bytes: new Uint8Array(0), mimeType: "image/jpeg" };
+    const parts = judgeMessage({
+      references: [image],
+      candidate: image,
+      targetLook: { ...DEFAULT_TARGET_LOOK, retouching: "none" },
+    });
+    const last = parts.at(-1);
+    expect(last?.kind === "text" && last.text).toContain(
+      `Framing: ${JSON.stringify(DEFAULT_TARGET_LOOK.framing)}\nRetouching: "none"`,
+    );
+  });
+});
+
 describe("a Judge call's estimate", () => {
   const pricing = { _tag: "Llm", inputPerToken: 2e-6, outputPerToken: 1e-5 } as const;
   const request = { references: 3, targetLook: DEFAULT_TARGET_LOOK };
@@ -122,10 +146,12 @@ describe("a Judge call's estimate", () => {
       hairstyle: facet,
       clothing: facet,
       framing: facet,
+      retouching: facet,
     } as unknown as typeof DEFAULT_TARGET_LOOK;
   };
   const prompt =
-    judgeInstructions(RUBRIC_V1) + JSON.stringify(Schema.toJsonSchemaDocument(JudgeVerdict).schema);
+    judgeInstructions(CURRENT_RUBRIC) +
+    JSON.stringify(Schema.toJsonSchemaDocument(JudgeVerdict).schema);
 
   /**
    * A worst case: ASCII at 2.5 characters per token, every other UTF-16 code

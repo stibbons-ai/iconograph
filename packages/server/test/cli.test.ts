@@ -80,7 +80,7 @@ test("a Run prints its estimate, then a report that read can reproduce", async (
   expect(
     report.lanes[0].candidates.map(({ judgement }: { judgement: unknown }) => judgement),
   ).toEqual([
-    expect.objectContaining({ status: "judged", rubricVersion: "rubric-v1" }),
+    expect.objectContaining({ status: "judged", rubricVersion: "rubric-v2" }),
     null,
     null,
   ]);

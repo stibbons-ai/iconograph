@@ -162,7 +162,7 @@ describe("Mastra Judge", () => {
     const [system, user] = sent!.prompt;
     expect(system).toMatchObject({
       role: "system",
-      content: expect.stringContaining("Rubric rubric-v1"),
+      content: expect.stringContaining("Rubric rubric-v2"),
     });
     if (user?.role !== "user") throw new Error("expected a user message");
     const request = await judgeRequest();

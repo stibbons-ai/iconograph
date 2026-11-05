@@ -3,6 +3,7 @@ import { Schema } from "effect";
 import {
   byCriterion,
   CRITERIA,
+  CURRENT_RUBRIC,
   DEFAULT_WEIGHTS,
   DEFAULT_JUDGE,
   DEFAULT_TARGET_LOOK,
@@ -12,6 +13,7 @@ import {
   type JudgeVerdict,
   levelScore,
   RUBRIC_V1,
+  RUBRIC_V2,
   RubricWeights,
   RunRequest,
   scoreVerdict,
@@ -134,6 +136,50 @@ test("Rubric v1 anchors all five levels of every judged criterion", () => {
     expect(anchors).toHaveLength(5);
     expect(new Set(anchors).size).toBe(5);
   }
+});
+
+describe("Rubric v2", () => {
+  test("judges new Runs, anchors every level, and keeps v1's facet criteria", () => {
+    expect(CURRENT_RUBRIC).toBe(RUBRIC_V2);
+    for (const criterion of JUDGED_CRITERIA) {
+      expect(new Set(RUBRIC_V2.criteria[criterion].anchors).size).toBe(5);
+    }
+    const { resemblance: _r, realism: _e, ...facets } = RUBRIC_V2.criteria;
+    const { resemblance: _r1, realism: _e1, ...facetsV1 } = RUBRIC_V1.criteria;
+    expect(facets).toEqual(facetsV1);
+  });
+
+  test("Resemblance counts apparent age either way as a difference, retouching within the facet not", () => {
+    const { question, anchors } = RUBRIC_V2.criteria.resemblance;
+    expect(question).toContain("neither older nor younger");
+    expect(question).toContain(
+      "Retouching within the Target Look's retouching is not a difference",
+    );
+    expect(anchors[2]).toContain("clearly older or younger, e.g. obviously younger skin");
+    expect(anchors[3]).not.toContain("idealised or smoothed");
+  });
+
+  test("Realism asks for a real professional photograph and names over-editing an artefact", () => {
+    const { question, anchors } = RUBRIC_V2.criteria.realism;
+    expect(question).toContain("real professional photograph");
+    expect(question).not.toContain("unedited");
+    expect(question).toContain("over-editing is an artefact");
+    for (const sign of ["fake-white or uniform teeth", "airbrushed skin", "younger-looking face"]) {
+      expect(question).toContain(sign);
+    }
+    expect(anchors[2]).toContain("fake-white or uniform teeth");
+  });
+
+  test("a verdict judged with it records rubric-v2, and both versions' judgements read back", () => {
+    const decode = Schema.decodeUnknownSync(Judgement);
+    const verdict = { levels: levels(4), issues: [], promptFixes: [] };
+    const v2 = scoreVerdict(verdict, 7, DEFAULT_WEIGHTS, CURRENT_RUBRIC);
+    expect(v2.rubricVersion).toBe("rubric-v2");
+    expect(decode(v2)).toEqual(v2);
+    const v1 = scoreVerdict(verdict, 7, DEFAULT_WEIGHTS, RUBRIC_V1);
+    expect(decode(v1)).toEqual(v1);
+    expect(() => decode({ ...v1, disputed: true })).toThrow("don't follow from the levels");
+  });
 });
 
 test("a stored Judged whose scores or Disputed flag don't follow from its levels is rejected", () => {

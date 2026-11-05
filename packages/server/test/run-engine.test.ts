@@ -1184,7 +1184,7 @@ describe("Run engine with a fake Judge", () => {
         model: DEFAULT_JUDGE.model,
         effort: "low",
         weights: DEFAULT_JUDGE.weights,
-        rubricVersion: "rubric-v1",
+        rubricVersion: "rubric-v2",
         referencePhotos: lane!.characterReferences.slice(0, 3),
       });
       const sentToImageModel = await judgeDownscaled(fake.requests[0]!.references.slice(0, 3));
@@ -1214,7 +1214,7 @@ describe("Run engine with a fake Judge", () => {
         const { judgement, likeness } = candidate;
         // Likeness and Resemblance stay separate; the total weighs both.
         expect(judgement.scores.likeness).toBe(likeness);
-        expect(judgement.rubricVersion).toBe("rubric-v1");
+        expect(judgement.rubricVersion).toBe("rubric-v2");
         expect(judgement.disputed).toBe(Math.abs(likeness - judgement.resemblance) > 4);
         expect(judgement.weightedTotal).toBeCloseTo(
           0.3 * likeness + 0.15 * judgement.resemblance + 0.55 * 7.5,
@@ -1286,7 +1286,7 @@ describe("Run engine with a fake Judge", () => {
         likeness: expect.any(Number),
         judgement: {
           status: "judge-failed",
-          rubricVersion: "rubric-v1",
+          rubricVersion: "rubric-v2",
           cause: "budget-exhausted",
           reason: expect.stringContaining("didn't fit the Budget"),
         },
@@ -1488,11 +1488,12 @@ describe("Run engine with a fake Judge", () => {
     const { application, databasePath, dataDirectory } = await setup(["same"]);
     const { runId } = await application.start(request({ candidates: 1 }));
     await application.close();
-    tamper(databasePath, "UPDATE judges SET rubric_version = 'rubric-v0'");
+    // A Run started under Rubric v1, before this build.
+    tamper(databasePath, "UPDATE judges SET rubric_version = 'rubric-v1'");
     const { again, runtime } = judgeStepOn(databasePath, dataDirectory);
     try {
       await expect(runtime.runPromise(judgeIteration(lane0Iteration1(runId)))).rejects.toThrow(
-        "is judged with rubric-v0, but this build has only rubric-v1",
+        "was judged with rubric-v1; this build judges only with rubric-v2",
       );
       expect(again.requests).toHaveLength(0);
     } finally {

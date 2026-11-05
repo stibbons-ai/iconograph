@@ -47,8 +47,10 @@ Options:
   --candidates N      Candidates per Iteration, 1 to ${MAX_CANDIDATES} (default: ${DEFAULT_CANDIDATES}).
   --look FILE         Target Look as a JSON file with any of the facets pose,
                       background, lighting (lighting and colour), hairstyle,
-                      clothing, framing; each a text. Missing facets take their
-                      defaults; hairstyle defaults to "as in the Reference Photos".
+                      clothing, framing, retouching; each a text. Missing facets
+                      take their defaults; hairstyle defaults to "as in the
+                      Reference Photos", retouching to natural professional
+                      retouching (the Subject at their real age); "none" for none.
   --lane SPEC         One Lane per use; repeatable (default: one gemini Lane).
                       Up to ${LANE_CONCURRENCY} Lanes run at a time; more wait their turn.
                       SPEC is NAME[,photos=N+N...][,prompt=FILE]:
@@ -106,7 +108,7 @@ sends only its chosen character references (stripped of metadata) and its
 Prompt to its vendor.
 
 Every Candidate that passes the Identity Gate is scored by the Judge against
-Rubric v1 with the default weights. Between Iterations the Optimizer writes the
+Rubric v2 with the default weights. Between Iterations the Optimizer writes the
 Lane's next Prompt from that Lane's recent Prompts, scores, Judge issues and
 fixes, refusals and failures; it rephrases the Target Look, never changes it.
 The Judge and the Optimizer need their vendor's key in the environment:

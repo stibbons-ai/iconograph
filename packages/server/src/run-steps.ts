@@ -580,7 +580,7 @@ export const judgeIteration = (input: LaneState) =>
     const judge = yield* (yield* Judges).get(run.request.judge, record.price);
     if (judge.rubric.version !== record.rubricVersion) {
       return yield* new RunError({
-        message: `Run ${input.runId} is judged with ${record.rubricVersion}, but this build has only ${judge.rubric.version}`,
+        message: `Run ${input.runId} was judged with ${record.rubricVersion}; this build judges only with ${judge.rubric.version}`,
       });
     }
     const pending = (yield* store.loadCandidates(input.runId, input.lane)).filter(

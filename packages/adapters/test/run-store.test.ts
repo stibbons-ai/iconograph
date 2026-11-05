@@ -386,6 +386,24 @@ describe("RunStore rows", () => {
     }
   });
 
+  test("a Run stored before the retouching facet reads with no retouching", async () => {
+    const { runtime, databasePath } = await storeWithRun(1);
+    await runtime.dispose();
+    const { retouching: _, ...lookBefore } = DEFAULT_TARGET_LOOK;
+    tamper(
+      databasePath,
+      "UPDATE runs SET request = ? WHERE id = 'run'",
+      JSON.stringify({ ...request(1), targetLook: lookBefore }),
+    );
+    const reopened = ManagedRuntime.make(LibsqlRunStore(databasePath) as Layer.Layer<RunStore>);
+    try {
+      const stored = await reopened.runPromise(withStore((s) => s.loadRun("run")));
+      expect(stored.request.targetLook).toEqual({ ...lookBefore, retouching: "none" });
+    } finally {
+      await reopened.dispose();
+    }
+  });
+
   test("a settled call can't be settled again: its recorded cost stays", async () => {
     const { runtime, run } = await storeWithRun(1);
     try {
