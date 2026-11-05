@@ -40,6 +40,9 @@ export class RunStoreError extends Data.TaggedError("RunStoreError")<{
 /** Literal strings as a SQL list for `IN (…)`; only for our own constants, never input. */
 const sqlList = (values: readonly string[]) => values.map((value) => `'${value}'`).join(", ");
 
+/** Where an Iteration's Prompt came from (`PromptSource`). */
+const PromptSourceKind = Schema.Literals(["initial", "optimizer", "kept", "resampled"]);
+
 /**
  * Our own tables, in the same LibSQL file as Mastra's storage. Every row is
  * keyed by Run, Lane, Iteration and Candidate index (and purpose and attempt
@@ -74,7 +77,7 @@ CREATE TABLE IF NOT EXISTS iterations (
   lane INTEGER NOT NULL,
   iteration INTEGER NOT NULL,
   prompt TEXT NOT NULL,
-  source TEXT NOT NULL CHECK (source IN ('initial', 'optimizer', 'kept')),
+  source TEXT NOT NULL CHECK (source IN (${sqlList(PromptSourceKind.literals)})),
   reason TEXT,
   PRIMARY KEY (run_id, lane, iteration),
   FOREIGN KEY (run_id, lane) REFERENCES lanes (run_id, lane),
@@ -224,14 +227,15 @@ export interface JudgeRecord {
 }
 
 /** Where an Iteration's Prompt came from. */
-const PromptSourceKind = Schema.Literals(["initial", "optimizer", "kept"]);
 export type PromptSource =
   /** The Lane's own initial Prompt, or the one built from the Target Look. */
   | { source: "initial" }
   /** Written by the Optimizer from the Lane's earlier Iterations. */
   | { source: "optimizer" }
   /** The previous Iteration's Prompt, kept because optimizing failed; `reason` says why. */
-  | { source: "kept"; reason: KeptReason };
+  | { source: "kept"; reason: KeptReason }
+  /** A Resample Lane's initial Prompt again; its Optimizer is never called. */
+  | { source: "resampled" };
 
 export type IterationRecord = IterationKey & PromptSource & { prompt: string };
 
@@ -405,6 +409,12 @@ export class RunStore extends Context.Service<
       runId: string,
       lane?: number,
     ) => Effect.Effect<{ candidates: CandidateRecord[]; calls: CallRecord[] }, RunStoreError>;
+    /**
+     * Fail unless the tables can hold a Resample Lane's `resampled` Prompts:
+     * tables from before Resample Lanes can't, so a Resample Run is refused
+     * on them before anything billable, while every other Run works.
+     */
+    readonly checkResampleLanes: Effect.Effect<void, RunStoreError>;
   }
 >()("@iconograph/adapters/RunStore") {}
 
@@ -414,6 +424,8 @@ const json = (value: unknown) => JSON.stringify(value);
  * Run tables from before the Judge keyed calls without a purpose, and tables
  * from before the Optimizer can't hold its calls (every call had a Candidate)
  * or a Prompt's source; such a database is refused rather than migrated.
+ * Tables from before Resample Lanes still take every other Run
+ * (`checkResampleLanes` refuses only a Resample Run on them).
  */
 async function rejectOutdatedTables(client: Client) {
   const { rows } = await client.execute("PRAGMA table_info(cost_records)");
@@ -929,6 +941,18 @@ export const LibsqlRunStore = (databasePath: string, options: LibsqlRunStoreOpti
           loadRecords(runId, lane).pipe(Effect.map(({ candidates }) => candidates)),
 
         loadRecords,
+
+        checkResampleLanes: query("Checking the Run tables for Resample Lanes", async (db) => {
+          const { rows } = await db.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'iterations'",
+          );
+          const definition = rows[0]?.sql;
+          if (typeof definition === "string" && !definition.includes("'resampled'")) {
+            throw new Error(
+              "its Run tables predate Resample Lanes (Prompt sources without resampled); use a new database file for a Resample Run",
+            );
+          }
+        }),
       };
     }),
   );

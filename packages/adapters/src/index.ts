@@ -7,6 +7,17 @@ export {
 } from "./data-directory";
 export { apiKeyFromEnv, redactKey } from "./api-key";
 export {
+  decodeOption,
+  LANE_IMAGE_MODELS,
+  laneImageModel,
+  parseNumberOption,
+  readJsonFile,
+  REPOSITORY_ROOT,
+  RUN_SETTING_OPTIONS,
+  type RunSettingValues,
+  runSettingsInput,
+} from "./cli-options";
+export {
   attachCleanupError,
   codeOf,
   errorChain,
@@ -21,7 +32,13 @@ export { OnnxFaceEmbedder, type OnnxFaceEmbedderOptions } from "./face-embedder"
 export { loadHeicDecoder } from "./heic";
 export { geminiCapabilities } from "./gemini";
 export { NativeImageModels, type NativeImageModelsOptions } from "./image-models";
-export { imagePath, isStorableImageType, readImageAtMost, storeImage } from "./image-store";
+export {
+  imagePath,
+  isStorableImageType,
+  readForJudge,
+  readImageAtMost,
+  storeImage,
+} from "./image-store";
 export { openaiCapabilities } from "./openai";
 export {
   downloadableModelIds,
@@ -43,6 +60,7 @@ export {
 export {
   candidateKeyOf,
   LibsqlRunStore,
+  type LibsqlRunStoreOptions,
   RunStore,
   RunStoreError,
   type CallKey,

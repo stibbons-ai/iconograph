@@ -36,6 +36,53 @@ export interface LedgerEntry {
 }
 
 /**
+ * Estimated and actual USD of some calls; `unknownCostCalls` have no actual
+ * cost (in flight, or never reported), so `actualUsd` leaves them out.
+ * `committedUsd` counts each of those at its estimate instead, as the Budget
+ * does; a call can still cost more than its estimate.
+ */
+export interface CallCosts {
+  readonly estimatedUsd: number;
+  readonly actualUsd: number;
+  readonly committedUsd: number;
+  readonly unknownCostCalls: number;
+}
+
+/** The costs of no call at all. */
+export const NO_CALL_COSTS: CallCosts = {
+  estimatedUsd: 0,
+  actualUsd: 0,
+  committedUsd: 0,
+  unknownCostCalls: 0,
+};
+
+/** What `calls` cost, summed in micro-dollars. */
+export function callCosts(
+  calls: readonly Pick<LedgerEntry, "estimateMicros" | "actualMicros">[],
+): CallCosts {
+  const sum = (micros: (call: (typeof calls)[number]) => number) =>
+    toUsd(calls.reduce((total, call) => total + micros(call), 0));
+  return {
+    estimatedUsd: sum((call) => call.estimateMicros),
+    actualUsd: sum((call) => call.actualMicros ?? 0),
+    committedUsd: sum((call) => call.actualMicros ?? call.estimateMicros),
+    unknownCostCalls: calls.filter((call) => call.actualMicros === null).length,
+  };
+}
+
+/** Several `CallCosts` added up, in micro-dollars, so sums stay exact. */
+export function addCallCosts(costs: readonly CallCosts[]): CallCosts {
+  const sum = (pick: (cost: CallCosts) => number) =>
+    toUsd(costs.reduce((total, cost) => total + toMicros(pick(cost)), 0));
+  return {
+    estimatedUsd: sum(({ estimatedUsd }) => estimatedUsd),
+    actualUsd: sum(({ actualUsd }) => actualUsd),
+    committedUsd: sum(({ committedUsd }) => committedUsd),
+    unknownCostCalls: costs.reduce((total, { unknownCostCalls }) => total + unknownCostCalls, 0),
+  };
+}
+
+/**
  * What one call counts against the Budget: its estimate while in flight, its
  * actual cost once settled, and its estimate when the actual cost is unknown
  * (a call that may have been billed is never counted as free).

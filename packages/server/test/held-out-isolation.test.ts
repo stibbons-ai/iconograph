@@ -6,7 +6,9 @@ import { fileURLToPath } from "node:url";
 import * as adapters from "@iconograph/adapters";
 
 // ADR-0008: the Optimizer loop must never reach the held-out face model, or it
-// would drift towards it. These checks prove the isolation is structural.
+// would drift towards it. The held-out module is its own service, outside the
+// adapters index; its subpath resolves from the server, so lint bans it there
+// and the server's import graph is checked for it.
 
 const serverSource = fileURLToPath(new URL("../src/", import.meta.url));
 const packagesRoot = realpathSync(fileURLToPath(new URL("../../", import.meta.url)));
@@ -60,7 +62,7 @@ test("the adapters package exports nothing of the held-out model", () => {
   expect(Object.keys(adapters).filter((name) => /held|facenet/i.test(name))).toEqual([]);
 });
 
-test("the held-out modules can't be imported from the server by subpath", () => {
+test("the held-out module resolves from the server only by its subpath, which lint forbids there", () => {
   for (const name of [
     "src/held-out-embedder",
     "src/held-out-embedder.ts",
@@ -68,6 +70,28 @@ test("the held-out modules can't be imported from the server by subpath", () => 
     "src/calibrate-cli.ts",
   ]) {
     expect(() => Bun.resolveSync(`@iconograph/adapters/${name}`, serverSource)).toThrow();
+  }
+  expect(Bun.resolveSync("@iconograph/adapters/held-out", serverSource)).toBe(
+    join(packagesRoot, "adapters", "src", "held-out-embedder.ts"),
+  );
+  // A lint override banning exactly that specifier applies to every server source and test file.
+  const config = JSON.parse(readFileSync(join(packagesRoot, "..", ".oxlintrc.json"), "utf8")) as {
+    overrides: {
+      files: string[];
+      rules: { "no-restricted-imports"?: [string, { patterns: { regex: string }[] }] };
+    }[];
+  };
+  const serverRoot = join(packagesRoot, "server");
+  const serverFiles = [...sourceFiles(serverSource), ...sourceFiles(join(serverRoot, "test"))].map(
+    (file) => join("packages", "server", file.slice(serverRoot.length + 1)),
+  );
+  expect(serverFiles.length).toBeGreaterThan(10);
+  for (const file of serverFiles) {
+    const banned = config.overrides
+      .filter(({ files }) => files.some((glob) => new Bun.Glob(glob).match(file)))
+      .flatMap(({ rules }) => rules["no-restricted-imports"]?.[1].patterns ?? [])
+      .some(({ regex }) => new RegExp(regex).test("@iconograph/adapters/held-out"));
+    expect({ file, banned }).toEqual({ file, banned: true });
   }
 });
 

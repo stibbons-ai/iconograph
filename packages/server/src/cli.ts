@@ -3,11 +3,13 @@ import {
   errorLine,
   errorMessage,
   faceChoiceMap,
-  NativeImageModels,
+  laneImageModel,
   OnnxFaceEmbedder,
-  openPriceSource,
-  type PriceSource,
+  parseNumberOption,
+  readJsonFile,
   resolveDataDirectory,
+  RUN_SETTING_OPTIONS,
+  runSettingsInput,
   withCleanup,
 } from "@iconograph/adapters";
 import {
@@ -19,22 +21,18 @@ import {
   type FaceEmbedder,
   type FaceModelError,
   GEMINI_IMAGE_MODEL,
-  type ImageModels,
-  type Judges,
   MAX_CANDIDATES,
   MAX_ITERATIONS,
   MAX_REFERENCE_PHOTOS,
   OPENAI_FLARE_IMAGE_MODEL,
   OPENAI_IMAGE_MODEL,
-  type Optimizers,
   type RetryPolicy,
   RunRequest,
   TargetLookInput,
 } from "@iconograph/domain";
-import { Effect, type Layer, Schema } from "effect";
+import { type Layer, Schema } from "effect";
 import { createRunApplication, readRunReport } from "./index";
-import { MastraJudges } from "./judge";
-import { MastraOptimizers } from "./optimizer";
+import { nativeVendors, type OpenVendors } from "./vendors";
 import { jsonLine } from "./warnings";
 import { LANE_CONCURRENCY } from "./workflow";
 
@@ -139,61 +137,15 @@ actual cost, and its judgement (Resemblance, per-criterion scores, weighted
 total, Disputed, Rubric version, issues, suggested Prompt fixes) with the
 Judge's cost; per Lane its stop reason (with stopDetail, the vendor's reason,
 for optimizer-failed and judge-failed), Iterations, best Candidate (Iteration,
-index, score) and Prompt history (each Iteration's Prompt, its source initial,
-optimizer or kept, and the cost of that Iteration's Optimizer call, which
-wrote the next Iteration's Prompt); the Judge, the Optimizer and the stopping
-rules; totals; the Run's warnings (code judge-same-vendor when the Judge's
-vendor makes a Lane's Image Model); the Reference Photo warnings. read prints
-the same report for a stored Run. Errors print JSON to stderr (the last line)
-and exit nonzero.
+index, score) and Prompt history (each Iteration's Prompt; its source initial,
+optimizer, kept, or resampled for a Resample Lane, which the HTTP API accepts
+and the eval harness uses; and the cost of the Optimizer call that wrote the
+next Iteration's Prompt, none in a Resample Lane); the Judge, the Optimizer
+and the stopping rules; totals; the Run's warnings (code
+judge-same-vendor when the Judge's vendor makes a Lane's Image Model); the
+Reference Photo warnings. read prints the same report for a stored Run.
+Errors print JSON to stderr (the last line) and exit nonzero.
 `;
-
-/** The Image Models, Judges and Optimizers a Run uses, and how to release what they hold. */
-export interface VendorsResource {
-  imageModels: Layer.Layer<ImageModels>;
-  judges: Layer.Layer<Judges>;
-  optimizers: Layer.Layer<Optimizers>;
-  close(): void;
-}
-
-/**
- * A price lookup that refreshes the LiteLLM data once, on the first lookup.
- * Image Models look up a price only after the API key check, so a missing key
- * fails without any network request. A failed refresh keeps the cached or
- * bundled prices (the report names the source) and is reported through `warn`.
- */
-export function refreshOnFirstLookup(
-  prices: Pick<PriceSource, "ensureFresh" | "lookup">,
-  warn: (message: string) => void,
-): Pick<PriceSource, "lookup"> {
-  let refreshed: Promise<void> | undefined;
-  const refreshOnce = () =>
-    (refreshed ??= prices.ensureFresh().then(
-      () => undefined,
-      (error: unknown) => warn(`Price refresh failed: ${errorMessage(error)}`),
-    ));
-  return {
-    lookup: (model) => Effect.promise(refreshOnce).pipe(Effect.flatMap(() => prices.lookup(model))),
-  };
-}
-
-/**
- * The native Image Model adapters and the Mastra Judges and Optimizers, priced
- * by the price source in the data volume.
- */
-export async function nativeVendors(
-  dataDirectory: string,
-  warn: (message: string) => void,
-): Promise<VendorsResource> {
-  const source = await openPriceSource({ dataDirectory });
-  const prices = refreshOnFirstLookup(source, warn);
-  return {
-    imageModels: NativeImageModels({ prices }),
-    judges: MastraJudges({ prices }),
-    optimizers: MastraOptimizers({ prices }),
-    close: () => source.close(),
-  };
-}
 
 /**
  * Test seam: the Image Models, Judges, Optimizers and face backend. Production
@@ -202,46 +154,15 @@ export async function nativeVendors(
  * a fake.
  */
 export interface RunCliDependencies {
-  vendors?: (dataDirectory: string, warn: (message: string) => void) => Promise<VendorsResource>;
+  vendors?: OpenVendors;
   faceEmbedder?: (dataDirectory: string) => Layer.Layer<FaceEmbedder, FaceModelError>;
   retryPolicy?: RetryPolicy;
   stdout?: (text: string) => void;
   stderr?: (text: string) => void;
 }
 
-function parseNumber(option: string, value: string): number {
-  const number = Number(value);
-  if (value.trim() === "" || !Number.isFinite(number)) {
-    throw new Error(`${option} expects a number, got ${value}`);
-  }
-  return number;
-}
-
 const decodeLook = Schema.decodeUnknownSync(TargetLookInput, { onExcessProperty: "error" });
 const decodeRequest = Schema.decodeUnknownSync(RunRequest);
-
-async function readLook(path: string | undefined) {
-  if (path === undefined) return decodeLook({});
-  let json: unknown;
-  try {
-    json = JSON.parse(await Bun.file(path).text());
-  } catch (error) {
-    throw new Error(`--look ${path} is not a readable JSON file: ${errorMessage(error)}`);
-  }
-  try {
-    return decodeLook(json);
-  } catch (error) {
-    throw new Error(`--look ${path}: ${errorMessage(error)}`);
-  }
-}
-
-/** Lane names `--lane` takes, by the Image Model each drives. */
-const laneModels: Record<string, string> = {
-  gemini: GEMINI_IMAGE_MODEL,
-  openai: OPENAI_IMAGE_MODEL,
-  "openai:sunburst": OPENAI_IMAGE_MODEL,
-  "openai:flare": OPENAI_FLARE_IMAGE_MODEL,
-};
 
 /**
  * One `--lane NAME[,photos=N+N...][,prompt=FILE]`; the request schema checks the rest.
@@ -251,13 +172,8 @@ async function readLane(spec: string) {
   const promptAt = spec.indexOf(",prompt=");
   const head = promptAt === -1 ? spec : spec.slice(0, promptAt);
   const [name = "", ...settings] = head.split(",");
-  if (!Object.hasOwn(laneModels, name)) {
-    throw new Error(
-      `--lane ${spec}: unknown Lane ${name}; use one of ${Object.keys(laneModels).join(", ")}`,
-    );
-  }
   const lane: { model: string; photos?: number[]; prompt?: string } = {
-    model: laneModels[name]!,
+    model: laneImageModel(name, `--lane ${spec}`),
   };
   for (const setting of settings) {
     const [key, value = ""] = setting.split(/=(.*)/s);
@@ -266,7 +182,9 @@ async function readLane(spec: string) {
         `--lane ${spec}: expected photos=N+N... (at most once), then optionally prompt=FILE last`,
       );
     }
-    lane.photos = value.split("+").map((photo) => parseNumber(`--lane ${spec} photos`, photo));
+    lane.photos = value
+      .split("+")
+      .map((photo) => parseNumberOption(`--lane ${spec} photos`, photo));
   }
   if (promptAt !== -1) {
     const path = spec.slice(promptAt + ",prompt=".length);
@@ -294,20 +212,11 @@ export async function main(args: string[], dependencies: RunCliDependencies = {}
     allowPositionals: true,
     strict: true,
     options: {
-      budget: { type: "string" },
-      candidates: { type: "string" },
+      ...RUN_SETTING_OPTIONS,
       look: { type: "string" },
       lane: { type: "string", multiple: true },
       pin: { type: "string", multiple: true },
       face: { type: "string", multiple: true },
-      "judge-model": { type: "string" },
-      "judge-effort": { type: "string" },
-      "optimizer-model": { type: "string" },
-      "optimizer-effort": { type: "string" },
-      "target-score": { type: "string" },
-      patience: { type: "string" },
-      "min-improvement": { type: "string" },
-      "max-iterations": { type: "string" },
       "data-dir": { type: "string" },
       db: { type: "string", default: "./iconograph.db" },
       "run-id": { type: "string" },
@@ -352,46 +261,19 @@ export async function main(args: string[], dependencies: RunCliDependencies = {}
     return;
   }
   const faceChoices = faceChoiceMap(values.face ?? []);
-  /** A numeric option's value, else its default. */
-  const numberOption = (
-    name:
-      | "budget"
-      | "candidates"
-      | "target-score"
-      | "patience"
-      | "min-improvement"
-      | "max-iterations",
-    fallback: number,
-  ) => {
-    const value = values[name];
-    return value === undefined ? fallback : parseNumber(`--${name}`, value);
-  };
   const request = decodeRequest({
+    ...runSettingsInput(values),
     photos: positionals,
     faceChoices: [...faceChoices].map(([photo, face]) => ({ photo, face })),
-    pins: (values.pin ?? []).map((pin) => parseNumber("--pin", pin)),
-    targetLook: await readLook(values.look),
-    budgetUsd: numberOption("budget", DEFAULT_BUDGET_USD),
-    candidates: numberOption("candidates", DEFAULT_CANDIDATES),
+    pins: (values.pin ?? []).map((pin) => parseNumberOption("--pin", pin)),
+    targetLook:
+      values.look === undefined
+        ? decodeLook({})
+        : await readJsonFile(values.look, `--look ${values.look}`, decodeLook),
     lanes:
       values.lane === undefined
         ? [{ model: GEMINI_IMAGE_MODEL }]
         : await Promise.all(values.lane.map(readLane)),
-    judge: {
-      model: values["judge-model"] ?? DEFAULT_JUDGE.model,
-      effort: values["judge-effort"] ?? DEFAULT_JUDGE.effort,
-      weights: DEFAULT_JUDGE.weights,
-    },
-    optimizer: {
-      model: values["optimizer-model"] ?? DEFAULT_OPTIMIZER.model,
-      effort: values["optimizer-effort"] ?? DEFAULT_OPTIMIZER.effort,
-    },
-    stopRules: {
-      targetScore: numberOption("target-score", DEFAULT_STOP_RULES.targetScore),
-      patience: numberOption("patience", DEFAULT_STOP_RULES.patience),
-      minImprovement: numberOption("min-improvement", DEFAULT_STOP_RULES.minImprovement),
-      maxIterations: numberOption("max-iterations", DEFAULT_STOP_RULES.maxIterations),
-    },
   });
   const printLine = (value: unknown) => stderr(jsonLine(value));
   const models = await vendors(dataDirectory, (warning) => printLine({ warning }));

@@ -112,8 +112,18 @@ _Avoid_: Quota, cap
 ## Evaluation
 
 **Arm**:
-One strategy compared by the eval harness at equal Budget, e.g. the Optimizer loop versus resampling the starting Prompt.
+One strategy compared by the eval harness: per Subject and Image Model, each Arm gets one Run with the same Budget cap, Candidates per Iteration, Judge and stopping rules, except that the Resample Arm runs with patience off.
 _Avoid_: Variant, baseline run
+
+**Optimizer Arm**:
+The Arm that runs the normal Lane loop, the Optimizer rewriting the Prompt between Iterations.
+
+**Resample Arm**:
+The Arm whose Lane sends its starting Prompt every Iteration and never calls the Optimizer: best-of-N sampling with the same Judge. It runs with patience off, since a fixed Prompt never tries to improve. A Lane run this way is a Resample Lane.
+_Avoid_: Baseline, control
+
+**Second Judge**:
+The eval harness's Judge from another vendor than the loop's Judge, scoring every image of every Arm against the same Rubric without Likeness, outside the Budget.
 
 **Judge Calibration**:
 Measuring how well the Judge's ranking of Candidates agrees with the operator's Steering labels.

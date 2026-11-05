@@ -2,20 +2,12 @@ import { expect, test } from "bun:test";
 import { mkdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { NativeImageModels } from "@iconograph/adapters";
-import { ImageModels } from "@iconograph/domain";
-import { Effect } from "effect";
 import { verifiedModelsDirectory } from "../../adapters/test/face-models";
 import { temporaryDirectories } from "../../adapters/test/temporary-directory";
-import { refreshOnFirstLookup } from "../src/cli";
-import {
-  FAKE_PRICE,
-  faceFixture,
-  type FakeScript,
-  subjectPhotos,
-} from "./support/fake-image-models";
+import { faceFixture, type FakeScript, subjectPhotos } from "./support/fake-image-models";
 import { FAKE_VERDICT, levels } from "./support/fake-judges";
 import { fakeVendorServer, vendorAnswer, vendorError } from "./support/fake-vendors";
+import { spawnWithoutKeys } from "./support/spawn-without-keys";
 
 const cli = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const withFakes = fileURLToPath(new URL("./support/run-cli-with-fakes.ts", import.meta.url));
@@ -27,31 +19,10 @@ async function invoke(
   script: FakeScript = [],
   extraEnv: Record<string, string> = {},
 ) {
-  // The real CLI must never see a real key from the developer's shell.
-  const {
-    GEMINI_API_KEY: _gemini,
-    ANTHROPIC_API_KEY: _anthropic,
-    OPENAI_API_KEY: _openai,
-    GOOGLE_GENERATIVE_AI_API_KEY: _google,
-    GOOGLE_API_KEY: _googleAlias,
-    ...env
-  } = Bun.env;
-  const child = Bun.spawn([Bun.which("bun") ?? "bun", entry, ...args], {
-    env: {
-      ...env,
-      MASTRA_TELEMETRY_DISABLED: "1",
-      DO_NOT_TRACK: "1",
-      FAKE_IMAGE_SCRIPT: JSON.stringify(script),
-      ...extraEnv,
-    },
-    stdout: "pipe",
-    stderr: "pipe",
+  const { stdout, stderr, exitCode } = await spawnWithoutKeys(entry, args, {
+    FAKE_IMAGE_SCRIPT: JSON.stringify(script),
+    ...extraEnv,
   });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-  ]);
   const lines = stderr.trim().split("\n").filter(Boolean);
   return { stdout, lines, exitCode };
 }
@@ -530,29 +501,3 @@ test("errors are one JSON line on stderr with a nonzero exit and nothing on stdo
     expect(last.runId).toBeUndefined();
   }
 }, 60_000);
-
-test("prices refresh once, on the first lookup, and never without a key", async () => {
-  let refreshes = 0;
-  const prices = refreshOnFirstLookup(
-    {
-      ensureFresh: async () => {
-        refreshes++;
-        return { refreshed: true, fetchedAt: new Date() };
-      },
-      lookup: (model) => Effect.succeed({ ...FAKE_PRICE, model }),
-    },
-    () => {},
-  );
-  const get = (env: Record<string, string>) =>
-    Effect.runPromise(
-      Effect.gen(function* () {
-        return yield* (yield* ImageModels).get("gemini-nano-banana-2.1");
-      }).pipe(Effect.provide(NativeImageModels({ prices, env })), Effect.result),
-    );
-  expect((await get({}))._tag).toBe("Failure");
-  expect(refreshes).toBe(0);
-  const key = { GEMINI_API_KEY: "AIzaFAKEFAKEFAKEFAKEFAKE" };
-  expect((await get(key))._tag).toBe("Success");
-  expect((await get(key))._tag).toBe("Success");
-  expect(refreshes).toBe(1);
-});

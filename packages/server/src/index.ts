@@ -2,6 +2,7 @@ import {
   attachCleanupError,
   createLocalStore,
   LibsqlRunStore,
+  type LibsqlRunStoreOptions,
   RunStore,
   withCleanup,
   workflowsStore,
@@ -28,6 +29,7 @@ export type { EstimateEvent, RunResult } from "./schemas";
 export { RUN_WORKFLOW_ID } from "./workflow";
 export type { PhotoPaths } from "./run-steps";
 export type { RunWarning } from "./warnings";
+export { nativeVendors, type OpenVendors, type VendorsResource } from "./vendors";
 
 /** How long closing waits for cancelled Runs to unwind and record their Lanes. */
 const CANCEL_SETTLE_TIMEOUT_MS = 10_000;
@@ -54,6 +56,8 @@ export interface RunApplicationOptions {
    * `candidate`). Default: one JSON line on stderr, never stdout.
    */
   warn?: (warning: RunWarning) => void;
+  /** Wraps the Run tables' client; a test seam (`LibsqlRunStoreOptions.wrapClient`). */
+  wrapRunStoreClient?: LibsqlRunStoreOptions["wrapClient"];
 }
 
 /**
@@ -70,7 +74,10 @@ export async function createRunApplication(options: RunApplicationOptions) {
       options.imageModels,
       options.judges,
       options.optimizers,
-      LibsqlRunStore(databasePath),
+      LibsqlRunStore(
+        databasePath,
+        options.wrapRunStoreClient ? { wrapClient: options.wrapRunStoreClient } : {},
+      ),
       Layer.succeed(RunConfig)({
         ...defaultRunConfig(dataDirectory),
         ...(options.retryPolicy && { retryPolicy: options.retryPolicy }),

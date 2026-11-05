@@ -7,7 +7,7 @@ import {
   errorMessage,
   imagePath,
   isStorableImageType,
-  readImageAtMost,
+  readForJudge,
   loadCharacterReference,
   type ReferencePhotoReport,
   resolveInsideDataDirectory,
@@ -31,7 +31,6 @@ import {
   type ImageRequest,
   initialPrompt,
   iterationResult,
-  JUDGE_IMAGE_MAX_SIDE,
   judgeCandidate,
   judgeFailed,
   Judges,
@@ -99,10 +98,10 @@ const storedPhotos = (photoReport: ReferencePhotoReport, photos: readonly number
 const loadReferences = (photoReport: ReferencePhotoReport, photos: readonly number[]) =>
   Effect.forEach(storedPhotos(photoReport, photos), loadCharacterReference);
 
-/** A stored image as the Judge sees it: normalised (upright, on white, JPEG), at most `JUDGE_IMAGE_MAX_SIDE` px. */
-const forJudge = (path: string, mimeType: string, what: string) =>
+/** A stored image as the Judge sees it (`readForJudge`). */
+const forJudge = (path: string, what: string) =>
   Effect.tryPromise({
-    try: () => readImageAtMost(path, mimeType, JUDGE_IMAGE_MAX_SIDE, { normalise: true }),
+    try: () => readForJudge(path),
     catch: (error) =>
       new RunError({
         message: `Reading ${what} ${path} failed: ${errorMessage(error)}`,
@@ -211,14 +210,15 @@ const reserveInOrder = <T extends Reservable>(items: readonly T[], estimate: Cal
 
 /**
  * Prepare a Run: check the Judge's key and, for a Run of more than one
- * Iteration, the Optimizer's, then get each with its price and every Lane's
- * Image Model (credentials and price, before anything billable), validate the
- * Reference Photos, freeze the Run with its Identity Anchor and Ceiling,
- * choose each Lane's character references from its own accepted photos and
- * the Judge's Reference Photos, store each Lane's initial Prompt (its own,
- * else the one built from the Target Look) as its first Iteration, and
- * announce at most what the Run can cost if every Lane runs all its
- * Iterations, each call at its first-call estimate (retries not included).
+ * Iteration with a Lane that isn't a Resample Lane, the Optimizer's, then get
+ * each with its price and every Lane's Image Model (credentials and price,
+ * before anything billable), validate the Reference Photos, freeze the Run
+ * with its Identity Anchor and Ceiling, choose each Lane's character
+ * references from its own accepted photos and the Judge's Reference Photos,
+ * store each Lane's initial Prompt (its own, else the one built from the
+ * Target Look) as its first Iteration, and announce at most what the Run can
+ * cost if every Lane runs all its Iterations, each call at its first-call
+ * estimate (retries not included).
  */
 export const prepareRun = (
   runId: string,
@@ -240,15 +240,20 @@ export const prepareRun = (
               catch: (error) => new RunError({ message: errorMessage(error), cause: error }),
             }),
           );
+    // A Resample Run needs tables that can hold its `resampled` Prompts (older ones can't).
+    const optimizingLanes = request.lanes.filter(({ resample }) => !resample).length;
+    if (optimizingLanes < request.lanes.length) yield* store.checkResampleLanes;
     // Then the Judge and the Optimizer: a Run without either's key fails before any price is
-    // looked up. A Run of one Iteration never calls the Optimizer, so it needs neither.
+    // looked up. A Run of one Iteration, or of Resample Lanes only, never calls the Optimizer,
+    // so it needs neither.
     const { maxIterations } = request.stopRules;
+    const optimizes = maxIterations > 1 && optimizingLanes > 0;
     const judges = yield* Judges;
     const optimizers = yield* Optimizers;
     yield* judges.checkCredentials(request.judge.model);
-    if (maxIterations > 1) yield* optimizers.checkCredentials(request.optimizer.model);
+    if (optimizes) yield* optimizers.checkCredentials(request.optimizer.model);
     const judge = yield* judges.get(request.judge);
-    const optimizer = maxIterations > 1 ? yield* optimizers.get(request.optimizer) : null;
+    const optimizer = optimizes ? yield* optimizers.get(request.optimizer) : null;
     const models = yield* Effect.forEach(request.lanes, ({ model }) => imageModels.get(model));
 
     // The request schema already rejects two choices for one photo.
@@ -316,8 +321,9 @@ export const prepareRun = (
 
     // At most: every Lane runs every Iteration, each call at its first-call estimate (retries
     // not included). Iteration 1 sends the Lane's Prompt; later ones and the Optimizer calls
-    // between them are quoted at the longest Prompts and histories the Run allows. Each call is
-    // checked against the Budget at its own estimate.
+    // between them are quoted at the longest Prompts and histories the Run allows (a Resample
+    // Lane resends its Prompt and makes no Optimizer call). Each call is checked against the
+    // Budget at its own estimate.
     const optimizerPerCall = optimizer
       ? quoteOptimizerCall(optimizer.estimate, request.targetLook, request.candidates)
       : 0;
@@ -326,7 +332,7 @@ export const prepareRun = (
       const model = models[lane]!;
       return Effect.gen(function* () {
         const first = yield* laneRequest(report, characterReferences, prompts[lane]!, model);
-        const later = { ...first, prompt: longestPrompt };
+        const later = request.lanes[lane]!.resample ? first : { ...first, prompt: longestPrompt };
         const perCall = model.estimate(first).micros;
         return {
           lane,
@@ -342,7 +348,7 @@ export const prepareRun = (
       references: judgeReferences.length,
       targetLook: request.targetLook,
     }).micros;
-    const optimizerCalls = lanes.length * (maxIterations - 1);
+    const optimizerCalls = optimizingLanes * (maxIterations - 1);
     const imageMicros = estimates.reduce((sum, { micros }) => sum + micros, 0);
     const judgeMicros = judgePerCall * judgeCalls;
     const optimizerMicros = optimizerPerCall * optimizerCalls;
@@ -592,11 +598,11 @@ export const judgeIteration = (input: LaneState) =>
     // Judge call whose judgement wasn't saved numbers its calls on.
     const references = yield* Effect.forEach(
       storedPhotos(run.photoReport, record.referencePhotos),
-      (stored) => forJudge(stored.path, "image/jpeg", "Reference Photo"),
+      (stored) => forJudge(stored.path, "Reference Photo"),
     );
     const items = yield* Effect.forEach(pending, (candidate) => {
       const path = imagePath(dataDirectory, candidate.image.sha256, candidate.image.type);
-      return forJudge(path, candidate.image.type, `Candidate ${candidate.candidate}'s image`).pipe(
+      return forJudge(path, `Candidate ${candidate.candidate}'s image`).pipe(
         Effect.map((image) => {
           const key = {
             runId: candidate.runId,
@@ -653,9 +659,10 @@ export const judgeIteration = (input: LaneState) =>
  * Iterations so far, with a call of this one that didn't fit the Budget,
  * whether this execution saw it or the stored Candidates show it) and record
  * why, with the vendor's reason when a Judge call was turned away for good
- * (`judge-failed`); otherwise have the Optimizer write the next Iteration's
- * Prompt from the Lane's own recent history (`recentHistory`; never another
- * Lane's) and the Target Look, and store that Iteration. The Optimizer call
+ * (`judge-failed`); otherwise store the next Iteration, with the Prompt the
+ * Optimizer writes from the Lane's own recent history (`recentHistory`; never
+ * another Lane's) and the Target Look, or, in a Resample Lane, with the
+ * Lane's initial Prompt again and no Optimizer call. The Optimizer call
  * belongs to this Iteration (it is booked under it) and is reserved against
  * the Budget first, as every billable call is; one that doesn't fit, or a
  * retry that doesn't, isn't made and the Lane stops with `budget-exhausted`.
@@ -699,6 +706,10 @@ export const optimizeIteration = (input: LaneState) =>
     const next = { runId: input.runId, lane: input.lane, iteration: input.iteration + 1 };
     const proceed: LaneState = { ...input, iteration: next.iteration, stopReason: null };
     if (iterations.some(({ iteration }) => iteration === next.iteration)) return proceed;
+    if (run.request.lanes[input.lane]!.resample) {
+      yield* store.createIteration(next, history[0]!.prompt, { source: "resampled" });
+      return proceed;
+    }
 
     const price = yield* store.loadOptimizer(input.runId);
     if (!price) return yield* new RunError({ message: `Run ${input.runId} has no Optimizer` });

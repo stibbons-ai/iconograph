@@ -3,7 +3,10 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "exports": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./held-out": "./src/held-out-embedder.ts"
+  },
   "dependencies": {
     "@iconograph/domain": "workspace:*",
     "@libsql/client": "catalog:",

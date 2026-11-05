@@ -29,8 +29,10 @@ const Ordinal = Schema.Int.check(Schema.isGreaterThanOrEqualTo(1));
 
 /**
  * One Lane of a Run: its Image Model, and optionally the Reference Photos it
- * may send (photo numbers; default all) and its initial Prompt (default the
- * one built from the frozen Target Look).
+ * may send (photo numbers; default all), its initial Prompt (default the one
+ * built from the frozen Target Look) and `resample`: a Resample Lane, which
+ * resends the initial Prompt every Iteration and never calls the Optimizer
+ * (default false).
  */
 export const LaneRequest = Schema.Struct({
   model: Schema.String,
@@ -51,6 +53,7 @@ export const LaneRequest = Schema.Struct({
       ),
     ),
   ),
+  resample: Schema.optionalKey(Schema.Boolean),
 });
 export type LaneRequest = typeof LaneRequest.Type;
 

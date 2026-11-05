@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { checkBudget, type LedgerEntry, remainingMicros, toMicros, toUsd } from "../src";
+import {
+  addCallCosts,
+  callCosts,
+  checkBudget,
+  type LedgerEntry,
+  remainingMicros,
+  toMicros,
+  toUsd,
+} from "../src";
 
 const reserved = (usd: number): LedgerEntry => ({
   estimateMicros: toMicros(usd),
@@ -63,5 +71,27 @@ describe("Budget arithmetic", () => {
   test("micro-dollar conversion round-trips cent amounts", () => {
     expect(toMicros(0.0504)).toBe(50_400);
     expect(toUsd(toMicros(5))).toBe(5);
+  });
+});
+
+describe("Call costs", () => {
+  test("a call of unknown cost counts $0 in actualUsd and its estimate in committedUsd", () => {
+    expect(callCosts([settled(0.1, 0.07), settled(0.2, null), reserved(0.05)])).toEqual({
+      estimatedUsd: 0.35,
+      actualUsd: 0.07,
+      committedUsd: 0.32,
+      unknownCostCalls: 2,
+    });
+  });
+
+  test("costs add up exactly in micro-dollars", () => {
+    const tenth = callCosts([settled(0.1, 0.1)]);
+    const fifth = callCosts([settled(0.2, 0.2)]);
+    expect(addCallCosts([tenth, fifth])).toEqual({
+      estimatedUsd: 0.3,
+      actualUsd: 0.3,
+      committedUsd: 0.3,
+      unknownCostCalls: 0,
+    });
   });
 });

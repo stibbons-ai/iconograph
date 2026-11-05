@@ -17,6 +17,7 @@ import {
 } from "@iconograph/domain";
 import { Effect, Layer } from "effect";
 import { MastraJudges } from "../../src/judge";
+import { LLM_BASE_URLS } from "../../src/llm";
 import { FAKE_PRICE, untilAborted } from "./fake-image-models";
 import { fakeVendorFetch } from "./fake-vendors";
 
@@ -195,10 +196,30 @@ export const fakeLlmGetPrice = (
  * (Anthropic unless given) at `origin`.
  */
 export const judgesOnFakeVendor = (origin: string, vendor: LlmVendor = "anthropic") =>
-  MastraJudges({
+  judgesOnFakeVendors({ [vendor]: origin });
+
+/**
+ * The real Judges, priced at `FAKE_JUDGE_PRICING`, each vendor's calls on its
+ * fake API at `origins[vendor]`; any other request is refused before it
+ * leaves. Keys are read from `env` (default: the process environment).
+ */
+export function judgesOnFakeVendors(
+  origins: { readonly [V in LlmVendor]?: string },
+  env?: Record<string, string | undefined>,
+) {
+  const routes = (Object.keys(origins) as LlmVendor[]).map((vendor) => ({
+    origin: new URL(LLM_BASE_URLS[vendor]).origin,
+    fetch: fakeVendorFetch(origins[vendor]!, "Judge", vendor),
+  }));
+  return MastraJudges({
     prices: { lookup: (model) => Effect.succeed(fakeLlmPrice(model)) },
-    fetch: fakeVendorFetch(origin, "Judge", vendor),
+    ...(env && { env }),
+    fetch: (input, init) => {
+      const origin = new URL(String(input)).origin;
+      return (routes.find((route) => route.origin === origin) ?? routes[0]!).fetch(input, init);
+    },
   });
+}
 
 /**
  * The Judges of the test entry points: the real Judges on the fake Anthropic

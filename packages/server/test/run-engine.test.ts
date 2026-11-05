@@ -1660,6 +1660,194 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
     }
   }, 60_000);
 
+  test("a Resample Lane resends its initial Prompt every Iteration and never calls the Optimizer", async () => {
+    const { application, fake, optimizer } = await setup({
+      [GEMINI_IMAGE_MODEL]: ["same", "same", "same"],
+      [OPENAI_IMAGE_MODEL]: ["same", "same", "same"],
+    });
+    try {
+      const events: EstimateEvent[] = [];
+      const { runId, lanes } = await application.start(
+        loop({
+          lanes: [{ model: GEMINI_IMAGE_MODEL }, { model: OPENAI_IMAGE_MODEL, resample: true }],
+          // Patience above the limit never fires: both Lanes run all 3 Iterations.
+          ...rules({ maxIterations: 3, patience: 4 }),
+        }),
+        (event) => events.push(event),
+      );
+      expect(lanes.map(({ stopReason, iterations }) => ({ stopReason, iterations }))).toEqual([
+        { stopReason: "iteration-limit", iterations: 3 },
+        { stopReason: "iteration-limit", iterations: 3 },
+      ]);
+      const report = await application.report(runId);
+      const [optimizing, resampling] = report.lanes;
+      expect(optimizing).not.toHaveProperty("resample");
+      expect(resampling).toMatchObject({ resample: true });
+      const start = initialPrompt(DEFAULT_TARGET_LOOK);
+      expect(resampling!.prompts.map(({ prompt, source }) => ({ prompt, source }))).toEqual([
+        { prompt: start, source: "initial" },
+        { prompt: start, source: "resampled" },
+        { prompt: start, source: "resampled" },
+      ]);
+      expect(
+        fake.requests
+          .filter(({ model }) => model === OPENAI_IMAGE_MODEL)
+          .map(({ prompt }) => prompt),
+      ).toEqual([start, start, start]);
+      // Only the optimizing Lane's two Optimizer calls were made, booked and quoted.
+      expect(resampling!.prompts.flatMap(({ optimizerCost }) => optimizerCost.calls)).toEqual([]);
+      expect(optimizing!.prompts.map(({ source }) => source)).toEqual([
+        "initial",
+        "optimizer",
+        "optimizer",
+      ]);
+      expect(optimizer.requests).toHaveLength(2);
+      expect(events[0]!.optimizer.calls).toBe(2);
+      expect(resampling!.actualUsd).toBeCloseTo(
+        (3 * FAKE_ACTUAL_MICROS + 3 * FAKE_JUDGE_ACTUAL_MICROS) / 1e6,
+        10,
+      );
+    } finally {
+      await application.close();
+    }
+  }, 60_000);
+
+  test("a Run of Resample Lanes only never gets the Optimizer, so it needs no Optimizer price", async () => {
+    const { application } = await setup(["same", "same"], {}, undefined, [], {}, [], {
+      unpriced: true,
+    });
+    try {
+      const events: EstimateEvent[] = [];
+      const { runId, lanes } = await application.start(
+        loop({
+          lanes: [{ model: GEMINI_IMAGE_MODEL, resample: true }],
+          ...rules({ maxIterations: 2 }),
+        }),
+        (event) => events.push(event),
+      );
+      expect(lanes[0]).toMatchObject({ stopReason: "iteration-limit", iterations: 2 });
+      expect(events[0]!.optimizer).toMatchObject({ calls: 0, estimatedUsd: 0 });
+      expect((await application.report(runId)).optimizer).not.toHaveProperty("price");
+    } finally {
+      await application.close();
+    }
+  }, 60_000);
+
+  test("the estimate quotes a Resample Lane's later Iterations at its own Prompt, an optimizing Lane's at the longest", async () => {
+    // Each image call is estimated at a micro-dollar per Prompt character.
+    const { application } = await setup(Array<"same">(12).fill("same"), {
+      estimateMicros: ({ prompt }) => prompt.length,
+    });
+    try {
+      const events: EstimateEvent[] = [];
+      await application.start(
+        loop({
+          candidates: 2,
+          lanes: [{ model: GEMINI_IMAGE_MODEL }, { model: OPENAI_IMAGE_MODEL, resample: true }],
+          ...rules({ maxIterations: 3, patience: 4 }),
+        }),
+        (event) => events.push(event),
+      );
+      const [optimizing, resampling] = events[0]!.lanes;
+      const first = initialPrompt(DEFAULT_TARGET_LOOK).length / 1e6;
+      expect(resampling!.perCallUsd).toBeCloseTo(first, 12);
+      expect(resampling!.estimatedUsd).toBeCloseTo(first * 3 * 2, 12);
+      expect(optimizing!.estimatedUsd).toBeCloseTo((first + (2 * MAX_PROMPT_LENGTH) / 1e6) * 2, 12);
+    } finally {
+      await application.close();
+    }
+  }, 60_000);
+
+  test("on tables from before Resample Lanes, a normal Run still works and any Run with a Resample Lane is refused before any call", async () => {
+    const first = await setup(["same"]);
+    const { databasePath, dataDirectory } = first;
+    // The tables exist; then `iterations` as it was before Resample Lanes: no resampled source.
+    await first.application.start(loop(rules({ maxIterations: 1 })));
+    await first.application.close();
+    tamper(databasePath, "DROP TABLE iterations");
+    tamper(
+      databasePath,
+      `CREATE TABLE iterations (run_id TEXT NOT NULL, lane INTEGER NOT NULL,
+         iteration INTEGER NOT NULL, prompt TEXT NOT NULL,
+         source TEXT NOT NULL CHECK (source IN ('initial', 'optimizer', 'kept')), reason TEXT,
+         PRIMARY KEY (run_id, lane, iteration))`,
+    );
+    // A fresh application opens the old tables.
+    const fake = fakeImageModels(["same"]);
+    const application = await createRunApplication({
+      databasePath,
+      dataDirectory,
+      imageModels: fake.layer,
+      judges: fakeJudges().layer,
+      optimizers: fakeOptimizers().layer,
+      faceEmbedder: realFaceEmbedder(),
+      photoPaths: "operator",
+      retryPolicy: { maxRetries: 2, baseDelayMs: 0 },
+    });
+    try {
+      const { lanes } = await application.start(loop(rules({ maxIterations: 1 })));
+      expect(lanes[0]).toMatchObject({ stopReason: "iteration-limit" });
+      expect(fake.requests).toHaveLength(1);
+      for (const resampleLanes of [
+        [{ model: GEMINI_IMAGE_MODEL, resample: true }],
+        [{ model: GEMINI_IMAGE_MODEL }, { model: OPENAI_IMAGE_MODEL, resample: true }],
+      ]) {
+        await expect(
+          application.start(loop({ lanes: resampleLanes, ...rules({ maxIterations: 2 }) })),
+        ).rejects.toThrow("predate Resample Lanes");
+      }
+      expect(fake.requests).toHaveLength(1);
+    } finally {
+      await application.close();
+    }
+  }, 60_000);
+
+  test("a re-executed Resample Iteration resends the initial Prompt, bills nothing again and never gets the Optimizer", async () => {
+    const { application, databasePath, dataDirectory } = await setup(
+      ["same", "same"],
+      {},
+      undefined,
+      [],
+      {},
+      [],
+      { unpriced: true },
+    );
+    const request = loop({
+      lanes: [{ model: GEMINI_IMAGE_MODEL, resample: true }],
+      ...rules({ maxIterations: 2 }),
+    });
+    const { runId } = await application.start(request);
+    const before = await application.report(runId);
+    await application.close();
+    // The process died after Iteration 1 was judged, before Iteration 2 was stored.
+    for (const table of ["judgements", "cost_records", "candidates", "iterations"]) {
+      tamper(databasePath, `DELETE FROM ${table} WHERE iteration = 2`);
+    }
+    tamper(databasePath, "UPDATE lanes SET stop_reason = NULL");
+    const again = stepsOn(databasePath, dataDirectory, ["same"]);
+    try {
+      const next = await again.iteration(lane0Iteration1(runId));
+      expect(next).toEqual({ ...lane0Iteration1(runId), iteration: 2 });
+      // Iteration 1 is stored: re-executing it neither generates nor judges again.
+      expect(again.images.requests).toHaveLength(0);
+      expect(again.judge.requests).toHaveLength(0);
+      // Its next Iteration is stored at once, and a second re-execution finds it.
+      expect(await again.iteration(lane0Iteration1(runId))).toEqual(next);
+      expect(await again.iteration(next)).toEqual({ ...next, stopReason: "iteration-limit" });
+      expect(again.optimizer.requests).toHaveLength(0);
+      const after = await again.runtime.runPromise(runReport(runId));
+      expect(after.lanes[0]!.prompts.map(({ prompt, source }) => [prompt, source])).toEqual([
+        [initialPrompt(DEFAULT_TARGET_LOOK), "initial"],
+        [initialPrompt(DEFAULT_TARGET_LOOK), "resampled"],
+      ]);
+      // One image per Iteration was billed, as in the uninterrupted Run.
+      expect(after.lanes[0]!.candidates.map(({ calls }) => calls.length)).toEqual([1, 1]);
+      expect(after.totals.actualUsd).toBeCloseTo(before.totals.actualUsd, 10);
+    } finally {
+      await again.runtime.dispose();
+    }
+  }, 60_000);
+
   test("two Iterations in a row whose Candidates were all Refused or Failed stop the Lane; the Optimizer saw why", async () => {
     const { application, optimizer } = await setup(["refuse", "fail", "refuse", "fail"]);
     try {

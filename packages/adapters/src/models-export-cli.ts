@@ -1,7 +1,7 @@
 import { mkdir, open, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { REPOSITORY_ROOT } from "./cli-options";
 import { modelsDirectory, resolveDataDirectory } from "./data-directory";
 import { errorLine, errorMessage } from "./errors";
 import { writeFileAtomically } from "./files";
@@ -28,14 +28,12 @@ model's id, path, sha256 and whether it was built; the export's own output goes
 to stderr. Errors print JSON to stderr and exit nonzero.
 `;
 
-const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
-
 /** Runs `command` with its stdout and stderr on this process's stderr; resolves to the exit code. */
 export type Runner = (command: string[]) => Promise<number>;
 
 // Async so a spawn failure (e.g. uv not installed) rejects instead of throwing.
 const runOnStderr: Runner = async (command) =>
-  Bun.spawn(command, { cwd: repositoryRoot, stdin: "ignore", stdout: 2, stderr: 2 }).exited;
+  Bun.spawn(command, { cwd: REPOSITORY_ROOT, stdin: "ignore", stdout: 2, stderr: 2 }).exited;
 
 /** Test seams: the lock, how the export script is run, and the output streams. */
 export interface ModelsExportCliDependencies {
@@ -102,7 +100,7 @@ export async function main(args: string[], dependencies: ModelsExportCliDependen
     {
       suffix,
       verify: async (temporary) => {
-        const command = ["uv", "run", join(repositoryRoot, model.build.script), temporary];
+        const command = ["uv", "run", join(REPOSITORY_ROOT, model.build.script), temporary];
         const code = await run(command).catch((error: unknown) => {
           throw new Error(
             `Could not run ${command[0]} (install uv: https://docs.astral.sh/uv/): ${errorMessage(error)}`,
