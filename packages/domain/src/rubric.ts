@@ -1,6 +1,5 @@
 import { Schema } from "effect";
 import { MAX_LIKENESS } from "./likeness";
-import type { TargetLook } from "./target-look";
 
 /**
  * The criteria the Judge scores, in the order the Rubric lists them. Likeness
@@ -45,7 +44,7 @@ export interface RubricCriterion {
 }
 
 /** The Rubric versions this build can read; a new version is added here with its rules. */
-const RUBRIC_VERSIONS = ["rubric-v1"] as const;
+const RUBRIC_VERSIONS = ["rubric-v1", "rubric-v2"] as const;
 export type RubricVersion = (typeof RUBRIC_VERSIONS)[number];
 
 /** A versioned Rubric: its criteria with anchored levels. */
@@ -57,7 +56,7 @@ export interface Rubric {
 /** A facet criterion: how well the Candidate matches that Target Look facet. */
 const facetCriterion = (
   title: string,
-  facet: keyof TargetLook,
+  facet: Exclude<JudgedCriterion, "resemblance" | "realism">,
   described: string,
 ): RubricCriterion => ({
   title,
@@ -111,8 +110,46 @@ export const RUBRIC_V1: Rubric = {
   },
 };
 
+/**
+ * Rubric v2 (ADR 0015): v1 with Resemblance and Realism rewritten for
+ * retouching. Apparent age older or younger than in the Reference Photos is a
+ * difference, and so is retouching beyond what the Target Look's `retouching`
+ * facet allows; retouching within it is not, and visible over-editing is a
+ * Realism artefact. The facet criteria are v1's.
+ */
+export const RUBRIC_V2: Rubric = {
+  version: "rubric-v2",
+  criteria: {
+    ...RUBRIC_V1.criteria,
+    resemblance: {
+      title: "Resemblance",
+      question:
+        "Is the person in the Candidate unmistakably the Subject shown in the Reference Photos, at the same apparent age, neither older nor younger? Retouching within what the Target Look's retouching allows is not a difference; retouching beyond it (e.g. any smoothing or whitening when it says none), changed features or face shape are.",
+      anchors: [
+        "a different person",
+        "shares some traits with the Subject but would not be recognised as them",
+        "plausibly the Subject, but with noticeable differences in facial features, face shape, proportions or apparent age (clearly older or younger, e.g. obviously younger skin), or clear retouching beyond what the Target Look's retouching allows",
+        "clearly the Subject, with minor differences in features or apparent age, or slight retouching beyond what the Target Look's retouching allows; retouching within it is not a difference",
+        "unmistakably the Subject at the same apparent age, as recognisable as in their own Reference Photos; any retouching stays within what the Target Look's retouching allows",
+      ],
+    },
+    realism: {
+      title: "Realism",
+      question:
+        "Does the Candidate look like a real professional photograph? Visible over-editing is an artefact: fake-white or uniform teeth, plastic or airbrushed skin, a younger-looking face.",
+      anchors: [
+        "obviously synthetic: distorted anatomy, melted features or garbled details",
+        "clearly AI-generated: plastic skin, wrong anatomical details or an illustrated look",
+        "convincing at a glance, but with visible artefacts (waxy or airbrushed skin, fake-white or uniform teeth, odd eyes, ears or hands, inconsistent edges)",
+        "photographic, with minor artefacts or over-editing noticeable only on close inspection",
+        "indistinguishable from a real professional photograph",
+      ],
+    },
+  },
+};
+
 /** The Rubric new Runs are judged with. */
-export const CURRENT_RUBRIC = RUBRIC_V1;
+export const CURRENT_RUBRIC = RUBRIC_V2;
 
 /** How a Rubric version turns levels into scores and decides Disputed. */
 interface RubricRules {
@@ -120,8 +157,16 @@ interface RubricRules {
   readonly isDisputed: (likeness: number, resemblance: number) => boolean;
 }
 
-/** Likeness and Resemblance disagree when they differ by more than this many points (v1). */
+/** Likeness and Resemblance disagree when they differ by more than this many points (v1; v2 keeps it). */
 export const DISPUTED_GAP = 4;
+
+/** Rubric v1's rules, kept by every later version that doesn't change them. */
+const RULES_V1: RubricRules = {
+  // An anchored level mapped linearly to 0–10: 1 → 0, 5 → 10.
+  levelScore: (level) => ((level - MIN_LEVEL) / (MAX_LEVEL - MIN_LEVEL)) * MAX_LIKENESS,
+  // Strictly more than `DISPUTED_GAP` points apart, in either direction; exactly 4 is not.
+  isDisputed: (likeness, resemblance) => Math.abs(likeness - resemblance) > DISPUTED_GAP,
+};
 
 /**
  * Each Rubric version's rules, used both to score a verdict and to check a
@@ -130,12 +175,8 @@ export const DISPUTED_GAP = 4;
  * Runs judged with an earlier version stay readable by that version's rules.
  */
 const RUBRIC_RULES: { readonly [V in RubricVersion]: RubricRules } = {
-  "rubric-v1": {
-    // An anchored level mapped linearly to 0–10: 1 → 0, 5 → 10.
-    levelScore: (level) => ((level - MIN_LEVEL) / (MAX_LEVEL - MIN_LEVEL)) * MAX_LIKENESS,
-    // Strictly more than `DISPUTED_GAP` points apart, in either direction; exactly 4 is not.
-    isDisputed: (likeness, resemblance) => Math.abs(likeness - resemblance) > DISPUTED_GAP,
-  },
+  "rubric-v1": RULES_V1,
+  "rubric-v2": RULES_V1,
 };
 
 /** An anchored level mapped to 0–10 by the current Rubric: 1 → 0, 5 → 10. */

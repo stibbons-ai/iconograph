@@ -10,8 +10,16 @@ const Facet = Schema.String.check(Schema.isTrimmed(), Schema.isNonEmpty(), Schem
 export const HAIRSTYLE_AS_IN_REFERENCE_PHOTOS = "as in the Reference Photos";
 
 /**
+ * The retouching of a Target Look that leaves the facet out (ADR 0015): a Run
+ * stored before the facet existed, generated and judged without retouching,
+ * and an API request that doesn't give it.
+ */
+export const NO_RETOUCHING = "none";
+
+/**
  * Defaults for every facet, so a Run works without writing any text: a neutral
- * corporate headshot that keeps the Subject's own hair.
+ * corporate headshot that keeps the Subject's own hair, with the light
+ * retouching a good portrait photographer delivers (ADR 0015).
  */
 export const DEFAULT_TARGET_LOOK = {
   pose: "facing the camera with shoulders turned slightly, relaxed and confident, natural friendly expression",
@@ -21,12 +29,17 @@ export const DEFAULT_TARGET_LOOK = {
   hairstyle: HAIRSTYLE_AS_IN_REFERENCE_PHOTOS,
   clothing: "smart business attire: a dark blazer over a plain light shirt",
   framing: "head-and-shoulders portrait, eyes in the upper third, centred",
+  retouching:
+    "natural professional retouching, as a good portrait photographer would deliver: the Subject looks their real age as in the Reference Photos, never older or younger; fine lines, under-eye shadows, redness and blemishes softened but not removed; real skin texture kept; teeth clean and a shade or two brighter while keeping their natural ivory tone, slight shade differences and translucency, never uniform or bright white; someone meeting them in person would not suspect editing",
 } as const;
 
 /**
  * The desired appearance of the headshot (GLOSSARY "Target Look"), one text per
- * fixed facet. `lighting` covers lighting and colour. A Run stores the decoded
- * value when it starts and never changes it.
+ * fixed facet. `lighting` covers lighting and colour; `retouching` how far the
+ * Subject's skin and teeth may be retouched. A Run stores the decoded value
+ * when it starts and never changes it. Without `retouching` (a Run stored
+ * before the facet existed, or an API request that leaves it out) it reads as
+ * `NO_RETOUCHING`.
  */
 export const TargetLook = Schema.Struct({
   pose: Facet,
@@ -35,6 +48,7 @@ export const TargetLook = Schema.Struct({
   hairstyle: Facet,
   clothing: Facet,
   framing: Facet,
+  retouching: Facet.pipe(Schema.withDecodingDefaultKey(Effect.succeed(NO_RETOUCHING))),
 });
 export type TargetLook = typeof TargetLook.Type;
 
@@ -49,10 +63,15 @@ export const TargetLookInput = Schema.Struct({
   hairstyle: withDefault("hairstyle"),
   clothing: withDefault("clothing"),
   framing: withDefault("framing"),
+  retouching: withDefault("retouching"),
 });
 export type TargetLookInput = typeof TargetLookInput.Encoded;
 
-/** Target Look facets as the Judge and the Optimizer read them, in the Rubric's order. */
+/**
+ * Target Look facets as the Judge and the Optimizer read them: the facet
+ * criteria in the Rubric's order, then `retouching`, which has no criterion
+ * of its own (the Judge weighs it through Resemblance and Realism).
+ */
 const facetLabels: { readonly [F in keyof TargetLook]: string } = {
   pose: "Pose",
   background: "Background",
@@ -60,6 +79,7 @@ const facetLabels: { readonly [F in keyof TargetLook]: string } = {
   hairstyle: "Hairstyle",
   clothing: "Clothing",
   framing: "Framing",
+  retouching: "Retouching",
 };
 
 /**
@@ -88,13 +108,14 @@ export function initialPrompt(look: TargetLook): string {
       : look.hairstyle;
   return [
     "A photorealistic professional headshot of the person shown in the attached reference photos.",
-    "Keep their identity exactly: the same facial features, face shape, proportions, skin tone, age and any distinctive marks. Do not idealise, beautify or change their face.",
+    "Keep their identity exactly: the same facial features, face shape, proportions, skin tone, age and any distinctive marks, and the same beard and hair colour (unless the Hairstyle line asks otherwise), including any grey. Retouching never changes these; it may only change what the Retouching line below allows.",
     `Pose: ${look.pose}.`,
     `Hairstyle: ${hairstyle}.`,
     `Clothing: ${look.clothing}.`,
     `Background: ${look.background}.`,
     `Lighting and colour: ${look.lighting}.`,
     `Framing: ${look.framing}.`,
-    "A single photograph with sharp focus on the eyes and natural skin texture; no text, watermark, border or collage.",
+    `Retouching: ${look.retouching}.`,
+    "A single photograph with sharp focus on the eyes; no text, watermark, border or collage.",
   ].join("\n");
 }

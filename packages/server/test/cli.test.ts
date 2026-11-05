@@ -80,7 +80,7 @@ test("a Run prints its estimate, then a report that read can reproduce", async (
   expect(
     report.lanes[0].candidates.map(({ judgement }: { judgement: unknown }) => judgement),
   ).toEqual([
-    expect.objectContaining({ status: "judged", rubricVersion: "rubric-v1" }),
+    expect.objectContaining({ status: "judged", rubricVersion: "rubric-v2" }),
     null,
     null,
   ]);
@@ -419,6 +419,7 @@ test("help documents the arguments, the Budget and the key", async () => {
     "--budget USD",
     "--candidates N",
     "--look FILE",
+    "retouching",
     "--pin PHOTO",
     "--lane SPEC",
     "openai:flare",

@@ -31,9 +31,15 @@ describe("Target Look", () => {
     expect(decodeInput({ background: "x".repeat(500) }).background).toHaveLength(500);
   });
 
-  test("a frozen Target Look needs every facet", () => {
+  test("a frozen Target Look needs every facet but retouching", () => {
     const { framing: _, ...partial } = DEFAULT_TARGET_LOOK;
     expect(() => Schema.decodeUnknownSync(TargetLook)(partial)).toThrow();
+  });
+
+  test("a Target Look stored before the retouching facet reads as no retouching, not the default", () => {
+    const { retouching: _, ...stored } = DEFAULT_TARGET_LOOK;
+    const look = Schema.decodeUnknownSync(TargetLook)(stored);
+    expect(look).toEqual({ ...stored, retouching: "none" });
   });
 });
 
@@ -46,15 +52,47 @@ describe("initial Prompt", () => {
       hairstyle: "short and slicked back",
       clothing: "navy turtleneck",
       framing: "waist-up, off-centre to the left",
+      retouching: "light skin smoothing only",
     });
     const prompt = initialPrompt(look);
     for (const facet of Object.values(look)) expect(prompt).toContain(facet);
   });
 
+  test("an empty look asks for the default retouching on its own line; a written one replaces it verbatim", () => {
+    expect(initialPrompt(decodeInput({})).split("\n")).toContain(
+      `Retouching: ${DEFAULT_TARGET_LOOK.retouching}.`,
+    );
+    const none = initialPrompt(decodeInput({ retouching: "none" }));
+    expect(none.split("\n")).toContain("Retouching: none.");
+    expect(none).not.toContain(DEFAULT_TARGET_LOOK.retouching);
+  });
+
+  test("keeps identity as the hard limit without forbidding all retouching", () => {
+    const prompt = initialPrompt(decodeInput({}));
+    expect(prompt).not.toContain("Do not idealise, beautify");
+    expect(prompt).not.toContain("natural skin texture");
+    expect(prompt).toContain("sharp focus on the eyes");
+    const identity = prompt.split("\n").find((line) => line.startsWith("Keep their identity"));
+    for (const kept of [
+      "facial features",
+      "face shape",
+      "proportions",
+      "skin tone",
+      "age",
+      "distinctive marks",
+      "beard and hair colour (unless the Hairstyle line asks otherwise), including any grey",
+    ]) {
+      expect(identity).toContain(kept);
+    }
+    // Retouching may change (e.g. brighten teeth), not only soften, what its line allows.
+    expect(identity).toContain("it may only change what the Retouching line below allows");
+  });
+
   test("the default hairstyle asks for the Reference Photos' hair, not the placeholder text", () => {
     const prompt = initialPrompt(decodeInput({}));
-    expect(prompt).not.toContain(HAIRSTYLE_AS_IN_REFERENCE_PHOTOS);
-    expect(prompt).toMatch(/same hairstyle.*reference photos/i);
+    const hairstyle = prompt.split("\n").find((line) => line.startsWith("Hairstyle:"));
+    expect(hairstyle).not.toContain(HAIRSTYLE_AS_IN_REFERENCE_PHOTOS);
+    expect(hairstyle).toMatch(/same hairstyle.*reference photos/i);
     for (const [facet, text] of Object.entries(DEFAULT_TARGET_LOOK)) {
       if (facet !== "hairstyle") expect(prompt).toContain(text);
     }
