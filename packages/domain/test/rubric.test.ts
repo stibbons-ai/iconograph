@@ -130,23 +130,24 @@ test("a scored verdict records its Rubric version, levels, issues and fixes", ()
   expect(judged.weightedTotal).toBeCloseTo(10, 12);
 });
 
-test("Rubric v1 anchors all five levels of every judged criterion", () => {
-  for (const criterion of JUDGED_CRITERIA) {
-    const { anchors } = RUBRIC_V1.criteria[criterion];
-    expect(anchors).toHaveLength(5);
-    expect(new Set(anchors).size).toBe(5);
+test("every Rubric anchors all five levels of every judged criterion", () => {
+  for (const rubric of [RUBRIC_V1, RUBRIC_V2]) {
+    for (const criterion of JUDGED_CRITERIA) {
+      const { anchors } = rubric.criteria[criterion];
+      expect(anchors).toHaveLength(5);
+      expect(new Set(anchors).size).toBe(5);
+    }
   }
 });
 
 describe("Rubric v2", () => {
-  test("judges new Runs, anchors every level, and keeps v1's facet criteria", () => {
+  test("judges new Runs and keeps v1's facet criteria", () => {
     expect(CURRENT_RUBRIC).toBe(RUBRIC_V2);
     for (const criterion of JUDGED_CRITERIA) {
-      expect(new Set(RUBRIC_V2.criteria[criterion].anchors).size).toBe(5);
+      if (criterion !== "resemblance" && criterion !== "realism") {
+        expect(RUBRIC_V2.criteria[criterion]).toBe(RUBRIC_V1.criteria[criterion]);
+      }
     }
-    const { resemblance: _r, realism: _e, ...facets } = RUBRIC_V2.criteria;
-    const { resemblance: _r1, realism: _e1, ...facetsV1 } = RUBRIC_V1.criteria;
-    expect(facets).toEqual(facetsV1);
   });
 
   test("Resemblance counts apparent age either way as a difference, retouching within the facet not", () => {

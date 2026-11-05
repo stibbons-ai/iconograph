@@ -106,7 +106,8 @@ describe("the Judge's instructions", () => {
       targetLook: { ...DEFAULT_TARGET_LOOK, retouching: "none" },
     });
     const last = parts.at(-1);
-    expect(last?.kind === "text" && last.text).toContain(
+    if (last?.kind !== "text") throw new Error("expected the Target Look text last");
+    expect(last.text).toContain(
       `Framing: ${JSON.stringify(DEFAULT_TARGET_LOOK.framing)}\nRetouching: "none"`,
     );
   });

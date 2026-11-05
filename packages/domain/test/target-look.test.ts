@@ -4,7 +4,6 @@ import {
   DEFAULT_TARGET_LOOK,
   HAIRSTYLE_AS_IN_REFERENCE_PHOTOS,
   initialPrompt,
-  NO_RETOUCHING,
   TargetLook,
   TargetLookInput,
 } from "../src";
@@ -40,8 +39,7 @@ describe("Target Look", () => {
   test("a Target Look stored before the retouching facet reads as no retouching, not the default", () => {
     const { retouching: _, ...stored } = DEFAULT_TARGET_LOOK;
     const look = Schema.decodeUnknownSync(TargetLook)(stored);
-    expect(look).toEqual({ ...stored, retouching: NO_RETOUCHING });
-    expect(NO_RETOUCHING).toBe("none");
+    expect(look).toEqual({ ...stored, retouching: "none" });
   });
 });
 
