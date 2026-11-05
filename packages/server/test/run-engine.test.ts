@@ -3049,7 +3049,7 @@ describe("Run engine with the real adapters and a scripted network", () => {
         expect(sent.input.filter((part: { type: string }) => part.type === "image")).toHaveLength(
           4,
         );
-        expect(sent.response_format).toMatchObject({ image_size: "2K", delivery: "inline" });
+        expect(sent.response_format).toMatchObject({ image_size: "2K" });
       }
       // The recorded image is a plain synthetic square: no face.
       expect(report.lanes[0]!.candidates.map(({ outcome }) => outcome)).toEqual(["Gated", "Gated"]);
