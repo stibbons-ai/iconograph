@@ -499,11 +499,17 @@ Judge's in the Lane's first Iteration with a Scored Candidate.
   is the path, commas included. The Identity Anchor and the Judge's Reference Photos always come
   from all accepted photos, and one Budget covers every Lane and the Judge.
 - **Target Look:** a JSON file with any of the facets `pose`, `background`, `lighting` (lighting
-  and colour), `hairstyle`, `clothing` and `framing`, each a text of up to 500 characters, e.g.
-  `{"background": "dark navy backdrop", "clothing": "grey suit"}`. Missing facets take defaults (a
-  neutral corporate headshot); `hairstyle` defaults to "as in the Reference Photos". Unknown facets
-  are rejected, and so is text with leading or trailing spaces. The look is frozen with the Run, and
-  the first Prompt is built from it.
+  and colour), `hairstyle`, `clothing`, `framing` and `retouching`, each a text of up to 500
+  characters, e.g. `{"background": "dark navy backdrop", "clothing": "grey suit"}`. Missing facets
+  take defaults (a neutral corporate headshot); `hairstyle` defaults to "as in the Reference
+  Photos", and `retouching` to natural professional retouching that keeps the Subject at their
+  real age as in the Reference Photos, never older or younger (the text is
+  `DEFAULT_TARGET_LOOK.retouching` in `packages/domain/src/target-look.ts`); `"none"` for no
+  retouching. Retouching never changes facial features, face shape, distinctive marks or the
+  beard and hair colour (unless `hairstyle` asks otherwise), including any grey. A Run stored before
+  the facet existed reads with `retouching` `"none"`. Unknown facets are rejected, and so is text
+  with leading or trailing spaces. The look is frozen with the Run, and the first Prompt is built
+  from it.
 - **Character references:** each Image Model keeps a character's identity from a limited number of
   reference images (Gemini 4, OpenAI 16), chosen from the Lane's accepted photos: pinned photos
   first (pins apply to every Lane, must be among each Lane's photos, and more than the model takes
@@ -568,17 +574,24 @@ Judge's in the Lane's first Iteration with a Scored Candidate.
   Model (e.g. a `google/` Judge with a Gemini Lane, or an `openai/` Judge with an OpenAI Lane),
   the report carries the warning code `judge-same-vendor`, naming those Lanes: a Judge may favour
   its own vendor's images.
-- **Rubric v1:** the Judge rates Resemblance (is it unmistakably the Subject?), Realism, and how
-  well Pose, Background, Lighting (and colour), Hairstyle, Clothing and Framing match the Target
-  Look, each on an anchored level 1–5 with a written anchor per level, mapped linearly to 0–10
-  (1 → 0, 5 → 10). It also lists the visible issues and suggested Prompt fixes (at most 10 each);
-  an answer outside that schema fails the judging. Likeness comes from the face model and is never
-  blended with Resemblance; a Candidate is **Disputed** when they differ by more than 4 points
-  (exactly 4 is not). The weighted total uses the Run's weights, frozen with its request: by
-  default Likeness 0.30, Resemblance 0.15, Realism 0.15, Pose 0.10, Background 0.08, Lighting 0.08,
-  Hairstyle 0.07, Clothing 0.05 and Framing 0.02 (they must be non-negative and sum to 1, and an
-  unknown criterion fails the request). The total is rounded to 9 decimals. Every judgement
-  records its Rubric version (`rubric-v1`).
+- **Rubric v2:** the Judge rates Resemblance (is it unmistakably the Subject, at the same
+  apparent age?), Realism (does it look like a real professional photograph?), and how well Pose,
+  Background, Lighting (and colour), Hairstyle, Clothing and Framing match the Target Look, each
+  on an anchored level 1–5 with a written anchor per level, mapped linearly to 0–10 (1 → 0, 5 →
+  10). The Target Look's `retouching` has no criterion of its own: for Resemblance, retouching
+  within it is no difference, while retouching beyond it (e.g. any smoothing or whitening when it
+  says none) and apparent age older or younger than in the Reference Photos are; visible
+  over-editing (fake-white or uniform teeth, plastic or airbrushed skin, a younger-looking face) is
+  a Realism artefact. It also lists the visible issues and suggested Prompt fixes (at most 10
+  each); an answer outside that schema fails the judging. Likeness comes
+  from the face model and is never blended with Resemblance; a Candidate is **Disputed** when they
+  differ by more than 4 points (exactly 4 is not). The weighted total uses the Run's weights,
+  frozen with its request: by default Likeness 0.30, Resemblance 0.15, Realism 0.15, Pose 0.10,
+  Background 0.08, Lighting 0.08, Hairstyle 0.07, Clothing 0.05 and Framing 0.02 (they must be
+  non-negative and sum to 1, and an unknown criterion fails the request). The total is rounded to
+  9 decimals. Every judgement records its Rubric version (`rubric-v2`); `rubric-v1` judgements of
+  earlier Runs still read, checked by v1's rules. A Run keeps its Rubric: one started under
+  `rubric-v1` that still has Iterations to run fails its next one before any image is generated.
 - **Judge failures:** a rate limit, server error or overload (408, 429, 5xx), a network failure
   (a coded error such as DNS, TLS or a reset, and a 2xx response whose body broke off) or a call
   past its timeout is retried like an Image Model call (1 s, 2 s, up to twice); a refusal,
@@ -788,6 +801,17 @@ GEMINI_API_KEY=… OPENAI_API_KEY=… ANTHROPIC_API_KEY=… \
   from the second Judge's vendor, whose images it may favour. Images without a face, unreadable
   images and Judge failures are counted, never averaged in; Candidates without an image (Refused,
   Failed) have no held-out score.
+- **Flat second Judge:** a second Judge that gives (nearly) every image the same score can't tell
+  the Arms apart (in the #14 run, 66 of 68 images got 7.50). Whenever `report.json` is written
+  (also when the evaluation stopped early), a warning (`eval-judge-flat`) fires when at least 80%
+  of at least 10 images it judged share one score, rounded to hundredths, the tables' precision. It
+  counts the images of every Run of both Arms, the one that stopped the evaluation included, and
+  only those it judged: failed, skipped and unreadable judgings count neither in the share nor in
+  the 10. It checks all images and, when more than one Image Model has judged images, each Image
+  Model's alone, one warning per flat scope, with the second Judge (`judge`), the scope
+  (`imageModel`, null for all images), the dominant `score`, its `share` (0 to 1) and the judged
+  `images`. Its second Judge comparison is then weak evidence: lean on FaceNet, or rerun with
+  another second Judge or effort.
 - **Failures:** the evaluation fails fast. A vendor's answer about one image (refused, failed, no
   face, unusable) is a score; anything else stops the evaluation after that Run: a Run that fails
   or can't be read back, a fault while scoring (the face models, a file, a bug), and a Run the
@@ -817,7 +841,8 @@ GEMINI_API_KEY=… OPENAI_API_KEY=… ANTHROPIC_API_KEY=… \
   more). `report.json` adds the settings, every Run (its id, null when it was never stored; stop
   reason, Iterations, costs, price sources and each Candidate's scores) and the warnings (price
   refresh failures, the Run engine's warnings, the second Judge's). Progress and each Run's
-  estimate print as JSON lines on stderr.
+  estimate print as JSON lines on stderr. Below the tables, stdout repeats each `eval-judge-flat`
+  warning's message, so a reader of the tables sees it.
 
 ### ADR validation and commits
 
@@ -913,8 +938,10 @@ can be retried: one refused with 400 (invalid input to `start-async`), or a `str
 was refused (it answers 200, and the stream ends with the validation error); retry that one
 with `start-async`, since Mastra streams a `runId` only once. The body's `inputData` is the Run
 request, with every Target Look facet, every Lane, the Judge, the Optimizer and the stopping rules
-given (the API applies no defaults; the CLI's are in "Runs"). A Lane's `photos` are numbers into
-the Run's `photos` (from 1), so the data-volume check covers them too; its `prompt` is the
+given (the API applies no defaults, except a missing `retouching`, which is `"none"` as for Runs
+stored before that facet; a Target Look key that is no facet is refused; the CLI's defaults are in
+"Runs"). A Lane's `photos` are numbers into the Run's `photos` (from 1), so the data-volume check
+covers them too; its `prompt` is the
 Prompt's text. The Judge's `weights` must name every Rubric criterion and sum to 1:
 
 ```sh
@@ -931,7 +958,8 @@ curl -X POST http://127.0.0.1:4111/api/workflows/run/start-async \
     "optimizer": {"model": "anthropic/claude-sonnet-5-5", "effort": "medium"},
     "stopRules": {"targetScore": 8.5, "patience": 3, "minImprovement": 0.2, "maxIterations": 8},
     "targetLook": {"pose": "…", "background": "…", "lighting": "…",
-      "hairstyle": "as in the Reference Photos", "clothing": "…", "framing": "…"}}}'
+      "hairstyle": "as in the Reference Photos", "clothing": "…", "framing": "…",
+      "retouching": "…"}}}'
 ```
 
 A missing key fails the Run with that message before any billable call: the Judge's and (for more

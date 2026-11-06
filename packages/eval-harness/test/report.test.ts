@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { ArmRun, EvaluatedCandidate } from "../src/arms";
-import { armStats, compareArms, renderComparison } from "../src/report";
+import { armStats, compareArms, flatJudgeWarnings, renderComparison } from "../src/report";
 
 const noCost = { estimatedUsd: 0, actualUsd: 0, committedUsd: 0, unknownCostCalls: 0 };
 const none = {
@@ -261,5 +261,116 @@ describe("Comparing the Arms", () => {
     expect(table).toContain("$0.5000 (~$0.7000, 1 unknown)");
     expect(table).toContain("Compared: 3 of 3");
     expect(table).toContain("openai/gpt-5.5");
+  });
+});
+
+describe("A flat second Judge", () => {
+  const JUDGE = "google/gemini-3.1-pro-preview";
+  const GEMINI = "gemini-nano-banana-2.1";
+  const OPENAI = "gpt-image-2.5-sunburst";
+  /** Candidates the second Judge judged at `scores`, in order. */
+  const judged = (...scores: number[]) => scores.map((score) => imaged(0.6, score));
+  /** `count` Candidates the second Judge judged at 7.5, and `other` more at distinct other scores. */
+  const flat = (count: number, other = 0) => [
+    ...judged(...Array<number>(count).fill(7.5)),
+    ...judged(...Array.from({ length: other }, (_, index) => 1 + index / 10)),
+  ];
+
+  test("8 of 10 images at one score warns, with the Judge, the score, the share and the count", () => {
+    expect(flatJudgeWarnings([run({ candidates: flat(8, 2) })], JUDGE)).toEqual([
+      {
+        code: "eval-judge-flat",
+        message: `The second Judge ${JUDGE} gave 80% of the 10 judged images (all Image Models) the same score, 7.50: its comparison of the Arms is weak evidence`,
+        judge: JUDGE,
+        imageModel: null,
+        score: 7.5,
+        share: 0.8,
+        images: 10,
+      },
+    ]);
+  });
+
+  test("7 of 10 at one score, or 9 images all at one score, doesn't warn", () => {
+    expect(flatJudgeWarnings([run({ candidates: flat(7, 3) })], JUDGE)).toEqual([]);
+    expect(flatJudgeWarnings([run({ candidates: flat(9) })], JUDGE)).toEqual([]);
+  });
+
+  test("counts the judged images of every Run, of both Arms and an incomplete one", () => {
+    expect(
+      flatJudgeWarnings(
+        [
+          run({ arm: "optimizer", candidates: flat(4) }),
+          run({ arm: "resample", candidates: flat(3) }),
+          run({ arm: "optimizer", subject: "bob", complete: false, candidates: flat(3) }),
+        ],
+        JUDGE,
+      ),
+    ).toMatchObject([{ share: 1, images: 10 }]);
+  });
+
+  test("failed, skipped, unreadable and missing judgings count neither in the share nor in the images", () => {
+    const unjudged: EvaluatedCandidate[] = [
+      imaged(0.6, null),
+      { ...imaged(0.6, null), evalJudge: { status: "skipped", reason: "rejected" } },
+      { ...imaged(0.6, null), evalJudge: { status: "unreadable", reason: "not an image" } },
+      refused,
+    ];
+    // Counted, they would push 8 of 10 below 80%.
+    expect(
+      flatJudgeWarnings([run({ candidates: [...flat(8, 2), ...unjudged, ...unjudged] })], JUDGE),
+    ).toMatchObject([{ share: 0.8, images: 10 }]);
+    // Counted, one would make 9 of 10 at one score: a warning.
+    for (const one of unjudged) {
+      expect(flatJudgeWarnings([run({ candidates: [...flat(9), one] })], JUDGE)).toEqual([]);
+    }
+  });
+
+  test("scores equal at 2 decimals are one score", () => {
+    // Weighted totals of the same levels can differ in the last bits.
+    const noisy = judged(...Array.from({ length: 10 }, (_, index) => 7.5 + (index % 2) * 1e-12));
+    expect(flatJudgeWarnings([run({ candidates: noisy })], JUDGE)).toMatchObject([
+      { score: 7.5, share: 1, images: 10 },
+    ]);
+    // 7.494 and 7.504 print apart.
+    const apart = judged(...Array<number>(5).fill(7.494), ...Array<number>(5).fill(7.504));
+    expect(flatJudgeWarnings([run({ candidates: apart })], JUDGE)).toEqual([]);
+  });
+
+  test("a Judge flat on one Image Model's images only warns for that Image Model", () => {
+    const warnings = flatJudgeWarnings(
+      [
+        run({ model: GEMINI, candidates: flat(10) }),
+        run({ model: OPENAI, candidates: judged(1, 2, 3, 4, 5, 6, 7, 8, 9, 10) }),
+      ],
+      JUDGE,
+    );
+    expect(warnings).toMatchObject([{ imageModel: GEMINI, score: 7.5, share: 1, images: 10 }]);
+    expect(warnings[0]!.message).toContain(`(${GEMINI})`);
+  });
+
+  test("flat everywhere warns overall and per Image Model; one Image Model only once", () => {
+    expect(
+      flatJudgeWarnings(
+        [
+          run({ model: GEMINI, candidates: flat(10) }),
+          run({ model: OPENAI, candidates: flat(10) }),
+        ],
+        JUDGE,
+      ).map(({ imageModel, images }) => [imageModel, images]),
+    ).toEqual([
+      [null, 20],
+      [GEMINI, 10],
+      [OPENAI, 10],
+    ]);
+    // A second Image Model without a judged image leaves one scope: the same images.
+    expect(
+      flatJudgeWarnings(
+        [
+          run({ model: GEMINI, candidates: flat(10) }),
+          run({ model: OPENAI, candidates: [refused] }),
+        ],
+        JUDGE,
+      ).map(({ imageModel }) => imageModel),
+    ).toEqual([null]);
   });
 });

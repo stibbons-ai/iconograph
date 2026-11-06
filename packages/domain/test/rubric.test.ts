@@ -3,6 +3,7 @@ import { Schema } from "effect";
 import {
   byCriterion,
   CRITERIA,
+  CURRENT_RUBRIC,
   DEFAULT_WEIGHTS,
   DEFAULT_JUDGE,
   DEFAULT_TARGET_LOOK,
@@ -12,6 +13,7 @@ import {
   type JudgeVerdict,
   levelScore,
   RUBRIC_V1,
+  RUBRIC_V2,
   RubricWeights,
   RunRequest,
   scoreVerdict,
@@ -128,12 +130,63 @@ test("a scored verdict records its Rubric version, levels, issues and fixes", ()
   expect(judged.weightedTotal).toBeCloseTo(10, 12);
 });
 
-test("Rubric v1 anchors all five levels of every judged criterion", () => {
-  for (const criterion of JUDGED_CRITERIA) {
-    const { anchors } = RUBRIC_V1.criteria[criterion];
-    expect(anchors).toHaveLength(5);
-    expect(new Set(anchors).size).toBe(5);
+test("every Rubric anchors all five levels of every judged criterion", () => {
+  for (const rubric of [RUBRIC_V1, RUBRIC_V2]) {
+    for (const criterion of JUDGED_CRITERIA) {
+      const { anchors } = rubric.criteria[criterion];
+      expect(anchors).toHaveLength(5);
+      expect(new Set(anchors).size).toBe(5);
+    }
   }
+});
+
+describe("Rubric v2", () => {
+  test("judges new Runs and keeps v1's facet criteria", () => {
+    expect(CURRENT_RUBRIC).toBe(RUBRIC_V2);
+    for (const criterion of JUDGED_CRITERIA) {
+      if (criterion !== "resemblance" && criterion !== "realism") {
+        expect(RUBRIC_V2.criteria[criterion]).toBe(RUBRIC_V1.criteria[criterion]);
+      }
+    }
+  });
+
+  test("Resemblance counts apparent age either way and retouching beyond the facet as differences, retouching within it not", () => {
+    const { question, anchors } = RUBRIC_V2.criteria.resemblance;
+    expect(question).toContain("neither older nor younger");
+    expect(question).toContain(
+      "Retouching within what the Target Look's retouching allows is not a difference; retouching beyond it (e.g. any smoothing or whitening when it says none)",
+    );
+    expect(anchors[2]).toContain("clearly older or younger, e.g. obviously younger skin");
+    expect(anchors[2]).toContain(
+      "clear retouching beyond what the Target Look's retouching allows",
+    );
+    expect(anchors[3]).toContain(
+      "slight retouching beyond what the Target Look's retouching allows",
+    );
+    expect(anchors[3]).not.toContain("idealised or smoothed");
+  });
+
+  test("Realism asks for a real professional photograph and names over-editing an artefact", () => {
+    const { question, anchors } = RUBRIC_V2.criteria.realism;
+    expect(question).toContain("real professional photograph");
+    expect(question).not.toContain("unedited");
+    expect(question).toContain("over-editing is an artefact");
+    for (const sign of ["fake-white or uniform teeth", "airbrushed skin", "younger-looking face"]) {
+      expect(question).toContain(sign);
+    }
+    expect(anchors[2]).toContain("fake-white or uniform teeth");
+  });
+
+  test("a verdict judged with it records rubric-v2, and both versions' judgements read back", () => {
+    const decode = Schema.decodeUnknownSync(Judgement);
+    const verdict = { levels: levels(4), issues: [], promptFixes: [] };
+    const v2 = scoreVerdict(verdict, 7, DEFAULT_WEIGHTS, CURRENT_RUBRIC);
+    expect(v2.rubricVersion).toBe("rubric-v2");
+    expect(decode(v2)).toEqual(v2);
+    const v1 = scoreVerdict(verdict, 7, DEFAULT_WEIGHTS, RUBRIC_V1);
+    expect(decode(v1)).toEqual(v1);
+    expect(() => decode({ ...v1, disputed: true })).toThrow("don't follow from the levels");
+  });
 });
 
 test("a stored Judged whose scores or Disputed flag don't follow from its levels is rejected", () => {

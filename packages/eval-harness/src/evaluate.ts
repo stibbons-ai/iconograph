@@ -74,6 +74,7 @@ export interface EvalSettings {
 export interface EvalWarning {
   readonly code:
     | "eval-judge-same-vendor"
+    | "eval-judge-flat"
     | "eval-judge-rejected"
     | "price-refresh-failed"
     | "run-warning"
