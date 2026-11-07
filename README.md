@@ -198,14 +198,16 @@ in this order:
 1. **Manual override**, set per model with the command below.
 2. **LiteLLM's public price data**
    ([`model_prices_and_context_window.json`](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json)
-   on `main`), cached with its fetch time in `<data dir>/prices.db`. The `prices` command refreshes
-   it when 24 h old (or dated in the future); the price source's `ensureFresh` is meant to run at
-   server boot and daily. A failed refresh keeps serving the old cache with its age, marked `stale`
-   once it is 24 h old or dated in the future. An unrelated entry whose price fields are malformed
-   is dropped (that model is unpriced) and listed in `refresh.rejected`. A default model's entry
-   that is malformed or can't price that model (e.g. a required price field is missing), a
-   response that isn't JSON, or one that prices no model fails the refresh and leaves the cache
-   untouched.
+   on `main`), cached with its fetch time in `<data dir>/prices.db`, and refetched once 24 h old
+   (or dated in the future). The server checks at boot, without holding up the start, and hourly
+   while it runs, so while LiteLLM is reachable the cache reaches about 25 h at most; a failed
+   refetch is logged as a warning and retried at the next hourly check. A Run CLI refreshes on its
+   first price lookup; the `prices` command checks on every lookup (`--refresh` forces a fetch). A
+   failed refresh keeps serving the old cache with its age, marked `stale` once it is 24 h old or
+   dated in the future. An unrelated entry whose price fields are malformed is dropped (that model
+   is unpriced) and listed in `refresh.rejected`. A default model's entry that is malformed or
+   can't price that model (e.g. a required price field is missing), a response that isn't JSON, or
+   one that prices no model fails the refresh and leaves the cache untouched.
 3. **Bundled snapshot**,
    [`packages/adapters/litellm-prices.snapshot.json`](packages/adapters/litellm-prices.snapshot.json),
    used only offline before the first successful fetch. It never fills gaps in a fetched cache.
