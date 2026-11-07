@@ -442,8 +442,8 @@ The development shell exports the keys (see "Vendor keys"); any other way of set
 variables works too. A Run needs only the keys of its
 Lanes' vendors, its Judge's vendor and, for more than one Iteration, its Optimizer's vendor. Keys
 are read only from the environment and sent only in request headers; they never enter the
-database, the output or an error. In an OpenAI Lane's
-failure reasons, a masked echo of a key in the usual form (a word with three or more asterisks,
+database, the output or an error. In the failure reasons of an OpenAI Lane and of every Judge
+and Optimizer, a masked echo of a key in the usual form (a word with three or more asterisks,
 such as `sk-proj-****abcd`) is redacted too, and every reason is cut to about 2000 characters. A
 key shorter than 20 characters or with spaces, control or non-ASCII characters (a bad paste) is
 rejected before its price lookup and before any billable call, without echoing it. That check
@@ -481,7 +481,8 @@ Judge's in the Lane's first Iteration with a Scored Candidate.
   with `judge-failed` once the Iteration's calls already made have settled (no image or Optimizer
   call, and no Judge call beyond retries of calls already running; Candidates judged before keep
   their scores, and the best is still reported). Each Lane stops on its own first such call, and
-  the report shows the vendor's reason (the key itself redacted) as the Lane's `stopDetail`.
+  the result and the report show the vendor's reason (the key itself redacted) as the Lane's
+  `stopDetail`, and a warning names it.
   Cancelling the Run stops every Lane not yet stopped with `cancelled`, wherever the cancel
   lands (mid-call, between Iterations, during preparation, or with Lanes still waiting their
   turn; if the process stops before that is recorded, the report still shows them `cancelled`); a

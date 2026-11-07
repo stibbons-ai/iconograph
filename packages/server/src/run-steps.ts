@@ -35,8 +35,11 @@ import {
   judgeCandidate,
   judgeFailed,
   Judges,
+  type LaneStop,
+  type LaneStopDetailReason,
+  laneStopFields,
   laneStopReason,
-  type LaneStopReason,
+  type LaneStopWithDetail,
   MAX_PROMPT_LENGTH,
   notSent,
   type OptimizerIteration,
@@ -336,7 +339,7 @@ export const prepareRun = (
     // Lane resends its Prompt and makes no Optimizer call). Each call is checked against the
     // Budget at its own estimate.
     const optimizerPerCall = optimizer
-      ? quoteOptimizerCall(optimizer.estimate, request.targetLook, request.candidates)
+      ? quoteOptimizerCall(optimizer.estimate, request.targetLook, request.candidates).micros
       : 0;
     const longestPrompt = "\u0001".repeat(MAX_PROMPT_LENGTH);
     const estimates = yield* Effect.forEach(lanes, ({ lane, characterReferences }) => {
@@ -661,24 +664,30 @@ export const judgeIteration = (input: LaneState) =>
     return budgetExhausted ? { ...input, stopReason: "budget-exhausted" as const } : input;
   });
 
+/** The warning when a role's vendor turned it away for good, which stops the Lane. */
+const TURNED_AWAY: { readonly [R in LaneStopDetailReason]: string } = {
+  "optimizer-failed": "The vendor turned the Optimizer away for good; the Lane stops",
+  "judge-failed": "The vendor turned the Judge away for good; the Lane stops",
+};
+
 /**
  * End an Iteration: decide whether the Lane stops (`laneStopReason` over its
  * Iterations so far, with a call of this one that didn't fit the Budget,
  * whether this execution saw it or the stored Candidates show it) and record
- * why, with the vendor's reason when a Judge call was turned away for good
- * (`judge-failed`); otherwise store the next Iteration, with the Prompt the
- * Optimizer writes from the Lane's own recent history (`recentHistory`; never
- * another Lane's) and the Target Look, or, in a Resample Lane, with the
- * Lane's initial Prompt again and no Optimizer call. The Optimizer call
- * belongs to this Iteration (it is booked under it) and is reserved against
- * the Budget first, as every billable call is; one that doesn't fit, or a
- * retry that doesn't, isn't made and the Lane stops with `budget-exhausted`.
- * One the vendor turns away for good stops the Lane at once with
- * `optimizer-failed` and the vendor's reason, storing no next Iteration. When
- * optimizing fails otherwise (a refusal, an unusable answer, retries that ran
- * out), the next Iteration keeps the last Prompt, records why, and a warning
- * says so. A re-executed step that finds the next Iteration stored moves on
- * to it without calling again.
+ * why, with the vendor's reason and a warning when a Judge call was turned
+ * away for good (`judge-failed`); otherwise store the next Iteration, with
+ * the Prompt the Optimizer writes from the Lane's own recent history
+ * (`recentHistory`; never another Lane's) and the Target Look, or, in a
+ * Resample Lane, with the Lane's initial Prompt again and no Optimizer call.
+ * The Optimizer call belongs to this Iteration (it is booked under it) and is
+ * reserved against the Budget first, as every billable call is; one that
+ * doesn't fit, or a retry that doesn't, isn't made and the Lane stops with
+ * `budget-exhausted`. One the vendor turns away for good stops the Lane at
+ * once with `optimizer-failed`, the vendor's reason and a warning, storing no
+ * next Iteration. When optimizing fails otherwise (a refusal, an unusable
+ * answer, retries that ran out), the next Iteration keeps the last Prompt,
+ * records why, and a warning says so. A re-executed step that finds the next
+ * Iteration stored moves on to it without calling again.
  */
 export const optimizeIteration = (input: LaneState) =>
   Effect.gen(function* () {
@@ -695,20 +704,34 @@ export const optimizeIteration = (input: LaneState) =>
         prompt,
         candidates: candidates.filter((candidate) => candidate.iteration === iteration),
       }));
-    const stop = (stopReason: LaneStopReason, detail?: string) =>
+    const key = {
+      runId: input.runId,
+      lane: input.lane,
+      iteration: input.iteration,
+      candidate: null,
+      purpose: "optimize" as const,
+    };
+    const stop = (laneStop: LaneStop) =>
       store
-        .stopLane(input.runId, input.lane, stopReason, detail)
-        .pipe(Effect.as({ ...input, stopReason } satisfies LaneState));
+        .stopLane(input.runId, input.lane, laneStop)
+        .pipe(
+          Effect.as({ ...input, stopReason: laneStopFields(laneStop).reason } satisfies LaneState),
+        );
+    const turnedAway = (laneStop: LaneStopWithDetail) =>
+      Effect.logWarning(TURNED_AWAY[laneStop.reason]).pipe(
+        Effect.annotateLogs({ reason: laneStop.detail }),
+        about(key),
+        Effect.andThen(stop(laneStop)),
+      );
     const results = history.map(({ candidates }) => iterationResult(candidates));
-    const stopReason = laneStopReason(
+    const laneStop = laneStopReason(
       results,
       run.request.stopRules,
       input.stopReason === "budget-exhausted",
     );
-    // `judge-failed` holds only when the last Iteration shows the vendor's reason.
-    if (stopReason === "judge-failed")
-      return yield* stop(stopReason, results.at(-1)!.judgeRejected!);
-    if (stopReason) return yield* stop(stopReason);
+    if (laneStop !== null) {
+      return yield* typeof laneStop === "string" ? stop(laneStop) : turnedAway(laneStop);
+    }
 
     const next = { runId: input.runId, lane: input.lane, iteration: input.iteration + 1 };
     const proceed: LaneState = { ...input, iteration: next.iteration, stopReason: null };
@@ -724,13 +747,6 @@ export const optimizeIteration = (input: LaneState) =>
     const request = { targetLook: run.request.targetLook, history: recentHistory(history) };
     const estimate = optimizer.estimate(request);
     // A step re-executed after an Optimizer call whose Prompt wasn't saved numbers its calls on.
-    const key = {
-      runId: input.runId,
-      lane: input.lane,
-      iteration: input.iteration,
-      candidate: null,
-      purpose: "optimize" as const,
-    };
     const [reserved] = yield* reserveInOrder(
       [{ key, gate: callGate(store, key, optimizer.model, calls) }],
       estimate,
@@ -745,7 +761,7 @@ export const optimizeIteration = (input: LaneState) =>
     }).pipe(about(key));
     if (optimization.kind === "budget-exhausted") return yield* stop("budget-exhausted");
     if (optimization.kind === "non-recoverable") {
-      return yield* stop("optimizer-failed", optimization.reason);
+      return yield* turnedAway({ reason: "optimizer-failed", detail: optimization.reason });
     }
     if (optimization.kind === "kept") {
       yield* Effect.logWarning("Optimizing failed; the next Iteration keeps the last Prompt").pipe(
@@ -808,17 +824,21 @@ export function bestCandidateView(candidates: readonly CandidateRecord[]) {
 }
 
 /**
- * A stopped Lane's result: why it stopped, how many Iterations it began (each
- * has its Prompt stored), and its best Candidate.
+ * A stopped Lane's result: why it stopped (with the vendor's reason as its
+ * stored detail, for `LANE_STOPS_WITH_DETAIL`), how many Iterations it began
+ * (each has its Prompt stored), and its best Candidate.
  */
 export const laneResult = (input: LaneState) =>
   Effect.gen(function* () {
     const store = yield* RunStore;
     const candidates = yield* store.loadCandidates(input.runId, input.lane);
+    const stored = (yield* store.loadLanes(input.runId)).find(({ lane }) => lane === input.lane);
     return {
       runId: input.runId,
       lane: input.lane,
       stopReason: input.stopReason,
+      // The detail belongs to the stored stop, which the step's reason is unless one came first.
+      stopDetail: stored?.stopReason === input.stopReason ? stored.stopDetail : null,
       iterations: (yield* store.loadIterations(input.runId, input.lane)).length,
       best: bestCandidateView(candidates),
     };

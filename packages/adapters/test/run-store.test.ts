@@ -599,6 +599,46 @@ describe("RunStore rows", () => {
     }
   });
 
+  test("an interrupted write keeps its turn until its attempt in flight has ended", async () => {
+    // The write meets the lock; the reconnect that resets its connection is held.
+    const watch = lockWatch({ holdFirstReconnect: true });
+    const { runtime, run, databasePath } = await storeWithRun(1, watch);
+    const other = createClient({ url: localDatabaseUrl(databasePath) });
+    const reader = createClient({ url: localDatabaseUrl(databasePath) });
+    try {
+      const transaction = await other.transaction("write");
+      const fiber = runtime.runFork(withStore((store) => store.stopLane("run", 0, "patience")));
+      await watch.busy;
+      await transaction.commit();
+      const interrupted = runtime.runPromise(Fiber.interrupt(fiber));
+      const statements = watch.statements;
+      const second = run(
+        withStore((store) =>
+          store.createIteration({ runId: "run", lane: 0, iteration: 2 }, "next", {
+            source: "optimizer",
+          }),
+        ),
+      );
+      // A store that released the turn on interrupt would run the second write on the
+      // connection still being reset; one that keeps it makes no statement until the reset.
+      await Promise.race([second, Bun.sleep(500)]);
+      expect(watch.statements).toBe(statements);
+      watch.release();
+      await Promise.all([interrupted, second]);
+      const lanes = await reader.execute("SELECT stop_reason FROM lanes WHERE run_id = 'run'");
+      const iterations = await reader.execute(
+        "SELECT iteration FROM iterations WHERE run_id = 'run' ORDER BY iteration",
+      );
+      expect(lanes.rows[0]?.stop_reason).toBeNull();
+      expect(iterations.rows.map((row) => Number(row.iteration))).toEqual([1, 2]);
+    } finally {
+      watch.release();
+      other.close();
+      reader.close();
+      await runtime.dispose();
+    }
+  });
+
   test("a Lane's first stop reason stands", async () => {
     const { runtime, run } = await storeWithRun(1);
     try {
@@ -616,18 +656,47 @@ describe("RunStore rows", () => {
     const { runtime, run } = await storeWithRun(1);
     try {
       const reason = "Optimizer HTTP 401: invalid x-api-key";
-      // A role's failure needs the vendor's reason; no other stop takes one.
+      // A role's failure needs the vendor's reason; no other stop takes one. The types say so,
+      // and the table refuses either anyway.
       await expect(
-        run(withStore((store) => store.stopLane("run", 0, "judge-failed"))),
+        // @ts-expect-error A detail reason without its detail.
+        run(withStore((store) => store.stopLane("run", 0, { reason: "judge-failed" }))),
       ).rejects.toThrow();
       await expect(
-        run(withStore((store) => store.stopLane("run", 0, "patience", reason))),
+        // @ts-expect-error A detail with a reason that takes none.
+        run(withStore((store) => store.stopLane("run", 0, { reason: "patience", detail: reason }))),
       ).rejects.toThrow();
-      await run(withStore((store) => store.stopLane("run", 0, "optimizer-failed", reason)));
-      await run(withStore((store) => store.stopLane("run", 0, "judge-failed", "Judge HTTP 403")));
+      await expect(
+        // @ts-expect-error A detail reason given alone.
+        run(withStore((store) => store.stopLane("run", 0, "optimizer-failed"))),
+      ).rejects.toThrow();
+      await run(
+        withStore((store) =>
+          store.stopLane("run", 0, { reason: "optimizer-failed", detail: reason }),
+        ),
+      );
+      await run(
+        withStore((store) =>
+          store.stopLane("run", 0, { reason: "judge-failed", detail: "Judge HTTP 403" }),
+        ),
+      );
       await run(withStore((store) => store.cancelLanes("run")));
       const [lane] = await run(withStore((store) => store.loadLanes("run")));
       expect(lane).toMatchObject({ stopReason: "optimizer-failed", stopDetail: reason });
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  test("a stored stop detail that isn't text is refused, naming the Run's Lanes", async () => {
+    const { runtime, run, databasePath } = await storeWithRun(1);
+    try {
+      tamper(
+        databasePath,
+        "UPDATE lanes SET stop_reason = 'judge-failed', stop_detail = X'4a756467' WHERE lane = 0",
+      );
+      const error = await run(Effect.flip(withStore((store) => store.loadLanes("run"))));
+      expect(error.message).toContain("Loading the Lanes of Run run failed");
     } finally {
       await runtime.dispose();
     }
