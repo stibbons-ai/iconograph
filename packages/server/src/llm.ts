@@ -413,7 +413,7 @@ export const llmCaller = <A, S>(options: LlmCallOptions<A, S>) => {
     const costMicros = costOf(pricing, usage);
     const failed = (reason: string): UnsuccessfulCall => ({
       kind: "failed",
-      reason,
+      reason: redact(reason),
       usage,
       costMicros,
     });

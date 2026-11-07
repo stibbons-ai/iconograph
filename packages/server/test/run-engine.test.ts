@@ -183,31 +183,20 @@ async function setup(
   };
 }
 
-/** The Lanes' stop reasons as stored (not as the report derives them). */
-const storedStopReasons = (databasePath: string, runId: string) => {
+/** One stop column of the Lanes as stored (not as the report derives it). */
+const storedStops = (
+  databasePath: string,
+  runId: string,
+  column: "stop_reason" | "stop_detail" = "stop_reason",
+) => {
   const db = new Database(databasePath, { readonly: true });
   try {
     return db
-      .query<{ stop_reason: string | null }, [string]>(
-        "SELECT stop_reason FROM lanes WHERE run_id = ? ORDER BY lane",
+      .query<{ value: string | null }, [string]>(
+        `SELECT ${column} AS value FROM lanes WHERE run_id = ? ORDER BY lane`,
       )
       .all(runId)
-      .map(({ stop_reason }) => stop_reason);
-  } finally {
-    db.close();
-  }
-};
-
-/** The Lanes' stop details as stored. */
-const storedStopDetails = (databasePath: string, runId: string) => {
-  const db = new Database(databasePath, { readonly: true });
-  try {
-    return db
-      .query<{ stop_detail: string | null }, [string]>(
-        "SELECT stop_detail FROM lanes WHERE run_id = ? ORDER BY lane",
-      )
-      .all(runId)
-      .map(({ stop_detail }) => stop_detail);
+      .map(({ value }) => value);
   } finally {
     db.close();
   }
@@ -552,7 +541,7 @@ describe("Run engine with a fake Image Model", () => {
         if (!blockSettle) {
           expect(warnings).toEqual([]);
           // A failed Run isn't a cancelled one: its unstopped Lane keeps no stop reason.
-          expect(storedStopReasons(databasePath, runId)).toEqual([null]);
+          expect(storedStops(databasePath, runId)).toEqual([null]);
           expect(call).toMatchObject({
             candidate: 0,
             settled: true,
@@ -2398,10 +2387,9 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
     databasePath: string,
     runId: string,
   ) => {
-    await until(
-      async () => storedStopReasons(databasePath, runId).every((reason) => reason !== null),
-      { timeoutMs: 10_000 },
-    );
+    await until(async () => storedStops(databasePath, runId).every((reason) => reason !== null), {
+      timeoutMs: 10_000,
+    });
     return application.report(runId);
   };
 
@@ -2419,10 +2407,10 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
         if (output?.event === "estimate") await run.cancel();
       }
       await stream.result;
-      await until(async () => !storedStopReasons(databasePath, run.runId).includes(null), {
+      await until(async () => !storedStops(databasePath, run.runId).includes(null), {
         timeoutMs: 10_000,
       });
-      expect(storedStopReasons(databasePath, run.runId)).toEqual(["cancelled", "cancelled"]);
+      expect(storedStops(databasePath, run.runId)).toEqual(["cancelled", "cancelled"]);
       expect(fake.requests).toEqual([]);
     } finally {
       await application.close();
@@ -2442,7 +2430,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
       await run.cancel();
       await application.close();
       closed = true;
-      expect(storedStopReasons(databasePath, run.runId)).toEqual(["cancelled"]);
+      expect(storedStops(databasePath, run.runId)).toEqual(["cancelled"]);
     } finally {
       release();
       if (!closed) await application.close();
@@ -2516,6 +2504,22 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
     expect(warnings).toHaveLength(1);
   });
 
+  test("overlapping closes that stop waiting warn once about the Runs still unwinding", async () => {
+    const warnings: RunWarning[] = [];
+    const cancels = new CancelRecordings((warning) => warnings.push(warning));
+    const cancel = new AbortController();
+    cancels.watch("stuck", cancel.signal);
+    cancel.abort();
+    await Promise.all([cancels.settled(50), cancels.settled(50)]);
+    expect(warnings).toEqual([
+      {
+        level: "Warn",
+        warning: expect.stringContaining("Cancelled Runs stuck were still unwinding"),
+        runIds: ["stuck"],
+      },
+    ]);
+  });
+
   test("cancelling stops only the Lanes still running; a Lane that already stopped keeps its reason", async () => {
     const { promise: held, resolve: release } = Promise.withResolvers<void>();
     const { application, databasePath, fake } = await setup(
@@ -2533,8 +2537,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
       );
       // The Gemini Lane stops on repeated refusals while the OpenAI Lane's call is held.
       await until(
-        async () =>
-          fake.requests.length === 3 && storedStopReasons(databasePath, run.runId)[0] !== null,
+        async () => fake.requests.length === 3 && storedStops(databasePath, run.runId)[0] !== null,
         { timeoutMs: 20_000 },
       );
       await run.cancel();
@@ -2893,7 +2896,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
           { OPENAI_API_KEY: "SENTINEL-OPENAI-KEY-0123456789" },
           () => application.start({ ...loop(), ...request }),
         );
-        const stored = storedStopDetails(databasePath, runId)[0] ?? "";
+        const stored = storedStops(databasePath, runId, "stop_detail")[0] ?? "";
         expect(stored).toStartWith(`${role} HTTP 401: Incorrect API key provided: [redacted]. `);
         expect(stored).toEndWith("… (truncated)");
         expect(stored.length).toBeLessThan(2100);

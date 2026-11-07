@@ -100,6 +100,7 @@ export class CancelRecordings {
       const runIds = pending
         .filter(([runId, entry]) => this.#pending.get(runId) === entry)
         .map(([runId]) => runId);
+      if (runIds.length === 0) return;
       for (const runId of runIds) this.#pending.delete(runId);
       this.warn({
         level: "Warn",

@@ -38,22 +38,30 @@ export const redactKey = (apiKey: string) => (text: string) =>
  */
 const MAX_REASON_LENGTH = 2000;
 
+/** How far past the cut masked echoes are scrubbed: longer than any echo. */
+const SCRUB_MARGIN = 64;
+
 /**
- * A vendor reason fit to store and print: without the key (`redactKey`), cut
- * to about `MAX_REASON_LENGTH` characters, and without a masked echo of any
- * key (e.g. `sk-proj-****abcd`): a whitespace-delimited word with three or
- * more asterisks after at least three characters (trailing punctuation
- * kept). The key goes before truncating, so a cut can't leave part of it;
- * the lookbehind starts a match only at a word's start, so the scan stays
- * cheap.
+ * A vendor reason fit to store and print: without the key (`redactKey`),
+ * without a masked echo of any key (e.g. `sk-proj-****abcd`): a
+ * whitespace-delimited word with three or more asterisks after at least
+ * three characters (trailing punctuation kept), then cut to about
+ * `MAX_REASON_LENGTH` characters. Both go before the cut, so it can't leave
+ * part of a key or of an echo; echoes are scrubbed only a little past the cut
+ * (`SCRUB_MARGIN`) and the lookbehind starts a match only at a word's start,
+ * so the scan stays cheap on huge untrusted text.
  */
 export const redactReason = (apiKey: string) => {
   const withoutKey = redactKey(apiKey);
   return (text: string) => {
     const keyless = withoutKey(text);
-    const masked = keyless
-      .slice(0, MAX_REASON_LENGTH)
-      .replace(/(?<!\S)\S{3,}\*{3,}\S*?(?=[.,;:!?)"']*(?:\s|$))/g, "[redacted]");
-    return keyless.length > MAX_REASON_LENGTH ? `${masked}… (truncated)` : masked;
+    const scanned = keyless.slice(0, MAX_REASON_LENGTH + SCRUB_MARGIN);
+    const masked = scanned.replace(
+      /(?<!\S)\S{3,}\*{3,}\S*?(?=[.,;:!?)"']*(?:\s|$))/g,
+      "[redacted]",
+    );
+    return keyless.length > scanned.length || masked.length > MAX_REASON_LENGTH
+      ? `${masked.slice(0, MAX_REASON_LENGTH)}… (truncated)`
+      : masked;
   };
 };

@@ -26,6 +26,7 @@ import { CancelRecordings, createRunWorkflow, RUN_WORKFLOW_ID } from "./workflow
 
 export type { EstimateEvent, RunResult } from "./schemas";
 export { RUN_WORKFLOW_ID } from "./workflow";
+export { RunSnapshotError } from "./report";
 export type { PhotoPaths } from "./run-steps";
 export type { RunWarning } from "./warnings";
 export { nativeVendors, type OpenVendors, type VendorsResource } from "./vendors";
