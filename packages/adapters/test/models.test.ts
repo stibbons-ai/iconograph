@@ -517,8 +517,8 @@ describe("ensureModels", () => {
     });
 
     test("time spent storing a chunk is no stall", async () => {
-      // Stands in for a slow disk: reading the first chunk's size lets twice the idle
-      // period pass, while the timer is paused for storing it.
+      // Stands in for a slow disk: reading the first chunk's byteLength, which the download
+      // does only while storing it, lets twice the idle period pass, while the timer is paused.
       const first = recognizer.slice(0, 500);
       Object.defineProperty(first, "byteLength", {
         get() {
@@ -585,6 +585,31 @@ describe("ensureModels", () => {
       expect(failure.message).toBe(stalled("/detector.onnx"));
       expect(cancelled).toBe(true);
       expect(await readdir(directory)).toEqual([]);
+    });
+
+    // Real time: the empty chunks must keep arriving while the watchdog's own timer runs.
+    test("empty body chunks are no data: a body sending only those still stalls", async () => {
+      let pump: Timer | undefined;
+      const empty: Fetch = async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start: (controller) => {
+              pump = setInterval(() => controller.enqueue(new Uint8Array(0)), idleTimeoutMs / 4);
+            },
+            cancel: () => clearInterval(pump),
+          }),
+        );
+      try {
+        const started = performance.now();
+        const failure = await rejectionOf(
+          ensureModels({ lock, directory, ids: ["detector"], fetch: empty, idleTimeoutMs }),
+        );
+        expect(failure.message).toBe(stalled("/detector.onnx"));
+        expect(performance.now() - started).toBeLessThan(idleTimeoutMs + 1_500);
+        expect(await readdir(directory)).toEqual([]);
+      } finally {
+        clearInterval(pump);
+      }
     });
   });
 

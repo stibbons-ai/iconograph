@@ -335,6 +335,8 @@ async function download(
             for (;;) {
               const { done, value: chunk } = await idle.guard(reader.read());
               if (done) break;
+              // An empty chunk is no data: it must not renew the watchdog.
+              if (chunk.length === 0) continue;
               // Paused while the chunk is stored: a slow local disk is no network stall.
               idle.stop();
               size += chunk.byteLength;
