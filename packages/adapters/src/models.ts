@@ -192,7 +192,9 @@ export async function ensureModels(options: EnsureModelsOptions): Promise<Ensure
       }
       // A live writer refreshes its temp file's mtime every `tempHeartbeatMs` until it is
       // renamed or removed, whatever its idle period and however long storing or verifying
-      // takes. So one unmodified for far longer was left by a killed process.
+      // takes. So one unmodified for far longer was left by a killed process. The
+      // `10 * idleTimeoutMs` term stays as the margin issue #18's triage set: with the
+      // heartbeat it is a safety margin, not what keeps a live temp file.
       await removeStaleTemps(
         directory,
         model.file,

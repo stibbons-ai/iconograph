@@ -689,10 +689,12 @@ describe("ensureModels", () => {
         await live.catch(() => undefined);
       }
     }
-    // Fake timers freeze Bun.sleep, so poll on the event loop instead of `until`.
+    // Fake timers freeze Bun.sleep and Date.now, so poll on the event loop instead of `until`,
+    // bounded by the monotonic clock: a loaded machine may need many turns.
     async function settled(condition: () => Promise<boolean>) {
-      for (let attempt = 0; !(await condition()); attempt++) {
-        if (attempt > 10_000) throw new Error("Condition not reached");
+      const deadline = Bun.nanoseconds() + 5_000 * 1e6;
+      while (!(await condition())) {
+        if (Bun.nanoseconds() > deadline) throw new Error("Condition not reached");
         const { promise, resolve } = Promise.withResolvers<void>();
         setImmediate(resolve);
         await promise;
@@ -727,6 +729,28 @@ describe("ensureModels", () => {
         () => renaming.promise,
         () => released.resolve(),
       );
+    });
+
+    // A leaked refresh interval keeps the process alive, so `models:fetch` would never exit.
+    test("no refresh interval outlives a download, whether it succeeds or fails", async () => {
+      // Spies call through to the real timers.
+      const setting = spyOn(globalThis, "setInterval");
+      const clearing = spyOn(globalThis, "clearInterval");
+      const missing: ModelLock = { models: [weight("detector", "/missing.onnx", detector)] };
+      const silent: ModelLock = { models: [weight("detector", "/silent.onnx", detector)] };
+
+      await ensureModels({ lock, directory, ids: ["detector"] });
+      await rejectionOf(ensureModels({ lock: missing, directory: join(directory, "missing") }));
+      await rejectionOf(
+        ensureModels({ lock: silent, directory: join(directory, "silent"), idleTimeoutMs: 50 }),
+      );
+      // The refresh interval is the only one a download sets, every minute.
+      const created = setting.mock.calls.flatMap(([, delay], index) =>
+        delay === 60_000 ? [setting.mock.results[index]!.value] : [],
+      );
+      const cleared = new Set<unknown>(clearing.mock.calls.map(([id]) => id));
+      expect(created).toHaveLength(3);
+      expect(created.filter((id) => !cleared.has(id))).toEqual([]);
     });
   });
 });
