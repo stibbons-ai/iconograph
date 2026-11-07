@@ -15,6 +15,7 @@ import {
   withCleanup,
   workflowsStore,
 } from "@iconograph/adapters";
+import { priceRefreshIntervalMs } from "@iconograph/domain";
 import type { WorkflowRunStatus } from "@mastra/core/workflows";
 import { type HonoBindings, type HonoVariables, MastraServer } from "@mastra/hono";
 import { Hono } from "hono";
@@ -32,9 +33,6 @@ const LOOPBACK_HOSTS = ["localhost", "127.0.0.1", "[::1]"];
 /** The first retry of a failed face-model download or verification, doubling up to 5 minutes. */
 const MODELS_RETRY_MS = 5_000;
 const MODELS_RETRY_MAX_MS = 300_000;
-
-/** How often a running server brings the LiteLLM prices up to date (they go stale at 24 h). */
-export const PRICES_REFRESH_MS = 24 * 60 * 60 * 1000;
 
 /**
  * The Mastra routes a Run needs (method and path as Mastra declares them):
@@ -111,7 +109,7 @@ export interface ServerDependencies extends Pick<
   modelsRetryMs?: number;
   /**
    * Test seam: waits between face-model attempts and between daily price
-   * refreshes (`PRICES_REFRESH_MS`); must end when `signal` aborts.
+   * refreshes (`priceRefreshIntervalMs`); must end when `signal` aborts.
    */
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   /** Test seam: wraps `/health`'s database query, e.g. to make it fail. */
@@ -338,7 +336,7 @@ export async function startServer(
 
   const stopping = new AbortController();
   /**
-   * Brings the prices up to date now and every `PRICES_REFRESH_MS` until the
+   * Brings the prices up to date now and every `priceRefreshIntervalMs` until the
    * server stops; one refresh at a time, never blocking boot. A failed refresh
    * is logged and the existing cache (or the bundled snapshot) keeps serving.
    */
@@ -351,9 +349,9 @@ export async function startServer(
         log({ event: "prices-fresh", refreshed, fetchedAt: fetchedAt.toISOString() });
       } catch (error) {
         if (stopping.signal.aborted) break;
-        log({ warning: `Price refresh failed, serving the cached prices: ${errorChain(error)}` });
+        log({ warning: `Price refresh failed, keeping the current prices: ${errorChain(error)}` });
       }
-      await sleep(PRICES_REFRESH_MS, stopping.signal);
+      await sleep(priceRefreshIntervalMs, stopping.signal);
     }
   })();
   /** Downloads that stopping the server or a stall aborts, so no temp file is left open. */

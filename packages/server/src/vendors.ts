@@ -62,11 +62,12 @@ export function refreshOnFirstLookup(
   };
 }
 
-/** The native Image Models and the Mastra Judges and Optimizers, priced by `source`. */
-export function vendorsPricedBy(
-  source: PriceSource,
-  warn: (message: string) => void,
-): VendorsResource {
+/**
+ * The native Image Model adapters and the Mastra Judges and Optimizers, priced
+ * by the price source in the data volume.
+ */
+export const nativeVendors: OpenVendors = async (dataDirectory, warn) => {
+  const source = await openPriceSource({ dataDirectory });
   const prices = refreshOnFirstLookup(source, warn);
   return {
     imageModels: NativeImageModels({ prices }),
@@ -75,8 +76,4 @@ export function vendorsPricedBy(
     ensurePricesFresh: prices.ensureFresh,
     close: () => source.close(),
   };
-}
-
-/** `vendorsPricedBy` the price source in the data volume. */
-export const nativeVendors: OpenVendors = async (dataDirectory, warn) =>
-  vendorsPricedBy(await openPriceSource({ dataDirectory }), warn);
+};

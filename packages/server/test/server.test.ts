@@ -20,6 +20,7 @@ import {
   type ImageModels,
   type Judges,
   type Optimizers,
+  priceRefreshIntervalMs,
   type RunRequest,
 } from "@iconograph/domain";
 import { Effect, type Layer } from "effect";
@@ -37,7 +38,6 @@ import {
   isLoopbackHost,
   MOUNTED_ROUTES,
   nextModelsRetryMs,
-  PRICES_REFRESH_MS,
   type RunningServer,
   type ServerDependencies,
   serverConfig,
@@ -994,14 +994,15 @@ describe("price refresh", () => {
     fileURLToPath(new URL("../../adapters/test/fixtures/litellm-prices.json", import.meta.url)),
   );
   const start = new Date("2026-11-01T12:00:00Z");
-  const DAY_SECONDS = PRICES_REFRESH_MS / 1000;
+  const nextDayAt = new Date(start.getTime() + priceRefreshIntervalMs).toISOString();
 
   /**
    * The server on a volume with verified face models, refreshing a real price
-   * source whose LiteLLM fetches each wait for the test to answer them, on a
-   * test clock; the daily wait ends when the test calls `nextDay`.
+   * source whose LiteLLM fetches each wait for the test to answer them (and
+   * reject on abort, unless `ignoresAbort`), on a test clock; the daily wait
+   * ends when the test calls `nextDay`.
    */
-  async function serveWithPrices() {
+  async function serveWithPrices({ ignoresAbort = false } = {}) {
     const data = await dataVolume(temporaryDirectory, SFACE_IDS);
     const clock = { now: start };
     const fetches: ((response: Response) => void)[] = [];
@@ -1011,9 +1012,11 @@ describe("price refresh", () => {
       // Like `fetch`: an abort rejects with the signal's reason.
       fetch: (_, init) => {
         const answer = Promise.withResolvers<Response>();
-        init?.signal?.addEventListener("abort", () => answer.reject(init.signal?.reason), {
-          once: true,
-        });
+        if (!ignoresAbort) {
+          init?.signal?.addEventListener("abort", () => answer.reject(init.signal?.reason), {
+            once: true,
+          });
+        }
         fetches.push(answer.resolve);
         return answer.promise;
       },
@@ -1035,6 +1038,7 @@ describe("price refresh", () => {
       },
       sleep: (ms, signal) => {
         waits.push(ms);
+        if (signal.aborted) return Promise.resolve();
         signal.addEventListener("abort", () => day.resolve(), { once: true });
         return day.promise;
       },
@@ -1045,7 +1049,7 @@ describe("price refresh", () => {
       fetches[n - 1]!(response);
     };
     const nextDay = () => {
-      clock.now = new Date(clock.now.getTime() + PRICES_REFRESH_MS);
+      clock.now = new Date(clock.now.getTime() + priceRefreshIntervalMs);
       const ended = day;
       day = Promise.withResolvers<void>();
       ended.resolve();
@@ -1065,29 +1069,26 @@ describe("price refresh", () => {
   }
 
   test("refreshes at boot without holding the start, then every 24 h", async () => {
-    const { server, logs, logged, fetches, waits, refreshes, answerFetch, nextDay, priceSource } =
+    const { server, logs, logged, waits, refreshes, answerFetch, nextDay, priceSource } =
       await serveWithPrices();
     // Started, booted and healthy while the boot refresh's fetch is unanswered.
     expect(refreshes()).toBe(1);
     await server.booted;
     expect((await request(server, "/health")).status).toBe(200);
-    await until(async () => fetches.length === 1);
     await answerFetch(1, new Response(litellm));
     await logged((line) => line.event === "prices-fresh");
-    expect(waits).toEqual([PRICES_REFRESH_MS]);
+    expect(waits).toEqual([priceRefreshIntervalMs]);
 
     nextDay();
     await answerFetch(2, new Response(litellm));
-    await logged(
-      (line) => line.fetchedAt === new Date(start.getTime() + PRICES_REFRESH_MS).toISOString(),
-    );
+    await logged((line) => line.fetchedAt === nextDayAt);
     expect(refreshes()).toBe(2);
     expect(logs.filter((line) => line.event === "prices-fresh")).toEqual([
       { event: "prices-fresh", refreshed: true, fetchedAt: start.toISOString() },
       {
         event: "prices-fresh",
         refreshed: true,
-        fetchedAt: new Date(start.getTime() + PRICES_REFRESH_MS).toISOString(),
+        fetchedAt: nextDayAt,
       },
     ]);
     expect(await priceSource()).toMatchObject({ _tag: "litellm", ageSeconds: 0, stale: false });
@@ -1103,7 +1104,7 @@ describe("price refresh", () => {
     expect(logs.filter((line) => "warning" in line || "error" in line)).toEqual([
       {
         warning: expect.stringMatching(
-          /^Price refresh failed, serving the cached prices: .*LiteLLM price fetch failed: HTTP 503/,
+          /^Price refresh failed, keeping the current prices: .*LiteLLM price fetch failed: HTTP 503/,
         ),
       },
     ]);
@@ -1112,7 +1113,7 @@ describe("price refresh", () => {
     expect(await priceSource()).toEqual({
       _tag: "litellm",
       asOf: start.toISOString(),
-      ageSeconds: DAY_SECONDS,
+      ageSeconds: priceRefreshIntervalMs / 1000,
       stale: true,
     });
   }, 30_000);
@@ -1128,13 +1129,31 @@ describe("price refresh", () => {
       process.off("unhandledRejection", onUnhandled);
     });
 
-    test("aborts a refresh in flight and closes the prices only after it ends", async () => {
+    test("aborts a refresh in flight without a warning or an unhandled rejection", async () => {
       const { server, logs, fetches, events, refreshes } = await serveWithPrices();
       running.splice(running.indexOf(server), 1);
       await until(async () => fetches.length === 1);
       await server.stop();
       expect(events).toEqual(["refresh settled", "close"]);
       expect(refreshes()).toBe(1);
+      expect(logs.filter((line) => "warning" in line || "error" in line)).toEqual([]);
+      await Bun.sleep(0); // A rejection nobody handles is reported after a turn of the event loop.
+      expect(unhandled).toEqual([]);
+    }, 30_000);
+
+    test("waits for a refresh that ignores the abort before closing the prices", async () => {
+      const { server, logs, fetches, answerFetch, events } = await serveWithPrices({
+        ignoresAbort: true,
+      });
+      running.splice(running.indexOf(server), 1);
+      await until(async () => fetches.length === 1);
+      const stopped = server.stop();
+      // Nothing to await proves a wait that doesn't end: give stop a real moment to run ahead.
+      await Bun.sleep(50);
+      expect(events).toEqual([]);
+      await answerFetch(1, new Response(litellm));
+      await stopped;
+      expect(events).toEqual(["refresh settled", "close"]);
       expect(logs.filter((line) => "warning" in line || "error" in line)).toEqual([]);
       await Bun.sleep(0); // A rejection nobody handles is reported after a turn of the event loop.
       expect(unhandled).toEqual([]);
