@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { type Client, createClient } from "@libsql/client";
 
-/** A filesystem path, never a remote database URL, keeps Runs local (ADR-0005). */
+/** A filesystem path, never a remote database URL, keeps every local database (Runs, prices) local (ADR-0005). */
 export function localDatabaseUrl(databasePath: string): string {
   return pathToFileURL(resolve(databasePath)).href;
 }
@@ -12,7 +12,10 @@ export function localDatabaseUrl(databasePath: string): string {
 export interface LocalClientOptions {
   /** How long one statement waits, synchronously, on a lock held elsewhere (LibSQL `timeout`). */
   busyTimeoutMs: number;
-  /** Wraps the client before `setup`; the wrapped one is set up and returned. */
+  /**
+   * Wraps the client before `setup`; the wrapped one is set up and returned.
+   * The wrapper must forward `close()`: a failed setup, and every caller, closes the wrapped client.
+   */
   wrapClient?: ((client: Client) => Client) | undefined;
 }
 

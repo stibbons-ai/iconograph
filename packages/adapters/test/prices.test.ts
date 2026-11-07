@@ -16,6 +16,7 @@ import {
   type PriceSource,
   type PriceSourceOptions,
 } from "../src";
+import { localDatabaseUrl } from "../src/local-database";
 import { litellmPricesUrl, PriceSnapshot } from "../src/prices";
 import { main } from "../src/prices-cli";
 import { spawnScript } from "./spawn-cli";
@@ -140,7 +141,7 @@ const lookupError = (source: PriceSource, model: string) =>
   Effect.runPromise(Effect.flip(source.lookup(model)));
 /** Corrupt the price database behind the price source's back. */
 async function tamper(sql: string) {
-  const raw = createClient({ url: pathToFileURL(pricesDatabase(directory)).href });
+  const raw = createClient({ url: localDatabaseUrl(pricesDatabase(directory)) });
   await raw.execute(sql);
   raw.close();
 }

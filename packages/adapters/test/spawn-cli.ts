@@ -2,12 +2,12 @@ import { REPOSITORY_ROOT } from "../src/cli-options";
 
 export interface SpawnCliOptions {
   /** Variables set on top of the inherited environment. */
-  env?: Record<string, string>;
-  cwd?: string;
+  env?: Record<string, string> | undefined;
+  cwd?: string | undefined;
 }
 
 /**
- * Run `bun <args>` (a CLI entry and its arguments) as its own process; its
+ * Run `bun <args>` (a CLI entry and its arguments, or `run <script>`) as its own process; its
  * stdout, stderr and exit code. It inherits the current environment, read at
  * the call, so a test's changes to it (e.g. cleaned GIT_*) reach the CLI, but
  * never a vendor key from the developer's shell (a real CLI must never see

@@ -59,7 +59,10 @@ export async function main(args: string[], dependencies: ModelsCliDependencies =
   stdout(`${JSON.stringify({ directory, models })}\n`);
 }
 
-/** Run as the `models:fetch` script does: failures print JSON to stderr; returns the exit code. */
+/**
+ * `main` through `runMain` with injectable seams: what `runCommand(main)` does
+ * for the script, returning the exit code instead of setting it.
+ */
 export function run(args: string[], dependencies: ModelsCliDependencies = {}): Promise<0 | 1> {
   return runMain((input) => main(input, dependencies), args, { stderr: dependencies.stderr });
 }
