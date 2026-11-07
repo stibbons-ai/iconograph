@@ -8,7 +8,7 @@ import {
   hasErrorNamed,
   httpErrorResult,
   type PriceSource,
-  redactKey,
+  redactReason,
   responseBodyOf,
   statusOf,
   toMastraSchema,
@@ -380,7 +380,7 @@ export interface LlmCallOptions<A, S> {
  * the text sent with every call (the instructions and the schema as Mastra
  * sends it), for the role's estimate.
  */
-export const llmCaller = <A, S extends object>(options: LlmCallOptions<A, S>) => {
+export const llmCaller = <A, S>(options: LlmCallOptions<A, S>) => {
   const { role, instructions, model, effort, pricing, schemaName, read } = options;
   const schema = toMastraSchema(options.schema);
   const decode = Schema.decodeUnknownSync(options.schema);
@@ -397,7 +397,7 @@ export const llmCaller = <A, S extends object>(options: LlmCallOptions<A, S>) =>
   });
   agent.__setLogger(noopLogger);
   const providerOptions = reasoningOptions(model.vendor, effort);
-  const redact = redactKey(model.apiKey);
+  const redact = redactReason(model.apiKey);
   const timedOut: UnsuccessfulCall = {
     kind: "transient",
     reason: `${role} request timed out after ${timeoutMs / 1000} s`,

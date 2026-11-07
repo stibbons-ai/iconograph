@@ -1,4 +1,11 @@
-import { type CallRecord, candidateKeyOf, imagePath, RunStore } from "@iconograph/adapters";
+import {
+  type CallRecord,
+  candidateKeyOf,
+  errorMessage,
+  imagePath,
+  RunStore,
+  workflowsStore,
+} from "@iconograph/adapters";
 import {
   callCosts,
   type CandidateOutcome,
@@ -9,8 +16,33 @@ import {
   sameVendorLanes,
   toUsd,
 } from "@iconograph/domain";
-import { Effect } from "effect";
+import type { MastraCompositeStore } from "@mastra/core/storage";
+import { Data, Effect } from "effect";
 import { bestCandidateView, RunConfig } from "./run-steps";
+import { RUN_WORKFLOW_ID } from "./workflow";
+
+/** Reading Mastra's snapshot of the Run, for its report, failed. */
+export class RunSnapshotError extends Data.TaggedError("RunSnapshotError")<{
+  runId: string;
+  message: string;
+  cause: unknown;
+}> {}
+
+/** Whether Mastra stored the Run as cancelled. */
+const workflowCancelled = (storage: MastraCompositeStore, runId: string) =>
+  Effect.tryPromise({
+    try: async () =>
+      (await workflowsStore(storage)).loadWorkflowSnapshot({
+        workflowName: RUN_WORKFLOW_ID,
+        runId,
+      }),
+    catch: (cause) =>
+      new RunSnapshotError({
+        runId,
+        message: `Reading the workflow snapshot of Run ${runId} failed: ${errorMessage(cause)}`,
+        cause,
+      }),
+  }).pipe(Effect.map((snapshot) => snapshot?.status === "canceled"));
 
 /** An Outcome variant as report fields: its tag as `outcome`, then its details. */
 type OutcomeFields<O> = O extends { _tag: infer Tag } ? { outcome: Tag } & Omit<O, "_tag"> : never;
@@ -97,14 +129,16 @@ const priceView = ({ _tag, ...age }: PriceQuote["source"]) => ({ source: _tag, .
  * Totals come from every billable call of the Run (the ledger the Budget
  * checks), including calls whose Candidate was never saved (the Run failed or
  * was cancelled mid-call); those are listed in `unattributedCalls`.
- * `workflowCancelled`: Mastra stored the Run as cancelled, so a Lane without a
- * stop reason shows `cancelled` (recording it may have been cut off).
+ * A Run Mastra stored as cancelled (its snapshot in `storage`) shows a Lane
+ * without a stop reason as `cancelled`: recording it may have been cut off
+ * (the process stopped while the Run's steps unwound).
  */
-export const runReport = (runId: string, workflowCancelled = false) =>
+export const runReport = (storage: MastraCompositeStore, runId: string) =>
   Effect.gen(function* () {
     const store = yield* RunStore;
     const { dataDirectory } = yield* RunConfig;
     const run = yield* store.loadRun(runId);
+    const cancelled = yield* workflowCancelled(storage, runId);
     const lanes = yield* store.loadLanes(runId);
     // Each Iteration's stored Prompt (what any of its calls sent; a Run whose Budget fits no
     // call stores the first but sends nothing). A Lane that died before storing one has none.
@@ -164,7 +198,7 @@ export const runReport = (runId: string, workflowCancelled = false) =>
           model: lane.model,
           ...(run.request.lanes[lane.lane]?.resample && { resample: true as const }),
           // A Run Mastra stored as cancelled whose cancel wasn't recorded yet.
-          stopReason: lane.stopReason ?? (workflowCancelled ? "cancelled" : null),
+          stopReason: lane.stopReason ?? (cancelled ? "cancelled" : null),
           ...(lane.stopDetail !== null && { stopDetail: lane.stopDetail }),
           iterations: prompts.length,
           best: bestCandidateView(own),

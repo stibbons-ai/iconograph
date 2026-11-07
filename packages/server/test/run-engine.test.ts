@@ -40,7 +40,6 @@ import { tamper } from "../../adapters/test/tamper";
 import { temporaryDirectories } from "../../adapters/test/temporary-directory";
 import { until } from "../../adapters/test/until";
 import { createRunApplication, type EstimateEvent, readRunReport, type RunWarning } from "../src";
-import { runReport } from "../src/report";
 import {
   defaultRunConfig,
   generateIteration,
@@ -50,7 +49,7 @@ import {
 } from "../src/run-steps";
 import { MastraOptimizers } from "../src/optimizer";
 import type { LaneState } from "../src/schemas";
-import { LANE_CONCURRENCY } from "../src/workflow";
+import { CancelRecordings, LANE_CONCURRENCY } from "../src/workflow";
 import {
   FAKE_ACTUAL_MICROS,
   FAKE_ESTIMATE_MICROS,
@@ -212,6 +211,7 @@ describe("Run engine with a fake Image Model", () => {
           runId: result.runId,
           lane: 0,
           stopReason: "iteration-limit",
+          stopDetail: null,
           iterations: 1,
           best: { iteration: 1, candidate: 0, score: expect.any(Number) },
         },
@@ -307,6 +307,7 @@ describe("Run engine with a fake Image Model", () => {
             runId,
             lane: 0,
             stopReason: "iteration-limit",
+            stopDetail: null,
             iterations: 3,
             best: { iteration: 1, candidate: 0, score: expect.any(Number) },
           },
@@ -1356,7 +1357,7 @@ describe("Run engine with a fake Judge", () => {
         // Nothing was left to judge, and nothing ran out: the Lane's state passes on unchanged.
         expect(await runtime.runPromise(judgeIteration(state))).toEqual(state);
         expect(again.requests).toHaveLength(0);
-        const after = await runtime.runPromise(runReport(runId));
+        const after = await readRunReport(databasePath, dataDirectory, runId);
         expect(after.lanes).toEqual(before.lanes);
         expect(after.totals).toEqual(before.totals);
       } finally {
@@ -1467,7 +1468,7 @@ describe("Run engine with a fake Judge", () => {
     try {
       await runtime.runPromise(judgeIteration(lane0Iteration1(runId)));
       expect(again.requests).toHaveLength(1);
-      const report = await runtime.runPromise(runReport(runId));
+      const report = await readRunReport(databasePath, dataDirectory, runId);
       const [first, second] = report.lanes[0]!.candidates;
       expect(first!.judgeCost.calls.map(({ attempt }) => attempt)).toEqual([0]);
       expect(second!.judgement?.status).toBe("judged");
@@ -1570,6 +1571,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
           runId,
           lane: 0,
           stopReason: "target-score",
+          stopDetail: null,
           iterations: 2,
           best: { iteration: 2, candidate: 0, score: total(second)! },
         },
@@ -1836,7 +1838,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
       expect(await again.iteration(lane0Iteration1(runId))).toEqual(next);
       expect(await again.iteration(next)).toEqual({ ...next, stopReason: "iteration-limit" });
       expect(again.optimizer.requests).toHaveLength(0);
-      const after = await again.runtime.runPromise(runReport(runId));
+      const after = await readRunReport(databasePath, dataDirectory, runId);
       expect(after.lanes[0]!.prompts.map(({ prompt, source }) => [prompt, source])).toEqual([
         [initialPrompt(DEFAULT_TARGET_LOOK), "initial"],
         [initialPrompt(DEFAULT_TARGET_LOOK), "resampled"],
@@ -2178,7 +2180,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
       const interrupted = again.runtime.runPromise(Fiber.interrupt(fiber));
       release();
       await interrupted;
-      const report = await again.runtime.runPromise(runReport(runId));
+      const report = await readRunReport(databasePath, dataDirectory, runId);
       expect(report.unattributedCalls).toEqual([
         expect.objectContaining({ purpose: "generate", settled: true, actualUsd: 0 }),
       ]);
@@ -2209,7 +2211,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
       expect(again.images.requests).toHaveLength(0);
       expect(again.judge.requests).toHaveLength(0);
       expect(again.optimizer.requests).toHaveLength(0);
-      const after = await again.runtime.runPromise(runReport(runId));
+      const after = await readRunReport(databasePath, dataDirectory, runId);
       expect(after.lanes).toEqual(before.lanes);
       expect(after.totals).toEqual(before.totals);
     } finally {
@@ -2268,7 +2270,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
           ...lane0Iteration1(runId),
           stopReason: "budget-exhausted",
         });
-        const after = await again.runtime.runPromise(runReport(runId));
+        const after = await readRunReport(databasePath, dataDirectory, runId);
         expect(after.lanes[0]!.iterations).toBe(1);
         expect(after.totals).toEqual(before.totals);
       } finally {
@@ -2297,7 +2299,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
     const again = stepsOn(databasePath, dataDirectory);
     try {
       expect(await again.iteration(lane0Iteration1(runId))).toMatchObject({ iteration: 2 });
-      const report = await again.runtime.runPromise(runReport(runId));
+      const report = await readRunReport(databasePath, dataDirectory, runId);
       expect(
         report.lanes[0]!.prompts[0]!.optimizerCost.calls.map(({ attempt, settled }) => [
           attempt,
@@ -2354,7 +2356,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
     try {
       await again.runtime.runPromise(generateIteration(lane0Iteration1(runId)));
       expect(again.images.requests).toHaveLength(1);
-      const report = await again.runtime.runPromise(runReport(runId));
+      const report = await readRunReport(databasePath, dataDirectory, runId);
       const [first, second] = report.lanes[0]!.candidates;
       expect(first!.calls.map(({ attempt }) => attempt)).toEqual([0]);
       expect(second!.calls.map(({ attempt, settled }) => [attempt, settled])).toEqual([
@@ -2452,6 +2454,52 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
       await application.close();
     }
   }, 60_000);
+
+  test("a report whose workflow snapshot can't be read fails naming the Run", async () => {
+    const { application, databasePath, dataDirectory } = await setup(["same"]);
+    try {
+      const { runId } = await application.start(loop(rules({ maxIterations: 1 })));
+      tamper(databasePath, "DROP TABLE mastra_workflow_snapshot");
+      const failure = {
+        _tag: "RunSnapshotError",
+        runId,
+        message: expect.stringContaining(`Reading the workflow snapshot of Run ${runId} failed: `),
+      };
+      await expect(application.report(runId)).rejects.toMatchObject(failure);
+      await expect(readRunReport(databasePath, dataDirectory, runId)).rejects.toMatchObject(
+        failure,
+      );
+    } finally {
+      await application.close();
+    }
+  }, 60_000);
+
+  test("closing names the cancelled Runs still unwinding when it stops waiting; a later close doesn't wait for them", async () => {
+    const warnings: RunWarning[] = [];
+    const cancels = new CancelRecordings((warning) => warnings.push(warning));
+    const cancel = new AbortController();
+    for (const runId of ["stuck-1", "stuck-2", "recorded"]) cancels.watch(runId, cancel.signal);
+    cancel.abort();
+    await cancels.finished("recorded", true, async () => {});
+    await cancels.settled(50);
+    expect(warnings).toEqual([
+      {
+        level: "Warn",
+        warning: expect.stringContaining("Cancelled Runs stuck-1, stuck-2 were still unwinding"),
+        runIds: ["stuck-1", "stuck-2"],
+      },
+    ]);
+    // The Runs whose `onFinish` never ran no longer hold up a close (the test's timeout would).
+    await cancels.settled(60_000);
+    expect(warnings).toHaveLength(1);
+    // One that finishes after all records as ever, without a warning.
+    let recorded = false;
+    await cancels.finished("stuck-1", true, async () => {
+      recorded = true;
+    });
+    expect(recorded).toBe(true);
+    expect(warnings).toHaveLength(1);
+  });
 
   test("cancelling stops only the Lanes still running; a Lane that already stopped keeps its reason", async () => {
     const { promise: held, resolve: release } = Promise.withResolvers<void>();
@@ -2785,6 +2833,86 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
     60_000,
   );
 
+  /** OpenAI's answer to a bad key: its masked echo of the key, then more text than is kept. */
+  const openaiRejectsKey = () =>
+    Response.json(
+      {
+        error: {
+          message: `Incorrect API key provided: sk-proj-****abcd. ${"Check your key. ".repeat(200)}`,
+          type: "invalid_request_error",
+          param: null,
+          code: "invalid_api_key",
+        },
+      },
+      { status: 401 },
+    );
+
+  test.each([
+    {
+      role: "Judge",
+      reason: "judge-failed",
+      judges: (origin: string) => judgesOnFakeVendor(origin, "openai"),
+      optimizers: () => fakeOptimizers().layer,
+      request: { judge: { ...DEFAULT_JUDGE, model: "openai/gpt-5.5" } },
+    },
+    {
+      role: "Optimizer",
+      reason: "optimizer-failed",
+      judges: () => fakeJudges().layer,
+      optimizers: (origin: string) => optimizersOnFakeVendor(origin, "openai"),
+      request: { optimizer: { ...DEFAULT_OPTIMIZER, model: "openai/gpt-5.5" } },
+    },
+  ])(
+    "an OpenAI $role turned away with a masked key echo stops the Lane with the reason scrubbed and cut, stored, returned, reported and warned",
+    async ({ role, reason, judges, optimizers, request }) => {
+      const vendor = fakeVendorServer(openaiRejectsKey);
+      const warnings: RunWarning[] = [];
+      const { application, databasePath } = await runApplication(
+        fakeImageModels(["same"]).layer,
+        (warning) => warnings.push(warning),
+        judges(vendor.origin),
+        optimizers(vendor.origin),
+      );
+      try {
+        const { runId, lanes } = await withEnvironment(
+          { OPENAI_API_KEY: "SENTINEL-OPENAI-KEY-0123456789" },
+          () => application.start({ ...loop(), ...request }),
+        );
+        const db = new Database(databasePath, { readonly: true });
+        const stored = db
+          .query<{ stop_detail: string }, [string]>(
+            "SELECT stop_detail FROM lanes WHERE run_id = ?",
+          )
+          .get(runId)!.stop_detail;
+        db.close();
+        expect(stored).toStartWith(`${role} HTTP 401: Incorrect API key provided: [redacted]. `);
+        expect(stored).toEndWith("… (truncated)");
+        expect(stored.length).toBeLessThan(2100);
+        expect(stored).not.toContain("****");
+        expect(lanes).toEqual([
+          expect.objectContaining({ stopReason: reason, stopDetail: stored }),
+        ]);
+        const report = await application.report(runId);
+        expect(report.lanes[0]).toMatchObject({ stopReason: reason, stopDetail: stored });
+        expect(JSON.stringify(report)).not.toContain("****");
+        expect(warnings).toContainEqual(
+          expect.objectContaining({
+            level: "Warn",
+            warning: `The vendor turned the ${role} away for good; the Lane stops`,
+            reason: stored,
+            runId,
+            lane: 0,
+            iteration: 1,
+          }),
+        );
+      } finally {
+        await application.close();
+        await vendor.stop();
+      }
+    },
+    60_000,
+  );
+
   test("a re-executed Iteration whose Judge call was turned away still stops the Lane judge-failed, billing nothing more", async () => {
     const key = "SENTINEL-JUDGE-KEY-0123456789";
     const vendor = fakeVendorServer(() => turnedAway(401, key));
@@ -2811,7 +2939,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
         expect(again.images.requests).toHaveLength(0);
         expect(again.judge.requests).toHaveLength(0);
         expect(again.optimizer.requests).toHaveLength(0);
-        const after = await again.runtime.runPromise(runReport(runId));
+        const after = await readRunReport(databasePath, dataDirectory, runId);
         expect(after.lanes[0]).toMatchObject({
           stopReason: "judge-failed",
           stopDetail: "Judge HTTP 401: invalid x-api-key [redacted]",

@@ -188,7 +188,7 @@ describe("an Optimizer call's estimate", () => {
     const estimate = (request: OptimizerRequest) =>
       estimateOptimizerCall("medium", pricing, "", request);
     expect(
-      quoteOptimizerCall(estimate, DEFAULT_TARGET_LOOK, MAX_CANDIDATES),
+      quoteOptimizerCall(estimate, DEFAULT_TARGET_LOOK, MAX_CANDIDATES).micros,
     ).toBeGreaterThanOrEqual(estimate(worst).micros);
   });
 });

@@ -143,8 +143,9 @@ describe("laneStopReason", () => {
       judgeRejected: "Judge HTTP 401",
     });
     // It outranks a reached target, a call that didn't fit and the Iteration limit.
-    expect(laneStopReason([rejected(9)], limitOne, true)).toBe("judge-failed");
-    expect(laneStopReason([scored(5), rejected(null)], rules, false)).toBe("judge-failed");
+    const judgeFailed = { reason: "judge-failed" as const, detail: "Judge HTTP 401" };
+    expect(laneStopReason([rejected(9)], limitOne, true)).toEqual(judgeFailed);
+    expect(laneStopReason([scored(5), rejected(null)], rules, false)).toEqual(judgeFailed);
     // Only the last Iteration counts.
     expect(laneStopReason([rejected(5), scored(6)], rules, false)).toBeNull();
   });

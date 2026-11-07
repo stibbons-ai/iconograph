@@ -30,3 +30,30 @@ export function apiKeyFromEnv(
 /** Removes an API key from error text, e.g. from a runtime rejecting the header value. */
 export const redactKey = (apiKey: string) => (text: string) =>
   apiKey ? text.replaceAll(apiKey, "[redacted]") : text;
+
+/**
+ * Where every vendor reason is cut (vendor text, runtime errors and our own
+ * prefix alike). The stored reason can run slightly longer: `… (truncated)`
+ * is appended, and `[redacted]` can be longer than the mask it replaces.
+ */
+const MAX_REASON_LENGTH = 2000;
+
+/**
+ * A vendor reason fit to store and print: without the key (`redactKey`), cut
+ * to about `MAX_REASON_LENGTH` characters, and without a masked echo of any
+ * key (e.g. `sk-proj-****abcd`): a whitespace-delimited word with three or
+ * more asterisks after at least three characters (trailing punctuation
+ * kept). The key goes before truncating, so a cut can't leave part of it;
+ * the lookbehind starts a match only at a word's start, so the scan stays
+ * cheap.
+ */
+export const redactReason = (apiKey: string) => {
+  const withoutKey = redactKey(apiKey);
+  return (text: string) => {
+    const keyless = withoutKey(text);
+    const masked = keyless
+      .slice(0, MAX_REASON_LENGTH)
+      .replace(/(?<!\S)\S{3,}\*{3,}\S*?(?=[.,;:!?)"']*(?:\s|$))/g, "[redacted]");
+    return keyless.length > MAX_REASON_LENGTH ? `${masked}… (truncated)` : masked;
+  };
+};
