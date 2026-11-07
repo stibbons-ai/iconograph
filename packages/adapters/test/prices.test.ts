@@ -17,7 +17,6 @@ import {
   type PriceSourceOptions,
 } from "../src";
 import { litellmPricesUrl, PriceSnapshot } from "../src/prices";
-import { until } from "./until";
 import { main } from "../src/prices-cli";
 
 // A trimmed excerpt of LiteLLM's model_prices_and_context_window.json at
@@ -292,11 +291,19 @@ describe("LiteLLM fetch and cache", () => {
   test("aborting the signal ends a hanging refresh with a PriceFetchError, cache intact", async () => {
     await (await open()).refresh();
     advanceHours(30);
-    const hanging = await open({ url: at("/hang") });
+    const answered = Promise.withResolvers<void>();
+    const hanging = await open({
+      url: at("/hang"),
+      fetch: async (url, init) => {
+        const response = await fetch(url, init);
+        answered.resolve();
+        return response;
+      },
+    });
     const abort = new AbortController();
     const failure = hanging.ensureFresh({ signal: abort.signal });
-    // Mid-body: the server has answered and the body never finishes.
-    await until(async () => hits.get("/hang") === 1);
+    // Mid-body: the headers have arrived and the body never finishes.
+    await answered.promise;
     abort.abort(new Error("server stopping"));
     await expect(failure).rejects.toBeInstanceOf(PriceFetchError);
     await expect(failure).rejects.toThrow("server stopping");

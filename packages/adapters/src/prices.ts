@@ -127,7 +127,10 @@ CREATE TABLE IF NOT EXISTS price_overrides (
 );
 `;
 
-/** Ends a refresh early: its fetch aborts and the cache stays unchanged. */
+/**
+ * Aborts the refresh's fetch, including reading its body, leaving the cache
+ * unchanged; an abort after the data is read doesn't stop the write.
+ */
 export interface RefreshOptions {
   signal?: AbortSignal;
 }

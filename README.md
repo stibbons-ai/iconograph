@@ -202,11 +202,11 @@ in this order:
    (or dated in the future). The server checks at boot, without holding up the start, and hourly
    while it runs, so while LiteLLM is reachable the cache reaches about 25 h at most; a failed
    refetch is logged as a warning and retried at the next hourly check. A Run CLI refreshes on its
-   first price lookup, and the `prices` command on demand. A failed refresh keeps serving the old
-   cache with its age, marked `stale` once it is 24 h old or dated in the future. An unrelated
-   entry whose price fields are malformed is dropped (that model is unpriced) and listed in
-   `refresh.rejected`. A malformed entry for a default model, a response that isn't JSON, or one
-   that prices no model fails the refresh and leaves the cache untouched.
+   first price lookup; the `prices` command checks on every lookup (`--refresh` forces a fetch). A
+   failed refresh keeps serving the old cache with its age, marked `stale` once it is 24 h old or
+   dated in the future. An unrelated entry whose price fields are malformed is dropped (that model
+   is unpriced) and listed in `refresh.rejected`. A malformed entry for a default model, a response
+   that isn't JSON, or one that prices no model fails the refresh and leaves the cache untouched.
 3. **Bundled snapshot**,
    [`packages/adapters/litellm-prices.snapshot.json`](packages/adapters/litellm-prices.snapshot.json),
    used only offline before the first successful fetch. It never fills gaps in a fetched cache.

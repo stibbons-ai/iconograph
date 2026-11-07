@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { NativeImageModels, openPriceSource } from "@iconograph/adapters";
+import { NativeImageModels, openPriceSource, PriceFetchError } from "@iconograph/adapters";
 import { ImageModels } from "@iconograph/domain";
 import { Effect } from "effect";
 import { temporaryDirectories } from "../../adapters/test/temporary-directory";
@@ -97,6 +97,43 @@ test("the vendors' prices refresh through their caller's refresh: one fetch, rep
     expect((await get())._tag).toBe("Success");
     expect(fetches).toBe(1);
     expect(warnings).toEqual([]);
+  } finally {
+    vendors.close();
+  }
+});
+
+test("the vendors' refresh passes its caller's stop signal on to the fetch", async () => {
+  let fetches = 0;
+  const fetching = Promise.withResolvers<void>();
+  const source = await openPriceSource({
+    dataDirectory: await temporaryDirectory(),
+    // Far past the test's timeout: only the caller's signal can end the fetch.
+    timeoutMs: 600_000,
+    // Like `fetch`: never answers, and an abort rejects with the signal's reason.
+    fetch: (_, init) => {
+      fetches++;
+      fetching.resolve();
+      const answer = Promise.withResolvers<Response>();
+      init?.signal?.addEventListener("abort", () => answer.reject(init.signal?.reason), {
+        once: true,
+      });
+      return answer.promise;
+    },
+  });
+  const vendors = vendorsPricedBy(source, () => {});
+  try {
+    const stop = new AbortController();
+    const refresh = vendors.ensurePricesFresh!({ signal: stop.signal });
+    await fetching.promise;
+    const reason = new Error("server stopping");
+    stop.abort(reason);
+    const error = await refresh.then(
+      () => undefined,
+      (rejection: unknown) => rejection,
+    );
+    expect(error).toBeInstanceOf(PriceFetchError);
+    expect((error as PriceFetchError).cause).toBe(reason);
+    expect(fetches).toBe(1);
   } finally {
     vendors.close();
   }

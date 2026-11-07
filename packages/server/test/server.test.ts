@@ -1194,7 +1194,7 @@ describe("price refresh", () => {
       expect(unhandled).toEqual([]);
     }, 30_000);
 
-    test("starts no refresh after stop while waiting for the next day", async () => {
+    test("starts no refresh after stop while waiting for the next check", async () => {
       const { server, logged, answerFetch, events, refreshes } = await serveWithPrices();
       running.splice(running.indexOf(server), 1);
       await answerFetch(1, new Response(litellm));
