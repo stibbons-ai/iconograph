@@ -1,7 +1,8 @@
-import { afterAll, afterEach, beforeEach, describe, expect, jest, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, jest, spyOn, test } from "bun:test";
 import { heapSize } from "bun:jsc";
+import * as fsPromises from "node:fs/promises";
 import { mkdir, open, readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   ensureModels,
@@ -97,8 +98,8 @@ function weight(
 }
 
 /**
- * The error `promise` rejects with. Unlike `await expect(promise).rejects`, which hangs
- * bun when a never-settling promise times the test out, this fails by the test timeout.
+ * The error `promise` rejects with. If `promise` never settles, `await expect(promise).rejects`
+ * hangs bun's runner (no test timeout fires); awaiting this fails at the test timeout instead.
  */
 function rejectionOf(promise: Promise<unknown>): Promise<Error> {
   return promise.then(
@@ -359,6 +360,8 @@ describe("ensureModels", () => {
 
   describe("idle timeout", () => {
     const idleTimeoutMs = 150;
+    // A test that times out is abandoned before its `finally`, so restore real timers here too.
+    afterEach(() => jest.useRealTimers());
     const stalled = (path: string) =>
       `Model detector download from ${new URL(path, server.url).href} stalled: no data for 0.15 s`;
 
@@ -447,6 +450,32 @@ describe("ensureModels", () => {
       }
       expect(hits.size).toBe(0);
       expect(await readdir(directory)).toEqual([]);
+      // The largest delay setTimeout honours is accepted; a verified file needs no request.
+      await writeFile(join(directory, "recognizer.onnx"), recognizer);
+      const [present] = await ensureModels({
+        lock,
+        directory,
+        ids: ["recognizer"],
+        idleTimeoutMs: 2 ** 31 - 1,
+      });
+      expect(present?.downloaded).toBe(false);
+    });
+
+    test("a finished download leaves no timer behind to abort it later", async () => {
+      const signals: AbortSignal[] = [];
+      const recording: Fetch = async (_, init) => {
+        signals.push(init!.signal!);
+        return new Response(recognizer);
+      };
+      jest.useFakeTimers();
+      try {
+        await ensureModels({ lock, directory, ids: ["recognizer"], fetch: recording });
+        jest.advanceTimersByTime(modelDownloadIdleTimeoutMs * 2);
+      } finally {
+        jest.useRealTimers();
+      }
+      expect(signals).toHaveLength(1);
+      expect(signals[0]!.aborted).toBe(false);
     });
 
     test("defaults to 30 s, aborts even a fetch that ignores the signal, and frees its late response", async () => {
@@ -549,7 +578,7 @@ describe("ensureModels", () => {
   });
 
   describe("stale temp files", () => {
-    const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000);
+    const secondsAgo = (seconds: number) => new Date(Date.now() - seconds * 1_000);
     async function place(name: string, age: Date) {
       await writeFile(join(directory, name), "partial");
       await utimes(join(directory, name), age, age);
@@ -562,23 +591,47 @@ describe("ensureModels", () => {
         live,
         `recognizer.onnx.${crypto.randomUUID()}.partial`, // another model's
         "detector.onnx.partial", // not writeFileAtomically's pattern
+        "detector.onnx.backup.partial", // not a UUID
+        `detector.onnx.x${crypto.randomUUID()}.partial`, // more than a UUID
+        `detector.onnx.${crypto.randomUUID()}.partia1`, // another suffix
+        `detector.onnx-${crypto.randomUUID()}.partial`, // no dot after the file name
         `detector.onnx.${crypto.randomUUID()}.partial.bak`,
         `xdetector.onnx.${crypto.randomUUID()}.partial`,
         "notes.txt",
       ];
-      await place(crashed, minutesAgo(11));
-      await place(live, minutesAgo(9));
-      for (const name of keep.slice(1)) await place(name, minutesAgo(60));
+      await place(crashed, secondsAgo(10 * 60 + 5));
+      await place(live, secondsAgo(10 * 60 - 5));
+      for (const name of keep.slice(1)) await place(name, secondsAgo(60 * 60));
 
       await ensureModels({ lock, directory, ids: ["detector"] });
       expect((await readdir(directory)).sort()).toEqual(["detector.onnx", ...keep].sort());
     });
 
+    test("a stale temp file that can't be removed never fails the download", async () => {
+      const stuck = join(directory, `detector.onnx.${crypto.randomUUID()}.partial`);
+      await place(basename(stuck), secondsAgo(60 * 60));
+      const realRm = fsPromises.rm;
+      const removal = spyOn(fsPromises, "rm").mockImplementation(async (path, options) => {
+        if (path === stuck) {
+          throw Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" });
+        }
+        return realRm(path, options);
+      });
+      try {
+        const [model] = await ensureModels({ lock, directory, ids: ["detector"] });
+        expect(model?.downloaded).toBe(true);
+        expect(removal).toHaveBeenCalledWith(stuck);
+      } finally {
+        removal.mockRestore();
+      }
+      expect((await readdir(directory)).sort()).toEqual(["detector.onnx", basename(stuck)].sort());
+    });
+
     test("the staleness threshold is 10x a longer idle timeout", async () => {
       const kept = `detector.onnx.${crypto.randomUUID()}.partial`;
       const crashed = `detector.onnx.${crypto.randomUUID()}.partial`;
-      await place(kept, minutesAgo(19));
-      await place(crashed, minutesAgo(21));
+      await place(kept, secondsAgo(20 * 60 - 5));
+      await place(crashed, secondsAgo(20 * 60 + 5));
       await ensureModels({ lock, directory, ids: ["detector"], idleTimeoutMs: 120_000 });
       expect((await readdir(directory)).sort()).toEqual(["detector.onnx", kept].sort());
     });

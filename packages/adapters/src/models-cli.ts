@@ -20,7 +20,10 @@ it with the command in its lock entry (bun run models:export-facenet).
 Errors print JSON to stderr and exit nonzero.
 `;
 
-/** Test seams: the shipped lock admits only HTTPS, so tests inject one for a local server. */
+/**
+ * Test seams: the lock (the shipped one admits only HTTPS, so tests inject one for a local
+ * server), the idle period and the output streams.
+ */
 export interface ModelsCliDependencies {
   lock?: ModelLock;
   /** Test-sized idle period; operators always get the default. */

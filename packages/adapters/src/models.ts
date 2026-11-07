@@ -188,9 +188,9 @@ export async function ensureModels(options: EnsureModelsOptions): Promise<Ensure
         );
       }
       // A live writer's temp file is touched by every chunk or aborted within the idle
-      // period while waiting on the network; the timer pauses while a chunk is stored or
-      // the file verified, which the 10 × / 10 minute margin covers. So one unmodified for
-      // far longer was left by a killed process.
+      // period while waiting on the network; the timer pauses while a chunk is stored, or
+      // the file synced and verified, which the 10 × / 10 minute margin covers. So one
+      // unmodified for far longer was left by a killed process.
       await removeStaleTemps(
         directory,
         model.file,
@@ -248,8 +248,8 @@ async function removeStaleTemps(directory: string, file: string, olderThanMs: nu
 /**
  * Aborts `signal` with `reason` once `touch` was not called for `ms`; `guard`
  * makes a promise reject with `reason` too, even when its source ignores the
- * signal. `stop` pauses the timer and must run on every exit so no timer
- * outlives the download.
+ * signal. `stop` clears the timer until the next `touch` and must run on every exit
+ * so no timer outlives the download.
  */
 function idleWatchdog(ms: number, reason: Error) {
   const controller = new AbortController();

@@ -51,6 +51,8 @@ const SFACE_IDS = ["yunet", "sface"];
 
 const running: RunningServer[] = [];
 afterEach(async () => {
+  // A test that times out is abandoned before its `finally`, so restore real timers here too.
+  jest.useRealTimers();
   await Promise.all(running.splice(0).map((server) => server.stop()));
 });
 
@@ -368,14 +370,19 @@ describe("HTTP server with the fake Image Model", () => {
     expect(logs.filter((line) => "error" in line)).toEqual([]);
   }, 30_000);
 
-  test("the production download carries the stop signal", async () => {
+  test("the production download carries the stop and the stall signal", async () => {
     const data = await temporaryDirectory();
     const signals: (AbortSignal | null | undefined)[] = [];
+    const secondAttempt = Promise.withResolvers<void>();
+    const retry = Promise.withResolvers<void>();
     const realFetch = globalThis.fetch;
-    // A network that never answers; only the signal ends the request.
+    // The first attempt fails at once, so the stalled second one runs on fake timers; later
+    // attempts reach a network that never answers, where only the signal ends the request.
     globalThis.fetch = Object.assign(
       (_: unknown, init?: RequestInit) => {
         signals.push(init?.signal);
+        if (signals.length === 1) return Promise.reject(new Error("network down"));
+        if (signals.length === 2) secondAttempt.resolve();
         const { promise, reject } = Promise.withResolvers<Response>();
         init?.signal?.addEventListener("abort", () => reject(init.signal!.reason));
         return promise;
@@ -383,14 +390,31 @@ describe("HTTP server with the fake Image Model", () => {
       { preconnect: realFetch.preconnect },
     );
     try {
-      const { server } = await serve(data, fakeImageModels([]).layer, { fetchModels: null });
+      const { server, logged } = await serve(data, fakeImageModels([]).layer, {
+        fetchModels: null,
+        sleep: (_, signal) => {
+          signal.addEventListener("abort", () => retry.resolve(), { once: true });
+          return retry.promise;
+        },
+      });
       running.splice(running.indexOf(server), 1);
-      await until(async () => signals.length > 0);
+      await logged((line) => String(line.error).includes("network down"));
+      jest.useFakeTimers();
+      try {
+        retry.resolve();
+        await secondAttempt.promise;
+        jest.advanceTimersByTime(modelDownloadIdleTimeoutMs);
+        expect(signals[1]?.aborted).toBe(true);
+      } finally {
+        jest.useRealTimers();
+      }
+      // The retry after the stall starts at once and waits until the server stops.
+      await until(async () => signals.length > 2);
       await server.stop();
     } finally {
       globalThis.fetch = realFetch;
     }
-    expect(signals[0]?.aborted).toBe(true);
+    expect(signals[2]?.aborted).toBe(true);
   }, 30_000);
 
   test("a stalled download is aborted through the signal the server passes on", async () => {
