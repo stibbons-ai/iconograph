@@ -198,6 +198,21 @@ const storedStopReasons = (databasePath: string, runId: string) => {
   }
 };
 
+/** The Lanes' stop details as stored. */
+const storedStopDetails = (databasePath: string, runId: string) => {
+  const db = new Database(databasePath, { readonly: true });
+  try {
+    return db
+      .query<{ stop_detail: string | null }, [string]>(
+        "SELECT stop_detail FROM lanes WHERE run_id = ? ORDER BY lane",
+      )
+      .all(runId)
+      .map(({ stop_detail }) => stop_detail);
+  } finally {
+    db.close();
+  }
+};
+
 describe("Run engine with a fake Image Model", () => {
   test("records each Candidate Outcome with Likeness, reasons, files and costs", async () => {
     const { application, fake } = await setup(["same", "different", "no-face", "refuse", "fail"]);
@@ -2878,13 +2893,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
           { OPENAI_API_KEY: "SENTINEL-OPENAI-KEY-0123456789" },
           () => application.start({ ...loop(), ...request }),
         );
-        const db = new Database(databasePath, { readonly: true });
-        const stored = db
-          .query<{ stop_detail: string }, [string]>(
-            "SELECT stop_detail FROM lanes WHERE run_id = ?",
-          )
-          .get(runId)!.stop_detail;
-        db.close();
+        const stored = storedStopDetails(databasePath, runId)[0] ?? "";
         expect(stored).toStartWith(`${role} HTTP 401: Incorrect API key provided: [redacted]. `);
         expect(stored).toEndWith("… (truncated)");
         expect(stored.length).toBeLessThan(2100);

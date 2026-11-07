@@ -729,8 +729,9 @@ export const optimizeIteration = (input: LaneState) =>
       run.request.stopRules,
       input.stopReason === "budget-exhausted",
     );
-    if (typeof laneStop === "object" && laneStop !== null) return yield* turnedAway(laneStop);
-    if (laneStop) return yield* stop(laneStop);
+    if (laneStop !== null) {
+      return yield* typeof laneStop === "string" ? stop(laneStop) : turnedAway(laneStop);
+    }
 
     const next = { runId: input.runId, lane: input.lane, iteration: input.iteration + 1 };
     const proceed: LaneState = { ...input, iteration: next.iteration, stopReason: null };

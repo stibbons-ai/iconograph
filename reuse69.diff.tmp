@@ -1,0 +1,1183 @@
+commit 69e7b892b0d14eea2f41af5a09201d0ca5ee7352
+Author: Stibbons' Igor <igor@stibbons.email>
+Date:   Sat Nov 7 13:26:08 2026 +0100
+
+    fix: harden cancel settle, report entry and Judge/Optimizer reasons (#41)
+    
+    - Close waits 5 s for cancelled Runs; the timeout warning names the Runs
+      (runIds) and drops them, so a later close/settled returns at once.
+    - runReport(storage, runId) is the one report entry point: it reads the
+      Mastra snapshot itself and fails with RunSnapshotError naming the Run.
+    - redactReason (api-key.ts): masked-key scrub and 2000-char cap shared by
+      the OpenAI Image Model and every Judge/Optimizer reason.
+    - optimizer-failed and judge-failed stops log a warning with the reason.
+    - laneStopReason returns LaneStop; stopLane takes it, so a detail reason
+      without its detail (or a stray detail) no longer type-checks.
+    - stop_detail is schema-decoded; LaneResult carries stopDetail.
+    - quoteOptimizerCall returns a CallEstimate; llmCaller drops
+      S extends object; the Optimizer maps its Rejected answer explicitly.
+    - Test: the RunStore keeps its permit until an interrupted attempt ends.
+
+diff --git a/README.md b/README.md
+index 5d17b1d88..f2f19c8f7 100644
+--- a/README.md
++++ b/README.md
+@@ -442,8 +442,8 @@ The development shell exports the keys (see "Vendor keys"); any other way of set
+ variables works too. A Run needs only the keys of its
+ Lanes' vendors, its Judge's vendor and, for more than one Iteration, its Optimizer's vendor. Keys
+ are read only from the environment and sent only in request headers; they never enter the
+-database, the output or an error. In an OpenAI Lane's
+-failure reasons, a masked echo of a key in the usual form (a word with three or more asterisks,
++database, the output or an error. In the failure reasons of an OpenAI Lane and of every Judge
++and Optimizer, a masked echo of a key in the usual form (a word with three or more asterisks,
+ such as `sk-proj-****abcd`) is redacted too, and every reason is cut to about 2000 characters. A
+ key shorter than 20 characters or with spaces, control or non-ASCII characters (a bad paste) is
+ rejected before its price lookup and before any billable call, without echoing it. That check
+@@ -481,7 +481,8 @@ Judge's in the Lane's first Iteration with a Scored Candidate.
+   with `judge-failed` once the Iteration's calls already made have settled (no image or Optimizer
+   call, and no Judge call beyond retries of calls already running; Candidates judged before keep
+   their scores, and the best is still reported). Each Lane stops on its own first such call, and
+-  the report shows the vendor's reason (the key itself redacted) as the Lane's `stopDetail`.
++  the result and the report show the vendor's reason (the key itself redacted) as the Lane's
++  `stopDetail`, and a warning names it.
+   Cancelling the Run stops every Lane not yet stopped with `cancelled`, wherever the cancel
+   lands (mid-call, between Iterations, during preparation, or with Lanes still waiting their
+   turn; if the process stops before that is recorded, the report still shows them `cancelled`); a
+diff --git a/docs/adr/0014-lane-loops-over-one-iteration-step.md b/docs/adr/0014-lane-loops-over-one-iteration-step.md
+index f06893abf..c3e964385 100644
+--- a/docs/adr/0014-lane-loops-over-one-iteration-step.md
++++ b/docs/adr/0014-lane-loops-over-one-iteration-step.md
+@@ -11,6 +11,6 @@ A Lane is a nested Mastra workflow that repeats a single `iteration` step with `
+ ## Consequences
+ 
+ - Durability doesn't depend on the step boundary: every phase finds what an earlier, interrupted execution stored (Candidates, outcomes, judgements, the next Iteration's Prompt, the Lane's stop reason, numbered calls), so a call whose result was stored is never made again; one whose call ran but whose result was lost is made again, under the next attempt number, and billed again. The loop's state between passes is the small `LaneState` (ids, the Lane's model, Iteration number, stop reason).
+-- Cancelling is recorded by the Run workflow's `onFinish` hook, not by the step: it marks every Lane without a stop reason `cancelled`, so a cancel during preparation, between passes, or with Lanes still waiting their turn stops them too. Closing the application waits up to 10 s for those recordings; a report of a Run Mastra stored as cancelled shows Lanes whose recording was cut off as `cancelled`.
++- Cancelling is recorded by the Run workflow's `onFinish` hook, not by the step: it marks every Lane without a stop reason `cancelled`, so a cancel during preparation, between passes, or with Lanes still waiting their turn stops them too. Closing the application waits up to 5 s for those recordings; a report of a Run Mastra stored as cancelled shows Lanes whose recording was cut off as `cancelled`.
+ - Mastra's snapshots and streams show Iterations, not their phases; per-phase progress events, if wanted, are written from inside the step.
+ - Revisit when Mastra gives each pass of a nested-workflow loop its own run id, or cancels it through the parent's signal.
+diff --git a/packages/adapters/src/api-key.ts b/packages/adapters/src/api-key.ts
+index 044661042..11d71fa35 100644
+--- a/packages/adapters/src/api-key.ts
++++ b/packages/adapters/src/api-key.ts
+@@ -30,3 +30,30 @@ export function apiKeyFromEnv(
+ /** Removes an API key from error text, e.g. from a runtime rejecting the header value. */
+ export const redactKey = (apiKey: string) => (text: string) =>
+   apiKey ? text.replaceAll(apiKey, "[redacted]") : text;
++
++/**
++ * Where every vendor reason is cut (vendor text, runtime errors and our own
++ * prefix alike). The stored reason can run slightly longer: `… (truncated)`
++ * is appended, and `[redacted]` can be longer than the mask it replaces.
++ */
++const MAX_REASON_LENGTH = 2000;
++
++/**
++ * A vendor reason fit to store and print: without the key (`redactKey`), cut
++ * to about `MAX_REASON_LENGTH` characters, and without a masked echo of any
++ * key (e.g. `sk-proj-****abcd`): a whitespace-delimited word with three or
++ * more asterisks after at least three characters (trailing punctuation
++ * kept). The key goes before truncating, so a cut can't leave part of it;
++ * the lookbehind starts a match only at a word's start, so the scan stays
++ * cheap.
++ */
++export const redactReason = (apiKey: string) => {
++  const withoutKey = redactKey(apiKey);
++  return (text: string) => {
++    const keyless = withoutKey(text);
++    const masked = keyless
++      .slice(0, MAX_REASON_LENGTH)
++      .replace(/(?<!\S)\S{3,}\*{3,}\S*?(?=[.,;:!?)"']*(?:\s|$))/g, "[redacted]");
++    return keyless.length > MAX_REASON_LENGTH ? `${masked}… (truncated)` : masked;
++  };
++};
+diff --git a/packages/adapters/src/index.ts b/packages/adapters/src/index.ts
+index 16253f2e6..725a4b4ed 100644
+--- a/packages/adapters/src/index.ts
++++ b/packages/adapters/src/index.ts
+@@ -5,7 +5,7 @@ export {
+   resolveInsideDataDirectory,
+   runsDatabase,
+ } from "./data-directory";
+-export { apiKeyFromEnv, redactKey } from "./api-key";
++export { apiKeyFromEnv, redactKey, redactReason } from "./api-key";
+ export {
+   decodeOption,
+   LANE_IMAGE_MODELS,
+diff --git a/packages/adapters/src/openai.ts b/packages/adapters/src/openai.ts
+index 7c68061ba..8e833a2ee 100644
+--- a/packages/adapters/src/openai.ts
++++ b/packages/adapters/src/openai.ts
+@@ -50,7 +50,7 @@ import {
+   type Usage,
+ } from "@iconograph/domain";
+ import { Effect, Schema } from "effect";
+-import { redactKey } from "./api-key";
++import { redactReason } from "./api-key";
+ import { errorMessage, field } from "./errors";
+ import {
+   base64Of,
+@@ -92,12 +92,6 @@ const INPUT_TOKENS_PER_REFERENCE = 6144;
+  * purpose: a safety margin, not the smallest image, so don't raise it to 196.
+  */
+ const MIN_OUTPUT_TOKENS_PER_IMAGE = 16;
+-/**
+- * Where every reason is cut (vendor text, runtime errors and our own prefix
+- * alike). The stored reason can run slightly longer: `… (truncated)` is
+- * appended, and `[redacted]` can be longer than the mask it replaces.
+- */
+-const MAX_REASON_LENGTH = 2000;
+ 
+ /** Error codes of a moderation block; the request is refused, not retried. */
+ const MODERATION_CODE = "moderation_blocked";
+@@ -280,22 +274,8 @@ function classifyHttpError(status: number, body: unknown): CallResult {
+ export function openaiImageModel(options: OpenAIImageModelOptions): ImageModel {
+   const { model, apiKey, price, fetch: send = fetch, timeoutMs = 300_000 } = options;
+   const { pricing } = price;
+-  /**
+-   * A reason fit to store: without the key (e.g. quoted by a runtime rejecting
+-   * the header value), cut to about `MAX_REASON_LENGTH` characters (every reason),
+-   * and without a masked echo of any key: a whitespace-delimited word with three
+-   * or more asterisks after at least three characters (trailing punctuation
+-   * kept). The key goes before truncating, so a cut can't leave part of it; the
+-   * lookbehind starts a match only at a word's start, so the scan stays cheap.
+-   */
+-  const withoutKey = redactKey(apiKey);
+-  const redact = (text: string) => {
+-    const keyless = withoutKey(text);
+-    const masked = keyless
+-      .slice(0, MAX_REASON_LENGTH)
+-      .replace(/(?<!\S)\S{3,}\*{3,}\S*?(?=[.,;:!?)"']*(?:\s|$))/g, "[redacted]");
+-    return keyless.length > MAX_REASON_LENGTH ? `${masked}… (truncated)` : masked;
+-  };
++  /** A reason fit to store (`redactReason`): without the key or a masked echo of one, cut. */
++  const redact = redactReason(apiKey);
+ 
+   const estimate = (request: ImageRequest): CallEstimate => {
+     const usage = {
+diff --git a/packages/adapters/src/run-store.ts b/packages/adapters/src/run-store.ts
+index 944c28f53..0e3c62686 100644
+--- a/packages/adapters/src/run-store.ts
++++ b/packages/adapters/src/run-store.ts
+@@ -9,6 +9,8 @@ import {
+   IdentityCeiling,
+   type KeptReason,
+   LANE_STOPS_WITH_DETAIL,
++  type LaneStop,
++  laneStopFields,
+   LaneStopReason,
+   type LedgerEntry,
+   PriceQuote,
+@@ -276,6 +278,7 @@ const decodePhotoReport = Schema.decodeUnknownSync(Schema.fromJsonString(Referen
+ const decodePrice = Schema.decodeUnknownSync(Schema.fromJsonString(PriceQuote));
+ const decodeReferences = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Array(Schema.Int)));
+ const decodeStopReason = Schema.decodeUnknownSync(Schema.NullOr(LaneStopReason));
++const decodeStopDetail = Schema.decodeUnknownSync(Schema.NullOr(Schema.NonEmptyString));
+ const decodePromptSource = Schema.decodeUnknownSync(PromptSourceKind);
+ const decodeOutcome = Schema.decodeUnknownSync(Schema.fromJsonString(CandidateOutcome));
+ const decodeResult = Schema.decodeUnknownSync(Schema.NullOr(SettledCallKind));
+@@ -336,14 +339,13 @@ export class RunStore extends Context.Service<
+     readonly createLane: (runId: string, lane: NewLane) => Effect.Effect<void, RunStoreError>;
+     readonly loadLanes: (runId: string) => Effect.Effect<LaneRecord[], RunStoreError>;
+     /**
+-     * Stop a Lane with `reason`, unless it already stopped (the first reason
+-     * stands). `detail` is required with, and only with, `LANE_STOPS_WITH_DETAIL`.
++     * Stop a Lane, unless it already stopped (the first stop stands); a
++     * reason of `LANE_STOPS_WITH_DETAIL` comes with its detail.
+      */
+     readonly stopLane: (
+       runId: string,
+       lane: number,
+-      reason: LaneStopReason,
+-      detail?: string,
++      stop: LaneStop,
+     ) => Effect.Effect<void, RunStoreError>;
+     /** Stop every Lane of the Run that hasn't stopped yet with `cancelled`. */
+     readonly cancelLanes: (runId: string) => Effect.Effect<void, RunStoreError>;
+@@ -707,20 +709,22 @@ export const LibsqlRunStore = (databasePath: string, options: LibsqlRunStoreOpti
+               price: decodePrice(row.price),
+               characterReferences: decodeReferences(row.character_references),
+               stopReason: decodeStopReason(row.stop_reason),
+-              stopDetail: row.stop_detail === null ? null : String(row.stop_detail),
++              stopDetail: decodeStopDetail(row.stop_detail),
+             }));
+           }),
+ 
+         // The first stop recorded stands: a later one (e.g. a step finishing after the Run was
+         // cancelled) never overwrites it, nor its detail. Every right-hand side reads the old row.
+-        stopLane: (runId, lane, reason, detail) =>
+-          update(
++        stopLane: (runId, lane, stop) => {
++          const { reason, detail } = laneStopFields(stop);
++          return update(
+             `Stopping Lane ${lane} of Run ${runId}`,
+             `UPDATE lanes SET stop_reason = COALESCE(stop_reason, ?),
+               stop_detail = CASE WHEN stop_reason IS NULL THEN ? ELSE stop_detail END
+               WHERE run_id = ? AND lane = ?`,
+-            [reason, detail ?? null, runId, lane],
+-          ),
++            [reason, detail, runId, lane],
++          );
++        },
+ 
+         cancelLanes: (runId) =>
+           execute(
+diff --git a/packages/adapters/test/run-store.test.ts b/packages/adapters/test/run-store.test.ts
+index be773475c..7622fb2a8 100644
+--- a/packages/adapters/test/run-store.test.ts
++++ b/packages/adapters/test/run-store.test.ts
+@@ -599,6 +599,46 @@ describe("RunStore rows", () => {
+     }
+   });
+ 
++  test("an interrupted write keeps its turn until its attempt in flight has ended", async () => {
++    // The write meets the lock; the reconnect that resets its connection is held.
++    const watch = lockWatch({ holdFirstReconnect: true });
++    const { runtime, run, databasePath } = await storeWithRun(1, watch);
++    const other = createClient({ url: localDatabaseUrl(databasePath) });
++    const reader = createClient({ url: localDatabaseUrl(databasePath) });
++    try {
++      const transaction = await other.transaction("write");
++      const fiber = runtime.runFork(withStore((store) => store.stopLane("run", 0, "patience")));
++      await watch.busy;
++      await transaction.commit();
++      const interrupted = runtime.runPromise(Fiber.interrupt(fiber));
++      const statements = watch.statements;
++      const second = run(
++        withStore((store) =>
++          store.createIteration({ runId: "run", lane: 0, iteration: 2 }, "next", {
++            source: "optimizer",
++          }),
++        ),
++      );
++      // A store that released the turn on interrupt would run the second write on the
++      // connection still being reset; one that keeps it makes no statement until the reset.
++      await Promise.race([second, Bun.sleep(500)]);
++      expect(watch.statements).toBe(statements);
++      watch.release();
++      await Promise.all([interrupted, second]);
++      const lanes = await reader.execute("SELECT stop_reason FROM lanes WHERE run_id = 'run'");
++      const iterations = await reader.execute(
++        "SELECT iteration FROM iterations WHERE run_id = 'run' ORDER BY iteration",
++      );
++      expect(lanes.rows[0]?.stop_reason).toBeNull();
++      expect(iterations.rows.map((row) => Number(row.iteration))).toEqual([1, 2]);
++    } finally {
++      watch.release();
++      other.close();
++      reader.close();
++      await runtime.dispose();
++    }
++  });
++
+   test("a Lane's first stop reason stands", async () => {
+     const { runtime, run } = await storeWithRun(1);
+     try {
+@@ -616,15 +656,30 @@ describe("RunStore rows", () => {
+     const { runtime, run } = await storeWithRun(1);
+     try {
+       const reason = "Optimizer HTTP 401: invalid x-api-key";
+-      // A role's failure needs the vendor's reason; no other stop takes one.
++      // A role's failure needs the vendor's reason; no other stop takes one. The types say so,
++      // and the table refuses either anyway.
+       await expect(
+-        run(withStore((store) => store.stopLane("run", 0, "judge-failed"))),
++        // @ts-expect-error A detail reason without its detail.
++        run(withStore((store) => store.stopLane("run", 0, { reason: "judge-failed" }))),
+       ).rejects.toThrow();
+       await expect(
+-        run(withStore((store) => store.stopLane("run", 0, "patience", reason))),
++        // @ts-expect-error A detail with a reason that takes none.
++        run(withStore((store) => store.stopLane("run", 0, { reason: "patience", detail: reason }))),
+       ).rejects.toThrow();
+-      await run(withStore((store) => store.stopLane("run", 0, "optimizer-failed", reason)));
+-      await run(withStore((store) => store.stopLane("run", 0, "judge-failed", "Judge HTTP 403")));
++      await expect(
++        // @ts-expect-error A detail reason given alone.
++        run(withStore((store) => store.stopLane("run", 0, "optimizer-failed"))),
++      ).rejects.toThrow();
++      await run(
++        withStore((store) =>
++          store.stopLane("run", 0, { reason: "optimizer-failed", detail: reason }),
++        ),
++      );
++      await run(
++        withStore((store) =>
++          store.stopLane("run", 0, { reason: "judge-failed", detail: "Judge HTTP 403" }),
++        ),
++      );
+       await run(withStore((store) => store.cancelLanes("run")));
+       const [lane] = await run(withStore((store) => store.loadLanes("run")));
+       expect(lane).toMatchObject({ stopReason: "optimizer-failed", stopDetail: reason });
+@@ -633,6 +688,20 @@ describe("RunStore rows", () => {
+     }
+   });
+ 
++  test("a stored stop detail that isn't text is refused, naming the Run's Lanes", async () => {
++    const { runtime, run, databasePath } = await storeWithRun(1);
++    try {
++      tamper(
++        databasePath,
++        "UPDATE lanes SET stop_reason = 'judge-failed', stop_detail = X'4a756467' WHERE lane = 0",
++      );
++      const error = await run(Effect.flip(withStore((store) => store.loadLanes("run"))));
++      expect(error.message).toContain("Loading the Lanes of Run run failed");
++    } finally {
++      await runtime.dispose();
++    }
++  });
++
+   test("reading needs an existing database file and doesn't create one", async () => {
+     const directory = await temporaryDirectory();
+     const missing = join(directory, "missing.db");
+diff --git a/packages/domain/src/optimizer.ts b/packages/domain/src/optimizer.ts
+index 3a4d1920d..b79bff2d6 100644
+--- a/packages/domain/src/optimizer.ts
++++ b/packages/domain/src/optimizer.ts
+@@ -127,17 +127,18 @@ function largestRequest(targetLook: TargetLook, candidates: number): OptimizerRe
+ const LARGEST_REQUEST_MARGIN = 0.01;
+ 
+ /**
+- * What a Run quotes for each of its Optimizer calls: the estimate of the
+- * largest request it can send (`largestRequest`), plus a margin. It is no
++ * What a Run quotes for each of its Optimizer calls, as the other roles'
++ * estimates are: the estimate of the largest request it can send
++ * (`largestRequest`, whose usage it keeps), its cost plus a margin. It is no
+  * lower than any realistic request's estimate, and far above a typical one.
+  */
+ export function quoteOptimizerCall(
+   estimate: (request: OptimizerRequest) => CallEstimate,
+   targetLook: TargetLook,
+   candidates: number,
+-): number {
+-  const { micros } = estimate(largestRequest(targetLook, candidates));
+-  return Math.ceil(micros * (1 + LARGEST_REQUEST_MARGIN));
++): CallEstimate {
++  const largest = estimate(largestRequest(targetLook, candidates));
++  return { ...largest, micros: Math.ceil(largest.micros * (1 + LARGEST_REQUEST_MARGIN)) };
+ }
+ 
+ /**
+diff --git a/packages/domain/src/stopping.ts b/packages/domain/src/stopping.ts
+index 1633093ac..30210b651 100644
+--- a/packages/domain/src/stopping.ts
++++ b/packages/domain/src/stopping.ts
+@@ -41,6 +41,26 @@ export const LANE_STOPS_WITH_DETAIL = [
+   "optimizer-failed",
+   "judge-failed",
+ ] as const satisfies readonly LaneStopReason[];
++export type LaneStopDetailReason = (typeof LANE_STOPS_WITH_DETAIL)[number];
++
++/** A stop reason of `LANE_STOPS_WITH_DETAIL`, with the vendor's reason as its detail. */
++export interface LaneStopWithDetail {
++  readonly reason: LaneStopDetailReason;
++  readonly detail: string;
++}
++
++/**
++ * Why a Lane stops, as recorded: a reason of `LANE_STOPS_WITH_DETAIL` with
++ * its detail, any other reason alone.
++ */
++export type LaneStop = Exclude<LaneStopReason, LaneStopDetailReason> | LaneStopWithDetail;
++
++/** A Lane stop as its stored columns: the reason, and the detail or null. */
++export const laneStopFields = (stop: LaneStop) =>
++  typeof stop === "string" ? { reason: stop, detail: null } : stop;
++
++const hasDetail = (reason: LaneStopReason): reason is LaneStopDetailReason =>
++  (LANE_STOPS_WITH_DETAIL as readonly LaneStopReason[]).includes(reason);
+ 
+ /** The most Iterations a Run may allow a Lane; the Budget is the practical limit. */
+ export const MAX_ITERATIONS = 50;
+@@ -188,19 +208,22 @@ export function iterationsWithoutImprovement(
+  * The Budget ran out when `budgetExhausted` says so (a call of the last
+  * Iteration didn't fit, e.g. one that left no Candidate) or the last
+  * Iteration's stored Candidates show it; the Judge failed when they show a
+- * Judge call turned away for good. Cancellation and `optimizer-failed` never
+- * reach here: a cancelled Lane stops where it is, and the Optimizer is called
+- * only once no rule holds, its rejection stopping the Lane at once.
++ * Judge call turned away for good, its reason the stop's detail.
++ * Cancellation and `optimizer-failed` never reach here: a cancelled Lane
++ * stops where it is, and the Optimizer is called only once no rule holds,
++ * its rejection stopping the Lane at once.
+  */
+ export function laneStopReason(
+   history: readonly IterationResult[],
+   rules: StopRules,
+   budgetExhausted: boolean,
+-): LaneStopReason | null {
+-  const holds: { readonly [R in LaneStopReason]: () => boolean } = {
++): LaneStop | null {
++  const details: { readonly [R in LaneStopDetailReason]: () => string | null } = {
++    "optimizer-failed": () => null,
++    "judge-failed": () => history.at(-1)?.judgeRejected ?? null,
++  };
++  const holds: { readonly [R in Exclude<LaneStopReason, LaneStopDetailReason>]: () => boolean } = {
+     cancelled: () => false,
+-    "optimizer-failed": () => false,
+-    "judge-failed": () => (history.at(-1)?.judgeRejected ?? null) !== null,
+     "target-score": () => history.some(({ best }) => best !== null && best >= rules.targetScore),
+     "budget-exhausted": () => budgetExhausted || history.at(-1)?.budgetExhausted === true,
+     "repeated-failures": () =>
+@@ -208,5 +231,13 @@ export function laneStopReason(
+     patience: () => iterationsWithoutImprovement(history, rules.minImprovement) >= rules.patience,
+     "iteration-limit": () => history.length >= rules.maxIterations,
+   };
+-  return LaneStopReason.literals.find((reason) => holds[reason]()) ?? null;
++  for (const reason of LaneStopReason.literals) {
++    if (!hasDetail(reason)) {
++      if (holds[reason]()) return reason;
++      continue;
++    }
++    const detail = details[reason]();
++    if (detail !== null) return { reason, detail };
++  }
++  return null;
+ }
+diff --git a/packages/domain/test/optimizer.test.ts b/packages/domain/test/optimizer.test.ts
+index 617727c09..27cad7171 100644
+--- a/packages/domain/test/optimizer.test.ts
++++ b/packages/domain/test/optimizer.test.ts
+@@ -188,7 +188,7 @@ describe("an Optimizer call's estimate", () => {
+     const estimate = (request: OptimizerRequest) =>
+       estimateOptimizerCall("medium", pricing, "", request);
+     expect(
+-      quoteOptimizerCall(estimate, DEFAULT_TARGET_LOOK, MAX_CANDIDATES),
++      quoteOptimizerCall(estimate, DEFAULT_TARGET_LOOK, MAX_CANDIDATES).micros,
+     ).toBeGreaterThanOrEqual(estimate(worst).micros);
+   });
+ });
+diff --git a/packages/domain/test/stopping.test.ts b/packages/domain/test/stopping.test.ts
+index b536b8711..b20e4b1dd 100644
+--- a/packages/domain/test/stopping.test.ts
++++ b/packages/domain/test/stopping.test.ts
+@@ -143,8 +143,9 @@ describe("laneStopReason", () => {
+       judgeRejected: "Judge HTTP 401",
+     });
+     // It outranks a reached target, a call that didn't fit and the Iteration limit.
+-    expect(laneStopReason([rejected(9)], limitOne, true)).toBe("judge-failed");
+-    expect(laneStopReason([scored(5), rejected(null)], rules, false)).toBe("judge-failed");
++    const judgeFailed = { reason: "judge-failed" as const, detail: "Judge HTTP 401" };
++    expect(laneStopReason([rejected(9)], limitOne, true)).toEqual(judgeFailed);
++    expect(laneStopReason([scored(5), rejected(null)], rules, false)).toEqual(judgeFailed);
+     // Only the last Iteration counts.
+     expect(laneStopReason([rejected(5), scored(6)], rules, false)).toBeNull();
+   });
+diff --git a/packages/server/src/index.ts b/packages/server/src/index.ts
+index a427e9d5e..a9509e0be 100644
+--- a/packages/server/src/index.ts
++++ b/packages/server/src/index.ts
+@@ -17,7 +17,6 @@ import type {
+   RunRequest,
+ } from "@iconograph/domain";
+ import { Mastra } from "@mastra/core/mastra";
+-import type { MastraCompositeStore } from "@mastra/core/storage";
+ import { Effect, Layer, Logger, ManagedRuntime, Schema } from "effect";
+ import { runReport } from "./report";
+ import { defaultRunConfig, type PhotoPaths, RunConfig } from "./run-steps";
+@@ -32,7 +31,7 @@ export type { RunWarning } from "./warnings";
+ export { nativeVendors, type OpenVendors, type VendorsResource } from "./vendors";
+ 
+ /** How long closing waits for cancelled Runs to unwind and record their Lanes. */
+-const CANCEL_SETTLE_TIMEOUT_MS = 10_000;
++const CANCEL_SETTLE_TIMEOUT_MS = 5_000;
+ const decodeEvent = Schema.decodeUnknownOption(EstimateEvent);
+ 
+ export interface RunApplicationOptions {
+@@ -149,8 +148,7 @@ export async function createRunApplication(options: RunApplicationOptions) {
+         );
+       },
+       /** The stored Run: Candidates, Outcomes, costs and stop reasons. */
+-      report: async (runId: string) =>
+-        runtime.runPromise(runReport(runId, await workflowCancelled(storage, runId))),
++      report: (runId: string) => runtime.runPromise(runReport(storage, runId)),
+       /** Mastra's persisted snapshot of a Run's workflow. */
+       async snapshot(runId: string) {
+         const snapshot = await workflows.loadWorkflowSnapshot({
+@@ -180,17 +178,6 @@ export class RunFailedError extends Error {
+   }
+ }
+ 
+-/**
+- * Whether Mastra stored the Run as cancelled. Its report then shows every Lane
+- * without a stop reason as `cancelled`: recording them may have been cut off
+- * (the process stopped while the Run's steps unwound).
+- */
+-async function workflowCancelled(storage: MastraCompositeStore, runId: string) {
+-  const workflows = await workflowsStore(storage);
+-  const snapshot = await workflows.loadWorkflowSnapshot({ workflowName: RUN_WORKFLOW_ID, runId });
+-  return snapshot?.status === "canceled";
+-}
+-
+ /** Read a stored Run's report without starting Mastra, the face models or any Image Model. */
+ export async function readRunReport(databasePath: string, dataDirectory: string, runId: string) {
+   const runtime = ManagedRuntime.make(
+@@ -209,7 +196,7 @@ export async function readRunReport(databasePath: string, dataDirectory: string,
+       );
+       const storage = createLocalStore(databasePath);
+       try {
+-        return await runtime.runPromise(runReport(runId, await workflowCancelled(storage, runId)));
++        return await runtime.runPromise(runReport(storage, runId));
+       } finally {
+         await storage.close();
+       }
+diff --git a/packages/server/src/llm.ts b/packages/server/src/llm.ts
+index 7ccf1ab3b..5347d95bc 100644
+--- a/packages/server/src/llm.ts
++++ b/packages/server/src/llm.ts
+@@ -8,7 +8,7 @@ import {
+   hasErrorNamed,
+   httpErrorResult,
+   type PriceSource,
+-  redactKey,
++  redactReason,
+   responseBodyOf,
+   statusOf,
+   toMastraSchema,
+@@ -380,7 +380,7 @@ export interface LlmCallOptions<A, S> {
+  * the text sent with every call (the instructions and the schema as Mastra
+  * sends it), for the role's estimate.
+  */
+-export const llmCaller = <A, S extends object>(options: LlmCallOptions<A, S>) => {
++export const llmCaller = <A, S>(options: LlmCallOptions<A, S>) => {
+   const { role, instructions, model, effort, pricing, schemaName, read } = options;
+   const schema = toMastraSchema(options.schema);
+   const decode = Schema.decodeUnknownSync(options.schema);
+@@ -397,7 +397,7 @@ export const llmCaller = <A, S extends object>(options: LlmCallOptions<A, S>) =>
+   });
+   agent.__setLogger(noopLogger);
+   const providerOptions = reasoningOptions(model.vendor, effort);
+-  const redact = redactKey(model.apiKey);
++  const redact = redactReason(model.apiKey);
+   const timedOut: UnsuccessfulCall = {
+     kind: "transient",
+     reason: `${role} request timed out after ${timeoutMs / 1000} s`,
+diff --git a/packages/server/src/optimizer.ts b/packages/server/src/optimizer.ts
+index 4a5221f50..513d7da78 100644
+--- a/packages/server/src/optimizer.ts
++++ b/packages/server/src/optimizer.ts
+@@ -10,7 +10,10 @@ import {
+   OptimizerUnavailable,
+ } from "@iconograph/domain";
+ import { Effect, Layer } from "effect";
+-import { llmCaller, type LlmAgentsOptions, llmModel, llmPrice } from "./llm";
++import { llmCaller, type LlmAgentsOptions, llmModel, llmPrice, type ReadAnswer } from "./llm";
++
++/** An Optimizer call that answered with a Prompt a Lane can send. */
++type Optimized = Extract<OptimizerCallResult, { kind: "optimized" }>;
+ 
+ /**
+  * The Optimizers behind Mastra agents on their vendor's AI SDK provider, built
+@@ -37,10 +40,7 @@ export const MastraOptimizers = (options: LlmAgentsOptions) =>
+         const unavailable = (message: string) => new OptimizerUnavailable({ model, message });
+         const llm = yield* llmModel("Optimizer", model, options, unavailable);
+         const { price, pricing } = yield* llmPrice(model, recorded, options, unavailable);
+-        const caller = llmCaller<
+-          OptimizerProposal,
+-          Extract<OptimizerCallResult, { kind: "optimized" }>
+-        >({
++        const caller = llmCaller<OptimizerProposal, Optimized>({
+           role: "Optimizer",
+           instructions: OPTIMIZER_INSTRUCTIONS,
+           model: llm,
+@@ -49,10 +49,10 @@ export const MastraOptimizers = (options: LlmAgentsOptions) =>
+           timeoutMs: options.timeoutMs,
+           schema: OptimizerProposal,
+           schemaName: "its output schema",
+-          read: (proposal, cost) => {
++          read: (proposal, cost): ReadAnswer<Optimized> => {
+             const checked = checkProposedPrompt(proposal.prompt);
+             return checked._tag === "Rejected"
+-              ? checked
++              ? { _tag: "Rejected", problem: checked.problem }
+               : {
+                   _tag: "Accepted",
+                   success: { kind: "optimized", prompt: checked.prompt, ...cost },
+diff --git a/packages/server/src/report.ts b/packages/server/src/report.ts
+index 9b75cbc6a..714b5a19d 100644
+--- a/packages/server/src/report.ts
++++ b/packages/server/src/report.ts
+@@ -1,4 +1,11 @@
+-import { type CallRecord, candidateKeyOf, imagePath, RunStore } from "@iconograph/adapters";
++import {
++  type CallRecord,
++  candidateKeyOf,
++  errorMessage,
++  imagePath,
++  RunStore,
++  workflowsStore,
++} from "@iconograph/adapters";
+ import {
+   callCosts,
+   type CandidateOutcome,
+@@ -9,8 +16,33 @@ import {
+   sameVendorLanes,
+   toUsd,
+ } from "@iconograph/domain";
+-import { Effect } from "effect";
++import type { MastraCompositeStore } from "@mastra/core/storage";
++import { Data, Effect } from "effect";
+ import { bestCandidateView, RunConfig } from "./run-steps";
++import { RUN_WORKFLOW_ID } from "./workflow";
++
++/** Reading Mastra's snapshot of the Run, for its report, failed. */
++export class RunSnapshotError extends Data.TaggedError("RunSnapshotError")<{
++  runId: string;
++  message: string;
++  cause: unknown;
++}> {}
++
++/** Whether Mastra stored the Run as cancelled. */
++const workflowCancelled = (storage: MastraCompositeStore, runId: string) =>
++  Effect.tryPromise({
++    try: async () =>
++      (await workflowsStore(storage)).loadWorkflowSnapshot({
++        workflowName: RUN_WORKFLOW_ID,
++        runId,
++      }),
++    catch: (cause) =>
++      new RunSnapshotError({
++        runId,
++        message: `Reading the workflow snapshot of Run ${runId} failed: ${errorMessage(cause)}`,
++        cause,
++      }),
++  }).pipe(Effect.map((snapshot) => snapshot?.status === "canceled"));
+ 
+ /** An Outcome variant as report fields: its tag as `outcome`, then its details. */
+ type OutcomeFields<O> = O extends { _tag: infer Tag } ? { outcome: Tag } & Omit<O, "_tag"> : never;
+@@ -97,14 +129,16 @@ const priceView = ({ _tag, ...age }: PriceQuote["source"]) => ({ source: _tag, .
+  * Totals come from every billable call of the Run (the ledger the Budget
+  * checks), including calls whose Candidate was never saved (the Run failed or
+  * was cancelled mid-call); those are listed in `unattributedCalls`.
+- * `workflowCancelled`: Mastra stored the Run as cancelled, so a Lane without a
+- * stop reason shows `cancelled` (recording it may have been cut off).
++ * A Run Mastra stored as cancelled (its snapshot in `storage`) shows a Lane
++ * without a stop reason as `cancelled`: recording it may have been cut off
++ * (the process stopped while the Run's steps unwound).
+  */
+-export const runReport = (runId: string, workflowCancelled = false) =>
++export const runReport = (storage: MastraCompositeStore, runId: string) =>
+   Effect.gen(function* () {
+     const store = yield* RunStore;
+     const { dataDirectory } = yield* RunConfig;
+     const run = yield* store.loadRun(runId);
++    const cancelled = yield* workflowCancelled(storage, runId);
+     const lanes = yield* store.loadLanes(runId);
+     // Each Iteration's stored Prompt (what any of its calls sent; a Run whose Budget fits no
+     // call stores the first but sends nothing). A Lane that died before storing one has none.
+@@ -164,7 +198,7 @@ export const runReport = (runId: string, workflowCancelled = false) =>
+           model: lane.model,
+           ...(run.request.lanes[lane.lane]?.resample && { resample: true as const }),
+           // A Run Mastra stored as cancelled whose cancel wasn't recorded yet.
+-          stopReason: lane.stopReason ?? (workflowCancelled ? "cancelled" : null),
++          stopReason: lane.stopReason ?? (cancelled ? "cancelled" : null),
+           ...(lane.stopDetail !== null && { stopDetail: lane.stopDetail }),
+           iterations: prompts.length,
+           best: bestCandidateView(own),
+diff --git a/packages/server/src/run-steps.ts b/packages/server/src/run-steps.ts
+index dadffeef4..ade98f642 100644
+--- a/packages/server/src/run-steps.ts
++++ b/packages/server/src/run-steps.ts
+@@ -35,8 +35,11 @@ import {
+   judgeCandidate,
+   judgeFailed,
+   Judges,
++  type LaneStop,
++  type LaneStopDetailReason,
++  laneStopFields,
+   laneStopReason,
+-  type LaneStopReason,
++  type LaneStopWithDetail,
+   MAX_PROMPT_LENGTH,
+   notSent,
+   type OptimizerIteration,
+@@ -336,7 +339,7 @@ export const prepareRun = (
+     // Lane resends its Prompt and makes no Optimizer call). Each call is checked against the
+     // Budget at its own estimate.
+     const optimizerPerCall = optimizer
+-      ? quoteOptimizerCall(optimizer.estimate, request.targetLook, request.candidates)
++      ? quoteOptimizerCall(optimizer.estimate, request.targetLook, request.candidates).micros
+       : 0;
+     const longestPrompt = "\u0001".repeat(MAX_PROMPT_LENGTH);
+     const estimates = yield* Effect.forEach(lanes, ({ lane, characterReferences }) => {
+@@ -661,24 +664,30 @@ export const judgeIteration = (input: LaneState) =>
+     return budgetExhausted ? { ...input, stopReason: "budget-exhausted" as const } : input;
+   });
+ 
++/** The warning when a role's vendor turned it away for good, which stops the Lane. */
++const TURNED_AWAY: { readonly [R in LaneStopDetailReason]: string } = {
++  "optimizer-failed": "The vendor turned the Optimizer away for good; the Lane stops",
++  "judge-failed": "The vendor turned the Judge away for good; the Lane stops",
++};
++
+ /**
+  * End an Iteration: decide whether the Lane stops (`laneStopReason` over its
+  * Iterations so far, with a call of this one that didn't fit the Budget,
+  * whether this execution saw it or the stored Candidates show it) and record
+- * why, with the vendor's reason when a Judge call was turned away for good
+- * (`judge-failed`); otherwise store the next Iteration, with the Prompt the
+- * Optimizer writes from the Lane's own recent history (`recentHistory`; never
+- * another Lane's) and the Target Look, or, in a Resample Lane, with the
+- * Lane's initial Prompt again and no Optimizer call. The Optimizer call
+- * belongs to this Iteration (it is booked under it) and is reserved against
+- * the Budget first, as every billable call is; one that doesn't fit, or a
+- * retry that doesn't, isn't made and the Lane stops with `budget-exhausted`.
+- * One the vendor turns away for good stops the Lane at once with
+- * `optimizer-failed` and the vendor's reason, storing no next Iteration. When
+- * optimizing fails otherwise (a refusal, an unusable answer, retries that ran
+- * out), the next Iteration keeps the last Prompt, records why, and a warning
+- * says so. A re-executed step that finds the next Iteration stored moves on
+- * to it without calling again.
++ * why, with the vendor's reason and a warning when a Judge call was turned
++ * away for good (`judge-failed`); otherwise store the next Iteration, with
++ * the Prompt the Optimizer writes from the Lane's own recent history
++ * (`recentHistory`; never another Lane's) and the Target Look, or, in a
++ * Resample Lane, with the Lane's initial Prompt again and no Optimizer call.
++ * The Optimizer call belongs to this Iteration (it is booked under it) and is
++ * reserved against the Budget first, as every billable call is; one that
++ * doesn't fit, or a retry that doesn't, isn't made and the Lane stops with
++ * `budget-exhausted`. One the vendor turns away for good stops the Lane at
++ * once with `optimizer-failed`, the vendor's reason and a warning, storing no
++ * next Iteration. When optimizing fails otherwise (a refusal, an unusable
++ * answer, retries that ran out), the next Iteration keeps the last Prompt,
++ * records why, and a warning says so. A re-executed step that finds the next
++ * Iteration stored moves on to it without calling again.
+  */
+ export const optimizeIteration = (input: LaneState) =>
+   Effect.gen(function* () {
+@@ -695,20 +704,33 @@ export const optimizeIteration = (input: LaneState) =>
+         prompt,
+         candidates: candidates.filter((candidate) => candidate.iteration === iteration),
+       }));
+-    const stop = (stopReason: LaneStopReason, detail?: string) =>
++    const key = {
++      runId: input.runId,
++      lane: input.lane,
++      iteration: input.iteration,
++      candidate: null,
++      purpose: "optimize" as const,
++    };
++    const stop = (laneStop: LaneStop) =>
+       store
+-        .stopLane(input.runId, input.lane, stopReason, detail)
+-        .pipe(Effect.as({ ...input, stopReason } satisfies LaneState));
++        .stopLane(input.runId, input.lane, laneStop)
++        .pipe(
++          Effect.as({ ...input, stopReason: laneStopFields(laneStop).reason } satisfies LaneState),
++        );
++    const turnedAway = (laneStop: LaneStopWithDetail) =>
++      Effect.logWarning(TURNED_AWAY[laneStop.reason]).pipe(
++        Effect.annotateLogs({ reason: laneStop.detail }),
++        about(key),
++        Effect.andThen(stop(laneStop)),
++      );
+     const results = history.map(({ candidates }) => iterationResult(candidates));
+-    const stopReason = laneStopReason(
++    const laneStop = laneStopReason(
+       results,
+       run.request.stopRules,
+       input.stopReason === "budget-exhausted",
+     );
+-    // `judge-failed` holds only when the last Iteration shows the vendor's reason.
+-    if (stopReason === "judge-failed")
+-      return yield* stop(stopReason, results.at(-1)!.judgeRejected!);
+-    if (stopReason) return yield* stop(stopReason);
++    if (typeof laneStop === "object" && laneStop !== null) return yield* turnedAway(laneStop);
++    if (laneStop) return yield* stop(laneStop);
+ 
+     const next = { runId: input.runId, lane: input.lane, iteration: input.iteration + 1 };
+     const proceed: LaneState = { ...input, iteration: next.iteration, stopReason: null };
+@@ -724,13 +746,6 @@ export const optimizeIteration = (input: LaneState) =>
+     const request = { targetLook: run.request.targetLook, history: recentHistory(history) };
+     const estimate = optimizer.estimate(request);
+     // A step re-executed after an Optimizer call whose Prompt wasn't saved numbers its calls on.
+-    const key = {
+-      runId: input.runId,
+-      lane: input.lane,
+-      iteration: input.iteration,
+-      candidate: null,
+-      purpose: "optimize" as const,
+-    };
+     const [reserved] = yield* reserveInOrder(
+       [{ key, gate: callGate(store, key, optimizer.model, calls) }],
+       estimate,
+@@ -745,7 +760,7 @@ export const optimizeIteration = (input: LaneState) =>
+     }).pipe(about(key));
+     if (optimization.kind === "budget-exhausted") return yield* stop("budget-exhausted");
+     if (optimization.kind === "non-recoverable") {
+-      return yield* stop("optimizer-failed", optimization.reason);
++      return yield* turnedAway({ reason: "optimizer-failed", detail: optimization.reason });
+     }
+     if (optimization.kind === "kept") {
+       yield* Effect.logWarning("Optimizing failed; the next Iteration keeps the last Prompt").pipe(
+@@ -808,17 +823,21 @@ export function bestCandidateView(candidates: readonly CandidateRecord[]) {
+ }
+ 
+ /**
+- * A stopped Lane's result: why it stopped, how many Iterations it began (each
+- * has its Prompt stored), and its best Candidate.
++ * A stopped Lane's result: why it stopped (with the vendor's reason as its
++ * stored detail, for `LANE_STOPS_WITH_DETAIL`), how many Iterations it began
++ * (each has its Prompt stored), and its best Candidate.
+  */
+ export const laneResult = (input: LaneState) =>
+   Effect.gen(function* () {
+     const store = yield* RunStore;
+     const candidates = yield* store.loadCandidates(input.runId, input.lane);
++    const stored = (yield* store.loadLanes(input.runId)).find(({ lane }) => lane === input.lane);
+     return {
+       runId: input.runId,
+       lane: input.lane,
+       stopReason: input.stopReason,
++      // The detail belongs to the stored stop, which the step's reason is unless one came first.
++      stopDetail: stored?.stopReason === input.stopReason ? stored.stopDetail : null,
+       iterations: (yield* store.loadIterations(input.runId, input.lane)).length,
+       best: bestCandidateView(candidates),
+     };
+diff --git a/packages/server/src/schemas.ts b/packages/server/src/schemas.ts
+index d83970a2e..d2bb3f592 100644
+--- a/packages/server/src/schemas.ts
++++ b/packages/server/src/schemas.ts
+@@ -25,14 +25,17 @@ export const LaneState = Schema.Struct({
+ export type LaneState = typeof LaneState.Type;
+ 
+ /**
+- * A stopped Lane: why, how many Iterations it began (each has its Prompt
+- * stored), and its best Candidate (null when none was judged): its Iteration
+- * (from 1), its index within the Iteration (from 0) and its weighted total.
++ * A stopped Lane: why, with the vendor's reason (`stopDetail`) when the
++ * Optimizer or the Judge was turned away for good, else null; how many
++ * Iterations it began (each has its Prompt stored); and its best Candidate
++ * (null when none was judged): its Iteration (from 1), its index within the
++ * Iteration (from 0) and its weighted total.
+  */
+ export const LaneResult = Schema.Struct({
+   runId: Schema.String,
+   lane: Schema.Int,
+   stopReason: LaneStopReason,
++  stopDetail: Schema.NullOr(Schema.NonEmptyString),
+   iterations: Schema.Int,
+   best: Schema.NullOr(
+     Schema.Struct({ iteration: Schema.Int, candidate: Schema.Int, score: Schema.Finite }),
+diff --git a/packages/server/src/server.ts b/packages/server/src/server.ts
+index b18f75cdb..ddcc6d6d2 100644
+--- a/packages/server/src/server.ts
++++ b/packages/server/src/server.ts
+@@ -138,7 +138,7 @@ export interface RunningServer {
+    * Stop retrying the face models and abort a download in progress (an injected
+    * `fetchModels` only until its response arrives), start no more restarts,
+    * stop listening, then close Mastra, the Run database and the Image Models.
+-   * Cancelled Runs still unwinding get up to 10 s to record their Lanes
++   * Cancelled Runs still unwinding get up to 5 s to record their Lanes
+    * `cancelled` first. Runs already running, or restarted by Mastra's lease
+    * timer, are not cancelled: closing storage under them fails them, and
+    * Mastra may log that.
+diff --git a/packages/server/src/workflow.ts b/packages/server/src/workflow.ts
+index 766208829..f70e508a3 100644
+--- a/packages/server/src/workflow.ts
++++ b/packages/server/src/workflow.ts
+@@ -85,22 +85,27 @@ export class CancelRecordings {
+   /**
+    * Settles once every cancelled Run seen so far has recorded its Lanes, or
+    * after `timeoutMs`: a Run whose steps never unwind mustn't hold up a
+-   * shutdown (its report still shows the Lanes cancelled).
++   * shutdown (its report still shows the Lanes cancelled). Runs still
++   * unwinding then are named in a warning and no longer awaited, so a later
++   * call doesn't wait for them again.
+    */
+   async settled(timeoutMs: number) {
+-    const pending = [...this.#pending.values()].map(({ promise }) => promise);
++    const pending = [...this.#pending];
+     if (pending.length === 0) return;
+-    let timer: ReturnType<typeof setTimeout> | undefined;
+-    const timedOut = new Promise<"timed out">((resolve) => {
+-      timer = setTimeout(() => resolve("timed out"), timeoutMs);
+-    });
++    const { promise: timedOut, resolve } = Promise.withResolvers<"timed out">();
++    const timer = setTimeout(() => resolve("timed out"), timeoutMs);
+     try {
+-      if ((await Promise.race([Promise.all(pending), timedOut])) === "timed out") {
+-        this.warn({
+-          level: "Warn",
+-          warning: `Cancelled Runs were still unwinding after ${timeoutMs / 1000} s; closing without recording their Lanes`,
+-        });
+-      }
++      const all = Promise.all(pending.map(([, { promise }]) => promise));
++      if ((await Promise.race([all, timedOut])) !== "timed out") return;
++      const runIds = pending
++        .filter(([runId, entry]) => this.#pending.get(runId) === entry)
++        .map(([runId]) => runId);
++      for (const runId of runIds) this.#pending.delete(runId);
++      this.warn({
++        level: "Warn",
++        warning: `Cancelled Runs ${runIds.join(", ")} were still unwinding after ${timeoutMs / 1000} s; closing without recording their Lanes`,
++        runIds,
++      });
+     } finally {
+       clearTimeout(timer);
+     }
+diff --git a/packages/server/test/run-engine.test.ts b/packages/server/test/run-engine.test.ts
+index f12591f5f..fd4b024ee 100644
+--- a/packages/server/test/run-engine.test.ts
++++ b/packages/server/test/run-engine.test.ts
+@@ -40,7 +40,6 @@ import { tamper } from "../../adapters/test/tamper";
+ import { temporaryDirectories } from "../../adapters/test/temporary-directory";
+ import { until } from "../../adapters/test/until";
+ import { createRunApplication, type EstimateEvent, readRunReport, type RunWarning } from "../src";
+-import { runReport } from "../src/report";
+ import {
+   defaultRunConfig,
+   generateIteration,
+@@ -50,7 +49,7 @@ import {
+ } from "../src/run-steps";
+ import { MastraOptimizers } from "../src/optimizer";
+ import type { LaneState } from "../src/schemas";
+-import { LANE_CONCURRENCY } from "../src/workflow";
++import { CancelRecordings, LANE_CONCURRENCY } from "../src/workflow";
+ import {
+   FAKE_ACTUAL_MICROS,
+   FAKE_ESTIMATE_MICROS,
+@@ -212,6 +211,7 @@ describe("Run engine with a fake Image Model", () => {
+           runId: result.runId,
+           lane: 0,
+           stopReason: "iteration-limit",
++          stopDetail: null,
+           iterations: 1,
+           best: { iteration: 1, candidate: 0, score: expect.any(Number) },
+         },
+@@ -307,6 +307,7 @@ describe("Run engine with a fake Image Model", () => {
+             runId,
+             lane: 0,
+             stopReason: "iteration-limit",
++            stopDetail: null,
+             iterations: 3,
+             best: { iteration: 1, candidate: 0, score: expect.any(Number) },
+           },
+@@ -1356,7 +1357,7 @@ describe("Run engine with a fake Judge", () => {
+         // Nothing was left to judge, and nothing ran out: the Lane's state passes on unchanged.
+         expect(await runtime.runPromise(judgeIteration(state))).toEqual(state);
+         expect(again.requests).toHaveLength(0);
+-        const after = await runtime.runPromise(runReport(runId));
++        const after = await readRunReport(databasePath, dataDirectory, runId);
+         expect(after.lanes).toEqual(before.lanes);
+         expect(after.totals).toEqual(before.totals);
+       } finally {
+@@ -1467,7 +1468,7 @@ describe("Run engine with a fake Judge", () => {
+     try {
+       await runtime.runPromise(judgeIteration(lane0Iteration1(runId)));
+       expect(again.requests).toHaveLength(1);
+-      const report = await runtime.runPromise(runReport(runId));
++      const report = await readRunReport(databasePath, dataDirectory, runId);
+       const [first, second] = report.lanes[0]!.candidates;
+       expect(first!.judgeCost.calls.map(({ attempt }) => attempt)).toEqual([0]);
+       expect(second!.judgement?.status).toBe("judged");
+@@ -1570,6 +1571,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () =>
+           runId,
+           lane: 0,
+           stopReason: "target-score",
++          stopDetail: null,
+           iterations: 2,
+           best: { iteration: 2, candidate: 0, score: total(second)! },
+         },
+@@ -1836,7 +1838,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () =>
+       expect(await again.iteration(lane0Iteration1(runId))).toEqual(next);
+       expect(await again.iteration(next)).toEqual({ ...next, stopReason: "iteration-limit" });
+       expect(again.optimizer.requests).toHaveLength(0);
+-      const after = await again.runtime.runPromise(runReport(runId));
++      const after = await readRunReport(databasePath, dataDirectory, runId);
+       expect(after.lanes[0]!.prompts.map(({ prompt, source }) => [prompt, source])).toEqual([
+         [initialPrompt(DEFAULT_TARGET_LOOK), "initial"],
+         [initialPrompt(DEFAULT_TARGET_LOOK), "resampled"],
+@@ -2178,7 +2180,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () =>
+       const interrupted = again.runtime.runPromise(Fiber.interrupt(fiber));
+       release();
+       await interrupted;
+-      const report = await again.runtime.runPromise(runReport(runId));
++      const report = await readRunReport(databasePath, dataDirectory, runId);
+       expect(report.unattributedCalls).toEqual([
+         expect.objectContaining({ purpose: "generate", settled: true, actualUsd: 0 }),
+       ]);
+@@ -2209,7 +2211,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () =>
+       expect(again.images.requests).toHaveLength(0);
+       expect(again.judge.requests).toHaveLength(0);
+       expect(again.optimizer.requests).toHaveLength(0);
+-      const after = await again.runtime.runPromise(runReport(runId));
++      const after = await readRunReport(databasePath, dataDirectory, runId);
+       expect(after.lanes).toEqual(before.lanes);
+       expect(after.totals).toEqual(before.totals);
+     } finally {
+@@ -2268,7 +2270,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () =>
+           ...lane0Iteration1(runId),
+           stopReason: "budget-exhausted",
+         });
+-        const after = await again.runtime.runPromise(runReport(runId));
++        const after = await readRunReport(databasePath, dataDirectory, runId);
+         expect(after.lanes[0]!.iterations).toBe(1);
+         expect(after.totals).toEqual(before.totals);
+       } finally {
+@@ -2297,7 +2299,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () =>
+     const again = stepsOn(databasePath, dataDirectory);
+     try {
+       expect(await again.iteration(lane0Iteration1(runId))).toMatchObject({ iteration: 2 });
+-      const report = await again.runtime.runPromise(runReport(runId));
++      const report = await readRunReport(databasePath, dataDirectory, runId);
+       expect(
+         report.lanes[0]!.prompts[0]!.optimizerCost.calls.map(({ attempt, settled }) => [
+           attempt,
+@@ -2354,7 +2356,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () =>
+     try {
+       await again.runtime.runPromise(generateIteration(lane0Iteration1(runId)));
+       expect(again.images.requests).toHaveLength(1);
+-      const report = await again.runtime.runPromise(runReport(runId));
++      const report = await readRunReport(databasePath, dataDirectory, runId);
+       const [first, second] = report.lanes[0]!.candidates;
+       expect(first!.calls.map(({ attempt }) => attempt)).toEqual([0]);
+       expect(second!.calls.map(({ attempt, settled }) => [attempt, settled])).toEqual([
+@@ -2453,6 +2455,52 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () =>
+     }
+   }, 60_000);
+ 
++  test("a report whose workflow snapshot can't be read fails naming the Run", async () => {
++    const { application, databasePath, dataDirectory } = await setup(["same"]);
++    try {
++      const { runId } = await application.start(loop(rules({ maxIterations: 1 })));
++      tamper(databasePath, "DROP TABLE mastra_workflow_snapshot");
++      const failure = {
++        _tag: "RunSnapshotError",
++        runId,
++        message: expect.stringContaining(`Reading the workflow snapshot of Run ${runId} failed: `),
++      };
++      await expect(application.report(runId)).rejects.toMatchObject(failure);
++      await expect(readRunReport(databasePath, dataDirectory, runId)).rejects.toMatchObject(
++        failure,
++      );
++    } finally {
++      await application.close();
++    }
++  }, 60_000);
++
++  test("closing names the cancelled Runs still unwinding when it stops waiting; a later close doesn't wait for them", async () => {
++    const warnings: RunWarning[] = [];
++    const cancels = new CancelRecordings((warning) => warnings.push(warning));
++    const cancel = new AbortController();
++    for (const runId of ["stuck-1", "stuck-2", "recorded"]) cancels.watch(runId, cancel.signal);
++    cancel.abort();
++    await cancels.finished("recorded", true, async () => {});
++    await cancels.settled(50);
++    expect(warnings).toEqual([
++      {
++        level: "Warn",
++        warning: expect.stringContaining("Cancelled Runs stuck-1, stuck-2 were still unwinding"),
++        runIds: ["stuck-1", "stuck-2"],
++      },
++    ]);
++    // The Runs whose `onFinish` never ran no longer hold up a close (the test's timeout would).
++    await cancels.settled(60_000);
++    expect(warnings).toHaveLength(1);
++    // One that finishes after all records as ever, without a warning.
++    let recorded = false;
++    await cancels.finished("stuck-1", true, async () => {
++      recorded = true;
++    });
++    expect(recorded).toBe(true);
++    expect(warnings).toHaveLength(1);
++  });
++
+   test("cancelling stops only the Lanes still running; a Lane that already stopped keeps its reason", async () => {
+     const { promise: held, resolve: release } = Promise.withResolvers<void>();
+     const { application, databasePath, fake } = await setup(
+@@ -2785,6 +2833,86 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () =>
+     60_000,
+   );
+ 
++  /** OpenAI's answer to a bad key: its masked echo of the key, then more text than is kept. */
++  const openaiRejectsKey = () =>
++    Response.json(
++      {
++        error: {
++          message: `Incorrect API key provided: sk-proj-****abcd. ${"Check your key. ".repeat(200)}`,
++          type: "invalid_request_error",
++          param: null,
++          code: "invalid_api_key",
++        },
++      },
++      { status: 401 },
++    );
++
++  test.each([
++    {
++      role: "Judge",
++      reason: "judge-failed",
++      judges: (origin: string) => judgesOnFakeVendor(origin, "openai"),
++      optimizers: () => fakeOptimizers().layer,
++      request: { judge: { ...DEFAULT_JUDGE, model: "openai/gpt-5.5" } },
++    },
++    {
++      role: "Optimizer",
++      reason: "optimizer-failed",
++      judges: () => fakeJudges().layer,
++      optimizers: (origin: string) => optimizersOnFakeVendor(origin, "openai"),
++      request: { optimizer: { ...DEFAULT_OPTIMIZER, model: "openai/gpt-5.5" } },
++    },
++  ])(
++    "an OpenAI $role turned away with a masked key echo stops the Lane with the reason scrubbed and cut, stored, returned, reported and warned",
++    async ({ role, reason, judges, optimizers, request }) => {
++      const vendor = fakeVendorServer(openaiRejectsKey);
++      const warnings: RunWarning[] = [];
++      const { application, databasePath } = await runApplication(
++        fakeImageModels(["same"]).layer,
++        (warning) => warnings.push(warning),
++        judges(vendor.origin),
++        optimizers(vendor.origin),
++      );
++      try {
++        const { runId, lanes } = await withEnvironment(
++          { OPENAI_API_KEY: "SENTINEL-OPENAI-KEY-0123456789" },
++          () => application.start({ ...loop(), ...request }),
++        );
++        const db = new Database(databasePath, { readonly: true });
++        const stored = db
++          .query<{ stop_detail: string }, [string]>(
++            "SELECT stop_detail FROM lanes WHERE run_id = ?",
++          )
++          .get(runId)!.stop_detail;
++        db.close();
++        expect(stored).toStartWith(`${role} HTTP 401: Incorrect API key provided: [redacted]. `);
++        expect(stored).toEndWith("… (truncated)");
++        expect(stored.length).toBeLessThan(2100);
++        expect(stored).not.toContain("****");
++        expect(lanes).toEqual([
++          expect.objectContaining({ stopReason: reason, stopDetail: stored }),
++        ]);
++        const report = await application.report(runId);
++        expect(report.lanes[0]).toMatchObject({ stopReason: reason, stopDetail: stored });
++        expect(JSON.stringify(report)).not.toContain("****");
++        expect(warnings).toContainEqual(
++          expect.objectContaining({
++            level: "Warn",
++            warning: `The vendor turned the ${role} away for good; the Lane stops`,
++            reason: stored,
++            runId,
++            lane: 0,
++            iteration: 1,
++          }),
++        );
++      } finally {
++        await application.close();
++        await vendor.stop();
++      }
++    },
++    60_000,
++  );
++
+   test("a re-executed Iteration whose Judge call was turned away still stops the Lane judge-failed, billing nothing more", async () => {
+     const key = "SENTINEL-JUDGE-KEY-0123456789";
+     const vendor = fakeVendorServer(() => turnedAway(401, key));
+@@ -2811,7 +2939,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () =>
+         expect(again.images.requests).toHaveLength(0);
+         expect(again.judge.requests).toHaveLength(0);
+         expect(again.optimizer.requests).toHaveLength(0);
+-        const after = await again.runtime.runPromise(runReport(runId));
++        const after = await readRunReport(databasePath, dataDirectory, runId);
+         expect(after.lanes[0]).toMatchObject({
+           stopReason: "judge-failed",
+           stopDetail: "Judge HTTP 401: invalid x-api-key [redacted]",

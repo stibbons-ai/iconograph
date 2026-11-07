@@ -55,7 +55,7 @@ export interface LaneStopWithDetail {
  */
 export type LaneStop = Exclude<LaneStopReason, LaneStopDetailReason> | LaneStopWithDetail;
 
-/** A Lane stop as its stored columns: the reason, and the detail or null. */
+/** A Lane stop as its reason and its detail (null for a reason without one). */
 export const laneStopFields = (stop: LaneStop) =>
   typeof stop === "string" ? { reason: stop, detail: null } : stop;
 
@@ -232,12 +232,10 @@ export function laneStopReason(
     "iteration-limit": () => history.length >= rules.maxIterations,
   };
   for (const reason of LaneStopReason.literals) {
-    if (!hasDetail(reason)) {
-      if (holds[reason]()) return reason;
-      continue;
-    }
-    const detail = details[reason]();
-    if (detail !== null) return { reason, detail };
+    if (hasDetail(reason)) {
+      const detail = details[reason]();
+      if (detail !== null) return { reason, detail };
+    } else if (holds[reason]()) return reason;
   }
   return null;
 }
