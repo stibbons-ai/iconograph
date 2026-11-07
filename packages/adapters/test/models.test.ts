@@ -1,9 +1,20 @@
-import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, open, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { afterAll, afterEach, beforeEach, describe, expect, jest, test } from "bun:test";
+import { mkdir, open, readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ensureModels, modelsDirectory, readModelLock, resolveDataDirectory } from "../src";
-import { decodeModelLock, type DownloadedWeight, type ModelLock } from "../src/models";
+import {
+  ensureModels,
+  type Fetch,
+  modelsDirectory,
+  readModelLock,
+  resolveDataDirectory,
+} from "../src";
+import {
+  decodeModelLock,
+  type DownloadedWeight,
+  type ModelLock,
+  modelDownloadIdleTimeoutMs,
+} from "../src/models";
 import { main } from "../src/models-cli";
 import { sha256 } from "./sha256";
 import { temporaryDirectories } from "./temporary-directory";
@@ -13,13 +24,14 @@ import { until } from "./until";
 const detector = crypto.getRandomValues(new Uint8Array(200_000));
 const recognizer = crypto.getRandomValues(new Uint8Array(1_000));
 const hits = new Map<string, number>();
-// Holds /gated.onnx after its first chunk until a test releases it.
+// Holds /gated.onnx after its first chunk, and /silent.onnx before its headers, until a
+// test releases it.
 let gate = Promise.withResolvers<void>();
 
 const server = Bun.serve({
   port: 0,
   hostname: "127.0.0.1",
-  fetch(request) {
+  async fetch(request) {
     const path = new URL(request.url).pathname;
     hits.set(path, (hits.get(path) ?? 0) + 1);
     if (path === "/detector.onnx") return new Response(detector);
@@ -35,6 +47,24 @@ const server = Bun.serve({
             await gate.promise;
             controller.enqueue(detector.subarray(1_000));
             controller.close();
+          },
+        }),
+      );
+    }
+    if (path === "/silent.onnx") {
+      await gate.promise;
+      return new Response(detector);
+    }
+    if (path === "/trickle.onnx") {
+      // 10 chunks of 100 bytes, 40 ms apart: slow overall, never idle for long.
+      let offset = 0;
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          async pull(controller) {
+            if (offset > 0) await Bun.sleep(40);
+            controller.enqueue(recognizer.subarray(offset, offset + 100));
+            offset += 100;
+            if (offset >= recognizer.byteLength) controller.close();
           },
         }),
       );
@@ -306,6 +336,103 @@ describe("ensureModels", () => {
       gate.resolve();
       await Promise.allSettled(callers);
     }
+  });
+
+  describe("idle timeout", () => {
+    const idleTimeoutMs = 150;
+    const stalled = (path: string) =>
+      `Model detector download from ${new URL(path, server.url).href} stalled: no data for 0.15 s`;
+
+    test("a server that never sends headers fails within the idle period, leaving nothing", async () => {
+      const silent: ModelLock = { models: [weight("detector", "/silent.onnx", detector)] };
+      const started = performance.now();
+      await expect(ensureModels({ lock: silent, directory, idleTimeoutMs })).rejects.toThrow(
+        stalled("/silent.onnx"),
+      );
+      const elapsed = performance.now() - started;
+      expect(elapsed).toBeGreaterThanOrEqual(idleTimeoutMs - 5);
+      expect(elapsed).toBeLessThan(idleTimeoutMs + 1_500);
+      expect(await readdir(directory)).toEqual([]);
+    });
+
+    test("a body that stalls after some bytes fails the same way, leaving nothing", async () => {
+      const gated: ModelLock = { models: [weight("detector", "/gated.onnx", detector)] };
+      await expect(ensureModels({ lock: gated, directory, idleTimeoutMs })).rejects.toThrow(
+        stalled("/gated.onnx"),
+      );
+      expect(hits.get("/gated.onnx")).toBe(1);
+      expect(await readdir(directory)).toEqual([]);
+    });
+
+    // Real time: the server's chunks cross a real socket, which fake timers can't drive.
+    test("a slow download that keeps receiving data is never aborted", async () => {
+      const trickle: ModelLock = { models: [weight("recognizer", "/trickle.onnx", recognizer)] };
+      const started = performance.now();
+      const [model] = await ensureModels({ lock: trickle, directory, idleTimeoutMs });
+      expect(performance.now() - started).toBeGreaterThan(idleTimeoutMs);
+      expect(model?.downloaded).toBe(true);
+      expect(new Uint8Array(await readFile(model!.path))).toEqual(recognizer);
+      expect(await readdir(directory)).toEqual(["recognizer.onnx"]);
+    });
+
+    test("defaults to 30 s, and aborts even a fetch that ignores the signal", async () => {
+      const fetched = Promise.withResolvers<AbortSignal>();
+      const ignoresSignal: Fetch = (_, init) => {
+        fetched.resolve(init!.signal!);
+        return new Promise<Response>(() => undefined);
+      };
+      jest.useFakeTimers();
+      try {
+        const failure = ensureModels({ lock, directory, ids: ["detector"], fetch: ignoresSignal });
+        const signal = await fetched.promise;
+        jest.advanceTimersByTime(modelDownloadIdleTimeoutMs - 1);
+        expect(signal.aborted).toBe(false);
+        jest.advanceTimersByTime(1);
+        expect(signal.aborted).toBe(true);
+        await expect(failure).rejects.toThrow(
+          `Model detector download from ${lock.models[0].url} stalled: no data for 30 s`,
+        );
+      } finally {
+        jest.useRealTimers();
+      }
+      expect(await readdir(directory)).toEqual([]);
+    });
+  });
+
+  describe("stale temp files", () => {
+    const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000);
+    async function place(name: string, age: Date) {
+      await writeFile(join(directory, name), "partial");
+      await utimes(join(directory, name), age, age);
+    }
+
+    test("removes only this model's temp files older than 10 minutes", async () => {
+      const crashed = `detector.onnx.${crypto.randomUUID()}.partial`;
+      const live = `detector.onnx.${crypto.randomUUID()}.partial`;
+      const keep = [
+        live,
+        `recognizer.onnx.${crypto.randomUUID()}.partial`, // another model's
+        "detector.onnx.partial", // not writeFileAtomically's pattern
+        `detector.onnx.${crypto.randomUUID()}.partial.bak`,
+        `xdetector.onnx.${crypto.randomUUID()}.partial`,
+        "notes.txt",
+      ];
+      await place(crashed, minutesAgo(11));
+      await place(live, minutesAgo(9));
+      for (const name of keep.slice(1)) await place(name, minutesAgo(60));
+
+      await ensureModels({ lock, directory, ids: ["detector"] });
+      expect((await readdir(directory)).sort()).toEqual(["detector.onnx", ...keep].sort());
+    });
+
+    test("the staleness threshold is 10x a longer idle timeout", async () => {
+      const kept = `detector.onnx.${crypto.randomUUID()}.partial`;
+      const crashed = `detector.onnx.${crypto.randomUUID()}.partial`;
+      await place(kept, minutesAgo(19));
+      await place(crashed, minutesAgo(21));
+      await ensureModels({ lock, directory, ids: ["detector"], idleTimeoutMs: 120_000 });
+      expect((await readdir(directory)).sort()).toEqual(["detector.onnx", kept].sort());
+    });
   });
 });
 

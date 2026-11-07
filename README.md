@@ -163,8 +163,12 @@ bun run models:export-facenet             # build the held-out FaceNet model (ne
 
 Weights are otherwise downloaded on first use. Missing files stream into a temp file beside the
 destination, are hashed, and are renamed into place only after the SHA-256 matches; present files
-are re-hashed on every use and never downloaded again once verified. **Offline machines**: copy the
-locked files (same names) into `<data dir>/models` by any means; they are verified like downloads.
+are re-hashed on every use and never downloaded again once verified. A download that receives no
+data for 30 s (headers or body) is aborted with an error naming the model and URL; a slow but
+progressing one is never cut off. Temp files (`<file>.<uuid>.partial`) left by a killed download
+are removed on the next download of that model once unmodified for 10 minutes. **Offline
+machines**: copy the locked files (same names) into `<data dir>/models` by any means; they are
+verified like downloads.
 **A checksum mismatch** is a hard error naming the model, path, expected and actual hash, and the
 file is never used. A corrupt present file is left in place: delete it and rerun `models:fetch`.
 

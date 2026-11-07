@@ -330,17 +330,15 @@ export async function startServer(
   });
 
   const stopping = new AbortController();
-  /** Downloads that stopping the server aborts, so no temp file is left open. */
-  const download: Fetch = async (url) => {
+  /** Downloads that stopping the server or a stall aborts, so no temp file is left open. */
+  const download: Fetch = async (url, init) => {
     stopping.signal.throwIfAborted();
     const { promise: aborted, reject } = Promise.withResolvers<never>();
     const onAbort = () => reject(stopping.signal.reason);
     stopping.signal.addEventListener("abort", onAbort, { once: true });
+    const signal = init?.signal ? AbortSignal.any([stopping.signal, init.signal]) : stopping.signal;
     try {
-      return await Promise.race([
-        fetchModels ? fetchModels(url) : fetch(url, { signal: stopping.signal }),
-        aborted,
-      ]);
+      return await Promise.race([(fetchModels ?? fetch)(url, { signal }), aborted]);
     } finally {
       stopping.signal.removeEventListener("abort", onAbort);
     }

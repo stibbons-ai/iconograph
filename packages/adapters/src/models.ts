@@ -1,9 +1,9 @@
-import { mkdir } from "node:fs/promises";
+import { lstat, mkdir, readdir, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { Schema } from "effect";
 import bundledLock from "../models.lock.json";
 import { errorMessage } from "./errors";
-import { writeFileAtomically } from "./files";
+import { isTemporaryFileOf, writeFileAtomically } from "./files";
 
 /**
  * Licences reviewed for locked weights, downloaded or built (ADR-0002,
@@ -99,7 +99,14 @@ export function downloadableModelIds(lock: ModelLock): string[] {
   return lock.models.flatMap((model) => (model.url ? [model.id] : []));
 }
 
-export type Fetch = (url: string) => Promise<Response>;
+/** Global `fetch` fits; `signal` aborts the request when the download stalls. */
+export type Fetch = (url: string, init?: { signal?: AbortSignal }) => Promise<Response>;
+
+/** How long a download may receive nothing (no headers, no body bytes) before it is aborted. */
+export const modelDownloadIdleTimeoutMs = 30_000;
+
+/** A `.partial` temp file of a model is stale, and removed, once unmodified this long. */
+const staleTempMinimumMs = 10 * 60_000;
 
 export interface EnsureModelsOptions {
   /** Usually `readModelLock()`. */
@@ -109,6 +116,11 @@ export interface EnsureModelsOptions {
   /** Model ids to ensure; defaults to every model in the lock. */
   ids?: readonly string[];
   fetch?: Fetch;
+  /**
+   * A download that receives no data for this long fails; defaults to
+   * `modelDownloadIdleTimeoutMs`. There is no limit on its total duration.
+   */
+  idleTimeoutMs?: number;
 }
 
 export interface EnsuredModel {
@@ -124,7 +136,12 @@ export interface EnsuredModel {
  * is only returned after its SHA-256 matches the lock.
  */
 export async function ensureModels(options: EnsureModelsOptions): Promise<EnsuredModel[]> {
-  const { lock, directory, fetch: fetchModel = fetch } = options;
+  const {
+    lock,
+    directory,
+    fetch: fetchModel = fetch,
+    idleTimeoutMs = modelDownloadIdleTimeoutMs,
+  } = options;
   const models = options.ids
     ? options.ids.map((id) => {
         const model = lock.models.find((candidate) => candidate.id === id);
@@ -156,7 +173,14 @@ export async function ensureModels(options: EnsureModelsOptions): Promise<Ensure
           `Model ${model.id} is missing at ${path}; it is never downloaded. Build it with \`${model.build.command}\` (pass the same --data-dir).`,
         );
       }
-      await download(model, path, fetchModel);
+      // A live writer's temp file is touched by every chunk or aborted within the idle
+      // period, so one unmodified for far longer was left by a killed process.
+      await removeStaleTemps(
+        directory,
+        model.file,
+        Math.max(staleTempMinimumMs, 10 * idleTimeoutMs),
+      );
+      await download(model, path, fetchModel, idleTimeoutMs);
     } else if (present !== model.sha256) {
       throw new ModelWeightError(
         `Model ${model.id} at ${path} failed SHA-256 verification: expected ${model.sha256}, actual ${present}. ${model.build ? `Rebuild it with \`${model.build.command}\`.` : "Delete the file to re-download it."}`,
@@ -182,36 +206,111 @@ export async function hashFile(path: string): Promise<string | undefined> {
   return hasher.digest("hex");
 }
 
+/** Suffix of a download's temp file, `<file>.<uuid>.partial`. */
+const partialSuffix = ".partial";
+
+/**
+ * Best effort: remove `<file>.<uuid>.partial` temp files in `directory` not
+ * modified for `olderThanMs`. Any other file is never touched, and a failure
+ * (e.g. another caller removed it first) is ignored.
+ */
+async function removeStaleTemps(directory: string, file: string, olderThanMs: number) {
+  const cutoff = Date.now() - olderThanMs;
+  const names = await readdir(directory).catch(() => []);
+  for (const name of names) {
+    if (!isTemporaryFileOf(name, file, partialSuffix)) continue;
+    const temp = join(directory, name);
+    try {
+      const stats = await lstat(temp);
+      if (stats.isFile() && stats.mtimeMs < cutoff) await rm(temp);
+    } catch {
+      // Best effort: a temp file that can't be removed never fails the download.
+    }
+  }
+}
+
+/**
+ * Aborts `signal` with `reason` once `touch` was not called for `ms`; `guard`
+ * makes a promise reject with `reason` too, even when its source ignores the
+ * signal. `stop` must run on every exit so no timer outlives the download.
+ */
+function idleWatchdog(ms: number, reason: Error) {
+  const controller = new AbortController();
+  const { promise: aborted, reject } = Promise.withResolvers<never>();
+  aborted.catch(() => undefined);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const stop = () => clearTimeout(timer);
+  return {
+    signal: controller.signal,
+    touch() {
+      stop();
+      timer = setTimeout(() => {
+        reject(reason);
+        controller.abort(reason);
+      }, ms);
+    },
+    stop,
+    guard: <A>(promise: Promise<A>) => Promise.race([promise, aborted]),
+  };
+}
+
 /**
  * Stream into a temp file in the same directory, capped at the locked size, then
  * hash the stored file and rename only after it verifies, so no caller ever sees
- * a partial or unverified file.
+ * a partial or unverified file. Receiving nothing for `idleTimeoutMs` (headers
+ * or body) aborts the request.
  */
-async function download(model: DownloadedWeight, path: string, fetchModel: Fetch): Promise<void> {
+async function download(
+  model: DownloadedWeight,
+  path: string,
+  fetchModel: Fetch,
+  idleTimeoutMs: number,
+): Promise<void> {
+  const idle = idleWatchdog(
+    idleTimeoutMs,
+    new ModelWeightError(
+      `Model ${model.id} download from ${model.url} stalled: no data for ${idleTimeoutMs / 1000} s`,
+    ),
+  );
   let size = 0;
   try {
     await writeFileAtomically(
       path,
       async (handle) => {
-        const response = await fetchModel(model.url);
-        if (!response.ok || !response.body) {
-          await response.body?.cancel().catch(() => undefined);
-          throw new ModelWeightError(
-            `Model ${model.id} download failed: HTTP ${response.status} from ${model.url}`,
-          );
-        }
-        for await (const chunk of response.body) {
-          size += chunk.byteLength;
-          if (size > model.size) {
+        try {
+          idle.touch();
+          const response = await idle.guard(fetchModel(model.url, { signal: idle.signal }));
+          if (!response.ok || !response.body) {
+            await response.body?.cancel().catch(() => undefined);
             throw new ModelWeightError(
-              `Model ${model.id} download from ${model.url} exceeded the locked size of ${model.size} bytes`,
+              `Model ${model.id} download failed: HTTP ${response.status} from ${model.url}`,
             );
           }
-          await handle.write(chunk);
+          const reader = response.body.getReader();
+          try {
+            for (;;) {
+              const { done, value: chunk } = await idle.guard(reader.read());
+              if (done) break;
+              idle.touch();
+              size += chunk.byteLength;
+              if (size > model.size) {
+                throw new ModelWeightError(
+                  `Model ${model.id} download from ${model.url} exceeded the locked size of ${model.size} bytes`,
+                );
+              }
+              await handle.write(chunk);
+            }
+          } catch (error) {
+            // Frees the connection; a fetch that honoured the signal already errored the body.
+            await reader.cancel().catch(() => undefined);
+            throw error;
+          }
+        } finally {
+          idle.stop();
         }
       },
       {
-        suffix: ".partial",
+        suffix: partialSuffix,
         verify: async (temp) => {
           if (size !== model.size) {
             throw new ModelWeightError(
@@ -230,6 +329,8 @@ async function download(model: DownloadedWeight, path: string, fetchModel: Fetch
     );
   } catch (error) {
     if (error instanceof ModelWeightError) throw error;
+    // A stall that fired during a write surfaces later as the fetch's own AbortError.
+    if (idle.signal.aborted) throw idle.signal.reason;
     throw new ModelWeightError(
       `Model ${model.id} download from ${model.url} to ${path} failed: ${errorMessage(error)}`,
       { cause: error },
