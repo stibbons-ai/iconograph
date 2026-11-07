@@ -358,6 +358,21 @@ describe("OpenAI adapter against recorded responses", () => {
     expect(result.reason.length).toBeLessThanOrEqual(2000 + "… (truncated)".length);
   });
 
+  test("a masked key with a longer visible prefix is scrubbed at every offset across the cut", async () => {
+    // The reason is "OpenAI HTTP 400 server_error: " (30 characters) + message; the echo
+    // starts from 24 characters before the cut at 2000 to 8 characters after it.
+    for (let start = 1_976; start <= 2_008; start++) {
+      const message = `${"a".repeat(start - 31)} sk-proj-abcdefgh****wxyz ${"b".repeat(1_000)}`;
+      const result = await classify(async () =>
+        Response.json({ error: { message, code: "server_error" } }, { status: 400 }),
+      );
+      expect(result.kind).toBe("failed");
+      if (result.kind !== "failed") return;
+      expect(result.reason).not.toContain("*");
+      expect(result.reason).not.toContain("wxyz");
+    }
+  });
+
   test("the key is removed before the cut, so the cut can't leave part of it", async () => {
     // The reason is "OpenAI HTTP 400 server_error: " + message; the key's first 15 characters
     // fall before the 2000-character cut, the rest after it.

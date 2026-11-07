@@ -33,23 +33,31 @@ export const redactKey = (apiKey: string) => (text: string) =>
 
 /**
  * Where every vendor reason is cut (vendor text, runtime errors and our own
- * prefix alike). The stored reason can run slightly longer: `… (truncated)`
- * is appended, and `[redacted]` can be longer than the mask it replaces.
+ * prefix alike). A cut reason is at most this long plus the `… (truncated)`
+ * suffix.
  */
 const MAX_REASON_LENGTH = 2000;
 
-/** How far past the cut masked echoes are scrubbed: longer than any echo. */
+/**
+ * How far past the cut masked echoes are scrubbed. An echo whose asterisks
+ * begin before the cut must have three of them inside the scanned slice to
+ * match; the lookahead accepts the slice's end, so the rest of the echo may
+ * lie beyond it. Text past the slice is dropped, so a key's unmasked tail
+ * there never reaches the reason. Earlier replacements shorten the text, so an
+ * echo cut by the slice's end after only one or two asterisks can then show
+ * them before the cut; never its unmasked tail.
+ */
 const SCRUB_MARGIN = 64;
 
 /**
- * A vendor reason fit to store and print: without the key (`redactKey`),
- * without a masked echo of any key (e.g. `sk-proj-****abcd`): a
- * whitespace-delimited word with three or more asterisks after at least
- * three characters (trailing punctuation kept), then cut to about
- * `MAX_REASON_LENGTH` characters. Both go before the cut, so it can't leave
- * part of a key or of an echo; echoes are scrubbed only a little past the cut
- * (`SCRUB_MARGIN`) and the lookbehind starts a match only at a word's start,
- * so the scan stays cheap on huge untrusted text.
+ * A vendor reason fit to store and print. The key is removed (`redactKey`).
+ * A masked echo of any key (e.g. `sk-proj-****abcd`) is replaced: a
+ * whitespace-delimited word with three or more asterisks after at least three
+ * characters, trailing punctuation kept. Then the reason is cut to about
+ * `MAX_REASON_LENGTH` characters. Both replacements go before the cut, so it
+ * can't leave a key, or the unmasked tail of an echo. Echoes are scrubbed only a
+ * little past the cut (`SCRUB_MARGIN`), and the lookbehind starts a match only
+ * at a word's start, so the scan stays cheap on huge untrusted text.
  */
 export const redactReason = (apiKey: string) => {
   const withoutKey = redactKey(apiKey);
