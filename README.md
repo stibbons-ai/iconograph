@@ -205,8 +205,9 @@ in this order:
    first price lookup; the `prices` command checks on every lookup (`--refresh` forces a fetch). A
    failed refresh keeps serving the old cache with its age, marked `stale` once it is 24 h old or
    dated in the future. An unrelated entry whose price fields are malformed is dropped (that model
-   is unpriced) and listed in `refresh.rejected`. A malformed entry for a default model, a response
-   that isn't JSON, or one that prices no model fails the refresh and leaves the cache untouched.
+   is unpriced) and listed in `refresh.rejected`. A default model's entry that is malformed or
+   can't price that model (e.g. a required price field is missing), a response that isn't JSON, or
+   one that prices no model fails the refresh and leaves the cache untouched.
 3. **Bundled snapshot**,
    [`packages/adapters/litellm-prices.snapshot.json`](packages/adapters/litellm-prices.snapshot.json),
    used only offline before the first successful fetch. It never fills gaps in a fetched cache.

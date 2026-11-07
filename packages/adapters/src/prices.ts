@@ -26,6 +26,8 @@ const decodeLiteLLMEntry = Schema.decodeUnknownOption(PriceFields);
 export interface LiteLLMPrices {
   /** Price fields keyed by LiteLLM model key, only for entries that carry any. */
   prices: ReadonlyMap<string, PriceFields>;
+  /** Keys whose entry is well-formed but carries no price field we read. */
+  withoutPrices: ReadonlySet<string>;
   /** Keys whose entry or read price fields were malformed; those models stay unpriced. */
   rejected: string[];
 }
@@ -38,6 +40,7 @@ export interface LiteLLMPrices {
  */
 export function decodeLiteLLMPrices(json: unknown): LiteLLMPrices {
   const prices = new Map<string, PriceFields>();
+  const withoutPrices = new Set<string>();
   const rejected: string[] = [];
   for (const [key, entry] of Object.entries(decodeLiteLLMFile(json))) {
     // `sample_spec` documents the format; it is not a model.
@@ -45,9 +48,10 @@ export function decodeLiteLLMPrices(json: unknown): LiteLLMPrices {
     const fields = decodeLiteLLMEntry(entry);
     if (fields._tag === "None") rejected.push(key);
     else if (Object.keys(fields.value).length > 0) prices.set(key, fields.value);
+    else withoutPrices.add(key);
   }
   if (prices.size === 0) throw new Error("No model in the price data has a price");
-  return { prices, rejected };
+  return { prices, withoutPrices, rejected };
 }
 
 /** The committed offline fallback, trimmed to the models Iconograph uses. */
@@ -74,7 +78,10 @@ function storedDate(value: unknown): Date {
   return date;
 }
 
-/** The price data could not be fetched or was invalid; the existing cache is untouched. */
+/**
+ * The price data could not be fetched, was invalid, or can't price a default
+ * model; the existing cache is untouched.
+ */
 export class PriceFetchError extends Error {
   override name = "PriceFetchError";
 }
@@ -219,6 +226,21 @@ export async function openPriceSource(options: PriceSourceOptions): Promise<Pric
     if (badDefaults.length > 0) {
       throw new PriceFetchError(
         `LiteLLM price data from ${url} has malformed prices for default model ${badDefaults.join(", ")}; keeping the existing cache`,
+      );
+    }
+    // A default model whose entry is present but can't price it (e.g. a required
+    // field removed upstream) would be unpriced until the next refresh.
+    const unpriceable: string[] = [];
+    for (const [model, { litellmKey }] of Object.entries(pricingSpecs)) {
+      const fields = decoded.prices.get(litellmKey);
+      // An absent default key leaves that model unpriced; it doesn't fail the refresh.
+      if (fields === undefined && !decoded.withoutPrices.has(litellmKey)) continue;
+      const problem = pricingProblem(model, fields ?? {});
+      if (problem !== undefined) unpriceable.push(`${litellmKey} (${problem})`);
+    }
+    if (unpriceable.length > 0) {
+      throw new PriceFetchError(
+        `LiteLLM price data from ${url} can't price default model ${unpriceable.join(", ")}; keeping the existing cache`,
       );
     }
     const fetched = now();
