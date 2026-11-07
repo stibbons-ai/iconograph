@@ -198,9 +198,10 @@ in this order:
 1. **Manual override**, set per model with the command below.
 2. **LiteLLM's public price data**
    ([`model_prices_and_context_window.json`](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json)
-   on `main`), cached with its fetch time in `<data dir>/prices.db`. The `prices` command refreshes
-   it when 24 h old (or dated in the future); the price source's `ensureFresh` is meant to run at
-   server boot and daily. A failed refresh keeps serving the old cache with its age, marked `stale`
+   on `main`), cached with its fetch time in `<data dir>/prices.db`, and refreshed when 24 h old
+   (or dated in the future): by the server at boot, without holding up the start, and every 24 h
+   while it runs, logging each failure as a warning; by a Run CLI on its first price lookup; by
+   the `prices` command. A failed refresh keeps serving the old cache with its age, marked `stale`
    once it is 24 h old or dated in the future. An unrelated entry whose price fields are malformed
    is dropped (that model is unpriced) and listed in `refresh.rejected`. A malformed entry for a
    default model, a response that isn't JSON, or one that prices no model fails the refresh and

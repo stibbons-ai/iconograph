@@ -17,6 +17,7 @@ import {
   type PriceSourceOptions,
 } from "../src";
 import { litellmPricesUrl, PriceSnapshot } from "../src/prices";
+import { until } from "./until";
 import { main } from "../src/prices-cli";
 
 // A trimmed excerpt of LiteLLM's model_prices_and_context_window.json at
@@ -286,6 +287,23 @@ describe("LiteLLM fetch and cache", () => {
     const failure = source.refresh();
     await expect(failure).rejects.toBeInstanceOf(PriceFetchError);
     await expect(failure).rejects.toThrow("failed: no network in this sandbox");
+  });
+
+  test("aborting the signal ends a hanging refresh with a PriceFetchError, cache intact", async () => {
+    await (await open()).refresh();
+    advanceHours(30);
+    const hanging = await open({ url: at("/hang") });
+    const abort = new AbortController();
+    const failure = hanging.ensureFresh({ signal: abort.signal });
+    // Mid-body: the server has answered and the body never finishes.
+    await until(async () => hits.get("/hang") === 1);
+    abort.abort(new Error("server stopping"));
+    await expect(failure).rejects.toBeInstanceOf(PriceFetchError);
+    await expect(failure).rejects.toThrow("server stopping");
+    expect((await lookup(hanging, "claude-sonnet-5-5")).source).toMatchObject({
+      _tag: "litellm",
+      asOf: start.toISOString(),
+    });
   });
 
   test("a write waits for another process's lock instead of failing at once", async () => {

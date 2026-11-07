@@ -33,6 +33,9 @@ const LOOPBACK_HOSTS = ["localhost", "127.0.0.1", "[::1]"];
 const MODELS_RETRY_MS = 5_000;
 const MODELS_RETRY_MAX_MS = 300_000;
 
+/** How often a running server brings the LiteLLM prices up to date (they go stale at 24 h). */
+export const PRICES_REFRESH_MS = 24 * 60 * 60 * 1000;
+
 /**
  * The Mastra routes a Run needs (method and path as Mastra declares them):
  * reading workflows and Runs, creating, starting (`start-async`, which checks
@@ -106,7 +109,10 @@ export interface ServerDependencies extends Pick<
   fetchModels?: Fetch;
   /** The first delay before retrying failed face models (default 5 s), doubling up to 5 minutes. */
   modelsRetryMs?: number;
-  /** Test seam: waits between face-model attempts; must end when `signal` aborts. */
+  /**
+   * Test seam: waits between face-model attempts and between daily price
+   * refreshes (`PRICES_REFRESH_MS`); must end when `signal` aborts.
+   */
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   /** Test seam: wraps `/health`'s database query, e.g. to make it fail. */
   databaseProbe?: (query: () => Promise<void>) => Promise<void>;
@@ -137,10 +143,11 @@ export interface RunningServer {
   /**
    * Stop retrying the face models and abort a download in progress (an injected
    * `fetchModels` that ignores its signal only until its response arrives),
-   * start no more restarts, stop listening, then close Mastra, the Run database
-   * and the Image Models. Cancelled Runs still unwinding get up to 5 s to record
-   * their Lanes `cancelled` first. Runs already running, or restarted by Mastra's
-   * lease timer, are not cancelled: closing storage under them fails them, and
+   * abort a price refresh in progress and wait for it, start no more restarts,
+   * stop listening, then close Mastra, the Run database and the Image Models.
+   * Cancelled Runs still unwinding get up to 5 s to record their Lanes
+   * `cancelled` first. Runs already running, or restarted by Mastra's lease
+   * timer, are not cancelled: closing storage under them fails them, and
    * Mastra may log that.
    */
   stop(): Promise<void>;
@@ -330,6 +337,25 @@ export async function startServer(
   });
 
   const stopping = new AbortController();
+  /**
+   * Brings the prices up to date now and every `PRICES_REFRESH_MS` until the
+   * server stops; one refresh at a time, never blocking boot. A failed refresh
+   * is logged and the existing cache (or the bundled snapshot) keeps serving.
+   */
+  const pricesRefreshed = (async () => {
+    const { ensurePricesFresh } = models;
+    if (!ensurePricesFresh) return;
+    while (!stopping.signal.aborted) {
+      try {
+        const { refreshed, fetchedAt } = await ensurePricesFresh({ signal: stopping.signal });
+        log({ event: "prices-fresh", refreshed, fetchedAt: fetchedAt.toISOString() });
+      } catch (error) {
+        if (stopping.signal.aborted) break;
+        log({ warning: `Price refresh failed, serving the cached prices: ${errorChain(error)}` });
+      }
+      await sleep(PRICES_REFRESH_MS, stopping.signal);
+    }
+  })();
   /** Downloads that stopping the server or a stall aborts, so no temp file is left open. */
   const download: Fetch = async (url, init) => {
     const signal = init?.signal ? AbortSignal.any([stopping.signal, init.signal]) : stopping.signal;
@@ -416,6 +442,7 @@ export async function startServer(
       stopping.abort();
       await server.stop(true);
       await modelsReady;
+      await pricesRefreshed;
       await close();
     },
   };

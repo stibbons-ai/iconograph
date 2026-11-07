@@ -30,3 +30,28 @@ test("prices refresh once, on the first lookup, and never without a key", async 
   expect((await get(key))._tag).toBe("Success");
   expect(refreshes).toBe(1);
 });
+
+test("a caller's refresh before the first lookup is the only one, and reports its own failure", async () => {
+  let refreshes = 0;
+  const fetch = Promise.withResolvers<{ refreshed: boolean; fetchedAt: Date }>();
+  const warnings: string[] = [];
+  const prices = refreshOnFirstLookup(
+    {
+      ensureFresh: () => {
+        refreshes++;
+        return fetch.promise;
+      },
+      lookup: (model) => Effect.succeed({ ...FAKE_PRICE, model }),
+    },
+    (warning) => warnings.push(warning),
+  );
+  const refresh = prices.ensureFresh();
+  // Started while the caller's refresh is in flight: no second fetch.
+  const lookup = Effect.runPromise(prices.lookup("claude-sonnet-5-5"));
+  fetch.reject(new Error("HTTP 503"));
+  await expect(refresh).rejects.toThrow("HTTP 503");
+  expect((await lookup).model).toBe("claude-sonnet-5-5");
+  await Effect.runPromise(prices.lookup("claude-sonnet-5-5"));
+  expect(refreshes).toBe(1);
+  expect(warnings).toEqual([]);
+});

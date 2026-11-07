@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterEach, describe, expect, jest, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, jest, test } from "bun:test";
 import { copyFile, mkdir, rm, symlink } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,6 +7,8 @@ import {
   modelDownloadIdleTimeoutMs,
   modelsDirectory,
   NativeImageModels,
+  openPriceSource,
+  type PriceSource,
   readModelLock,
   runsDatabase,
 } from "@iconograph/adapters";
@@ -35,6 +37,7 @@ import {
   isLoopbackHost,
   MOUNTED_ROUTES,
   nextModelsRetryMs,
+  PRICES_REFRESH_MS,
   type RunningServer,
   type ServerDependencies,
   serverConfig,
@@ -83,6 +86,8 @@ async function serve(
     hostname?: string;
     judges?: Layer.Layer<Judges>;
     optimizers?: Layer.Layer<Optimizers>;
+    /** The price source the vendors refresh through; default: none, so nothing refreshes. */
+    priceSource?: Pick<PriceSource, "ensureFresh" | "close">;
   } = {},
 ) {
   const {
@@ -90,6 +95,7 @@ async function serve(
     hostname,
     judges = fakeJudges().layer,
     optimizers = fakeOptimizers().layer,
+    priceSource,
     ...seams
   } = options;
   const logs: Record<string, unknown>[] = [];
@@ -109,7 +115,13 @@ async function serve(
       ...(hostname && { ICONOGRAPH_HOST: hostname }),
     }),
     {
-      vendors: async () => ({ imageModels, judges, optimizers, close: () => {} }),
+      vendors: async () => ({
+        imageModels,
+        judges,
+        optimizers,
+        ...(priceSource && { ensurePricesFresh: priceSource.ensureFresh }),
+        close: () => priceSource?.close(),
+      }),
       retryPolicy: { maxRetries: 2, baseDelayMs: 0 },
       ...seams,
       // Weights are never downloaded in tests; a test that downloads passes its own fetch.
@@ -975,6 +987,171 @@ describe("HTTP server with the fake Image Model", () => {
     socket.write("GET /health HTTP/1.0\r\n\r\n");
     expect((await reply).split("\r\n", 1)[0]).toBe("HTTP/1.1 400 Bad Request");
   }, 30_000);
+});
+
+describe("price refresh", () => {
+  const litellm = Bun.file(
+    fileURLToPath(new URL("../../adapters/test/fixtures/litellm-prices.json", import.meta.url)),
+  );
+  const start = new Date("2026-11-01T12:00:00Z");
+  const DAY_SECONDS = PRICES_REFRESH_MS / 1000;
+
+  /**
+   * The server on a volume with verified face models, refreshing a real price
+   * source whose LiteLLM fetches each wait for the test to answer them, on a
+   * test clock; the daily wait ends when the test calls `nextDay`.
+   */
+  async function serveWithPrices() {
+    const data = await dataVolume(temporaryDirectory, SFACE_IDS);
+    const clock = { now: start };
+    const fetches: ((response: Response) => void)[] = [];
+    const source = await openPriceSource({
+      dataDirectory: data,
+      now: () => clock.now,
+      // Like `fetch`: an abort rejects with the signal's reason.
+      fetch: (_, init) => {
+        const answer = Promise.withResolvers<Response>();
+        init?.signal?.addEventListener("abort", () => answer.reject(init.signal?.reason), {
+          once: true,
+        });
+        fetches.push(answer.resolve);
+        return answer.promise;
+      },
+    });
+    const events: string[] = [];
+    let refreshes = 0;
+    const waits: number[] = [];
+    let day = Promise.withResolvers<void>();
+    const served = await serve(data, fakeImageModels([]).layer, {
+      priceSource: {
+        ensureFresh: (options) => {
+          refreshes++;
+          return source.ensureFresh(options).finally(() => events.push("refresh settled"));
+        },
+        close: () => {
+          events.push("close");
+          source.close();
+        },
+      },
+      sleep: (ms, signal) => {
+        waits.push(ms);
+        signal.addEventListener("abort", () => day.resolve(), { once: true });
+        return day.promise;
+      },
+    });
+    /** Answers the `n`th LiteLLM fetch (1-based) once it is made. */
+    const answerFetch = async (n: number, response: Response) => {
+      await until(async () => fetches.length >= n);
+      fetches[n - 1]!(response);
+    };
+    const nextDay = () => {
+      clock.now = new Date(clock.now.getTime() + PRICES_REFRESH_MS);
+      const ended = day;
+      day = Promise.withResolvers<void>();
+      ended.resolve();
+    };
+    const priceSource = () =>
+      Effect.runPromise(source.lookup("claude-sonnet-5-5")).then((quote) => quote.source);
+    return {
+      ...served,
+      fetches,
+      events,
+      waits,
+      refreshes: () => refreshes,
+      answerFetch,
+      nextDay,
+      priceSource,
+    };
+  }
+
+  test("refreshes at boot without holding the start, then every 24 h", async () => {
+    const { server, logs, logged, fetches, waits, refreshes, answerFetch, nextDay, priceSource } =
+      await serveWithPrices();
+    // Started, booted and healthy while the boot refresh's fetch is unanswered.
+    expect(refreshes()).toBe(1);
+    await server.booted;
+    expect((await request(server, "/health")).status).toBe(200);
+    await until(async () => fetches.length === 1);
+    await answerFetch(1, new Response(litellm));
+    await logged((line) => line.event === "prices-fresh");
+    expect(waits).toEqual([PRICES_REFRESH_MS]);
+
+    nextDay();
+    await answerFetch(2, new Response(litellm));
+    await logged(
+      (line) => line.fetchedAt === new Date(start.getTime() + PRICES_REFRESH_MS).toISOString(),
+    );
+    expect(refreshes()).toBe(2);
+    expect(logs.filter((line) => line.event === "prices-fresh")).toEqual([
+      { event: "prices-fresh", refreshed: true, fetchedAt: start.toISOString() },
+      {
+        event: "prices-fresh",
+        refreshed: true,
+        fetchedAt: new Date(start.getTime() + PRICES_REFRESH_MS).toISOString(),
+      },
+    ]);
+    expect(await priceSource()).toMatchObject({ _tag: "litellm", ageSeconds: 0, stale: false });
+  }, 30_000);
+
+  test("a failed refresh is logged once and the server keeps serving the previous cache", async () => {
+    const { server, logs, logged, answerFetch, nextDay, priceSource } = await serveWithPrices();
+    await answerFetch(1, new Response(litellm));
+    await logged((line) => line.event === "prices-fresh");
+    nextDay();
+    await answerFetch(2, new Response("unavailable", { status: 503 }));
+    await logged((line) => "warning" in line);
+    expect(logs.filter((line) => "warning" in line || "error" in line)).toEqual([
+      {
+        warning: expect.stringMatching(
+          /^Price refresh failed, serving the cached prices: .*LiteLLM price fetch failed: HTTP 503/,
+        ),
+      },
+    ]);
+    await server.booted;
+    expect((await request(server, "/health")).status).toBe(200);
+    expect(await priceSource()).toEqual({
+      _tag: "litellm",
+      asOf: start.toISOString(),
+      ageSeconds: DAY_SECONDS,
+      stale: true,
+    });
+  }, 30_000);
+
+  describe("stopping", () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    beforeEach(() => {
+      unhandled.length = 0;
+      process.on("unhandledRejection", onUnhandled);
+    });
+    afterEach(() => {
+      process.off("unhandledRejection", onUnhandled);
+    });
+
+    test("aborts a refresh in flight and closes the prices only after it ends", async () => {
+      const { server, logs, fetches, events, refreshes } = await serveWithPrices();
+      running.splice(running.indexOf(server), 1);
+      await until(async () => fetches.length === 1);
+      await server.stop();
+      expect(events).toEqual(["refresh settled", "close"]);
+      expect(refreshes()).toBe(1);
+      expect(logs.filter((line) => "warning" in line || "error" in line)).toEqual([]);
+      await Bun.sleep(0); // A rejection nobody handles is reported after a turn of the event loop.
+      expect(unhandled).toEqual([]);
+    }, 30_000);
+
+    test("starts no refresh after stop while waiting for the next day", async () => {
+      const { server, logged, answerFetch, events, refreshes } = await serveWithPrices();
+      running.splice(running.indexOf(server), 1);
+      await answerFetch(1, new Response(litellm));
+      await logged((line) => line.event === "prices-fresh");
+      await server.stop();
+      expect(refreshes()).toBe(1);
+      expect(events).toEqual(["refresh settled", "close"]);
+      await Bun.sleep(0); // A rejection nobody handles is reported after a turn of the event loop.
+      expect(unhandled).toEqual([]);
+    }, 30_000);
+  });
 });
 
 describe("network exposure", () => {

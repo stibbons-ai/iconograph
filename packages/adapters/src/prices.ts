@@ -127,14 +127,19 @@ CREATE TABLE IF NOT EXISTS price_overrides (
 );
 `;
 
+/** Ends a refresh early: its fetch aborts and the cache stays unchanged. */
+export interface RefreshOptions {
+  signal?: AbortSignal;
+}
+
 export interface PriceSource {
   /** Fetch LiteLLM's data now and replace the cache; on any failure the cache is unchanged. */
-  refresh(): Promise<Refresh>;
+  refresh(options?: RefreshOptions): Promise<Refresh>;
   /**
    * Refresh only when there is no cache, it is 24 h old or more, or it is dated
    * in the future (the clock moved back).
    */
-  ensureFresh(): Promise<Refresh>;
+  ensureFresh(options?: RefreshOptions): Promise<Refresh>;
   /** Never fetches; call `ensureFresh` first to keep LiteLLM data current. */
   lookup(model: string): Effect.Effect<PriceQuote, Unpriced | PriceStoreError>;
   /**
@@ -186,10 +191,13 @@ export async function openPriceSource(options: PriceSourceOptions): Promise<Pric
     });
   };
 
-  async function refresh(): Promise<Refresh> {
+  async function refresh({ signal }: RefreshOptions = {}): Promise<Refresh> {
+    const timeout = AbortSignal.timeout(timeoutMs);
     // Called inside `then`, so an injected fetch that throws synchronously also becomes a PriceFetchError.
     const response = await Promise.resolve()
-      .then(() => fetchPrices(url, { signal: AbortSignal.timeout(timeoutMs) }))
+      .then(() =>
+        fetchPrices(url, { signal: signal ? AbortSignal.any([signal, timeout]) : timeout }),
+      )
       .catch(fetchFailed);
     if (!response.ok) {
       await response.body?.cancel().catch(() => {});
@@ -231,10 +239,10 @@ export async function openPriceSource(options: PriceSourceOptions): Promise<Pric
   return {
     refresh,
 
-    async ensureFresh() {
+    async ensureFresh(options) {
       const fetched = await fetchedAt();
       if (fetched && !needsRefresh(fetched, now())) return { refreshed: false, fetchedAt: fetched };
-      return refresh();
+      return refresh(options);
     },
 
     lookup(model) {
