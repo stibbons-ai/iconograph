@@ -96,6 +96,19 @@ function weight(
   };
 }
 
+/**
+ * The error `promise` rejects with. Unlike `await expect(promise).rejects`, which hangs
+ * bun when a never-settling promise times the test out, this fails by the test timeout.
+ */
+function rejectionOf(promise: Promise<unknown>): Promise<Error> {
+  return promise.then(
+    () => {
+      throw new Error("Expected a rejection, but the promise resolved");
+    },
+    (error: unknown) => error as Error,
+  );
+}
+
 // The lock schema admits only HTTPS URLs, so locks for the plain-HTTP local
 // server are built directly; ensureModels trusts an already-decoded lock.
 const lock: ModelLock = {
@@ -229,20 +242,22 @@ describe("ensureModels", () => {
     expect(await readdir(directory)).toEqual([]);
   });
 
-  test("an HTTP error status survives a body that fails to cancel", async () => {
-    const unavailable = async () =>
-      new Response(
-        new ReadableStream({
-          cancel() {
-            throw new Error("cancel failed");
-          },
-        }),
-        { status: 503 },
+  test("an HTTP error status survives a body that fails to cancel or never cancels", async () => {
+    for (const cancel of [
+      () => {
+        throw new Error("cancel failed");
+      },
+      () => new Promise<void>(() => {}),
+    ]) {
+      const unavailable = async () => new Response(new ReadableStream({ cancel }), { status: 503 });
+      const failure = await rejectionOf(
+        ensureModels({ lock, directory, ids: ["detector"], fetch: unavailable }),
       );
-    await expect(
-      ensureModels({ lock, directory, ids: ["detector"], fetch: unavailable }),
-    ).rejects.toThrow(`Model detector download failed: HTTP 503 from ${lock.models[0].url}`);
-    expect(await readdir(directory)).toEqual([]);
+      expect(failure.message).toBe(
+        `Model detector download failed: HTTP 503 from ${lock.models[0].url}`,
+      );
+      expect(await readdir(directory)).toEqual([]);
+    }
   });
 
   test("the gate hashes stored bytes, so a short write is never accepted", async () => {
@@ -350,9 +365,8 @@ describe("ensureModels", () => {
     test("a server that never sends headers fails within the idle period, leaving nothing", async () => {
       const silent: ModelLock = { models: [weight("detector", "/silent.onnx", detector)] };
       const started = performance.now();
-      await expect(ensureModels({ lock: silent, directory, idleTimeoutMs })).rejects.toThrow(
-        stalled("/silent.onnx"),
-      );
+      const failure = await rejectionOf(ensureModels({ lock: silent, directory, idleTimeoutMs }));
+      expect(failure.message).toBe(stalled("/silent.onnx"));
       const elapsed = performance.now() - started;
       expect(elapsed).toBeGreaterThanOrEqual(idleTimeoutMs - 5);
       expect(elapsed).toBeLessThan(idleTimeoutMs + 1_500);
@@ -361,9 +375,8 @@ describe("ensureModels", () => {
 
     test("a body that stalls after some bytes fails the same way, leaving nothing", async () => {
       const gated: ModelLock = { models: [weight("detector", "/gated.onnx", detector)] };
-      await expect(ensureModels({ lock: gated, directory, idleTimeoutMs })).rejects.toThrow(
-        stalled("/gated.onnx"),
-      );
+      const failure = await rejectionOf(ensureModels({ lock: gated, directory, idleTimeoutMs }));
+      expect(failure.message).toBe(stalled("/gated.onnx"));
       expect(hits.get("/gated.onnx")).toBe(1);
       expect(await readdir(directory)).toEqual([]);
     });
@@ -451,7 +464,7 @@ describe("ensureModels", () => {
         expect(signal.aborted).toBe(false);
         jest.advanceTimersByTime(1);
         expect(signal.aborted).toBe(true);
-        await expect(failure).rejects.toThrow(
+        expect((await rejectionOf(failure)).message).toBe(
           `Model detector download from ${lock.models[0].url} stalled: no data for 30 s`,
         );
       } finally {
@@ -463,31 +476,74 @@ describe("ensureModels", () => {
       expect(await readdir(directory)).toEqual([]);
     });
 
-    test("time spent storing a chunk is no stall, and a storage error keeps its cause", async () => {
-      // Stands in for a slow disk: reading the chunk's size lets twice the idle period pass,
-      // and the chunk is no byte buffer, so storing it fails.
-      const unstorable = {
-        get byteLength() {
+    test("time spent storing a chunk is no stall", async () => {
+      // Stands in for a slow disk: reading the first chunk's size lets twice the idle
+      // period pass, while the timer is paused for storing it.
+      const first = recognizer.slice(0, 500);
+      Object.defineProperty(first, "byteLength", {
+        get() {
           jest.advanceTimersByTime(modelDownloadIdleTimeoutMs * 2);
-          return 1;
+          return 500;
         },
-      };
-      const fetchUnstorable: Fetch = async () =>
-        new Response(new ReadableStream({ start: (controller) => controller.enqueue(unstorable) }));
-      jest.useFakeTimers();
-      let failure: unknown;
-      try {
-        await ensureModels({ lock, directory, ids: ["detector"], fetch: fetchUnstorable }).catch(
-          (error: unknown) => (failure = error),
+      });
+      const fetchSlowly: Fetch = async () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(first);
+              controller.enqueue(recognizer.slice(500));
+              controller.close();
+            },
+          }),
         );
+      jest.useFakeTimers();
+      try {
+        const [model] = await ensureModels({
+          lock,
+          directory,
+          ids: ["recognizer"],
+          fetch: fetchSlowly,
+        });
+        expect(new Uint8Array(await readFile(model!.path))).toEqual(recognizer);
       } finally {
         jest.useRealTimers();
       }
-      expect(failure).toBeInstanceOf(Error);
-      expect((failure as Error).message).toStartWith(
+      expect(await readdir(directory)).toEqual(["recognizer.onnx"]);
+    });
+
+    test("a storage error keeps its cause", async () => {
+      // No byte buffer, so storing it fails.
+      const unstorable = { byteLength: 1 };
+      const fetchUnstorable: Fetch = async () =>
+        new Response(new ReadableStream({ start: (controller) => controller.enqueue(unstorable) }));
+      const failure = await rejectionOf(
+        ensureModels({ lock, directory, ids: ["detector"], fetch: fetchUnstorable }),
+      );
+      expect(failure.message).toStartWith(
         `Model detector download from ${lock.models[0].url} to ${join(directory, "detector.onnx")} failed: `,
       );
-      expect((failure as Error).cause).toBeInstanceOf(TypeError);
+      expect(failure.cause).toBeInstanceOf(TypeError);
+      expect(await readdir(directory)).toEqual([]);
+    });
+
+    test("a stalled body is aborted even when its stream ignores the signal and never cancels", async () => {
+      let cancelled = false;
+      const stuck: Fetch = async () =>
+        new Response(
+          new ReadableStream({
+            start: (controller) => controller.enqueue(detector.subarray(0, 2)),
+            pull: () => new Promise(() => {}),
+            cancel: () => {
+              cancelled = true;
+              return new Promise(() => {});
+            },
+          }),
+        );
+      const failure = await rejectionOf(
+        ensureModels({ lock, directory, ids: ["detector"], fetch: stuck, idleTimeoutMs }),
+      );
+      expect(failure.message).toBe(stalled("/detector.onnx"));
+      expect(cancelled).toBe(true);
       expect(await readdir(directory)).toEqual([]);
     });
   });

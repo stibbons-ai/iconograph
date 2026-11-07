@@ -105,7 +105,11 @@ export type Fetch = (url: string, init?: { signal?: AbortSignal }) => Promise<Re
 /** How long a download may receive nothing (no headers, no body bytes) before it is aborted. */
 export const modelDownloadIdleTimeoutMs = 30_000;
 
-/** A `.partial` temp file of a model is stale, and removed, once unmodified this long. */
+/**
+ * The lower bound on how long a model's `.partial` temp file stays unmodified
+ * before it counts as stale; the threshold is `max(this, 10 × idleTimeoutMs)`,
+ * applied when that model is next downloaded.
+ */
 const staleTempMinimumMs = 10 * 60_000;
 
 /** The longest delay `setTimeout` honours; a longer one fires at once. */
@@ -121,7 +125,9 @@ export interface EnsureModelsOptions {
   fetch?: Fetch;
   /**
    * A download that receives no data for this long fails; defaults to
-   * `modelDownloadIdleTimeoutMs`. There is no limit on its total duration.
+   * `modelDownloadIdleTimeoutMs`. There is no limit on its total duration. Also
+   * scales the stale temp file threshold (10 ×, at least 10 minutes). Throws
+   * unless a positive number of milliseconds `setTimeout` can honour.
    */
   idleTimeoutMs?: number;
 }
@@ -182,7 +188,9 @@ export async function ensureModels(options: EnsureModelsOptions): Promise<Ensure
         );
       }
       // A live writer's temp file is touched by every chunk or aborted within the idle
-      // period, so one unmodified for far longer was left by a killed process.
+      // period while waiting on the network; the timer pauses while a chunk is stored or
+      // the file verified, which the 10 × / 10 minute margin covers. So one unmodified for
+      // far longer was left by a killed process.
       await removeStaleTemps(
         directory,
         model.file,
@@ -303,7 +311,8 @@ async function download(
           });
           idle.touch();
           if (!response.ok || !response.body) {
-            await response.body?.cancel().catch(() => undefined);
+            // Not awaited: a body whose cancel never settles must not hold up the failure.
+            void response.body?.cancel().catch(() => undefined);
             throw new ModelWeightError(
               `Model ${model.id} download failed: HTTP ${response.status} from ${model.url}`,
             );
@@ -326,7 +335,8 @@ async function download(
             }
           } catch (error) {
             // Frees the connection; a fetch that honoured the signal already errored the body.
-            await reader.cancel().catch(() => undefined);
+            // Not awaited: a cancel that never settles must not hold up the failure.
+            void reader.cancel().catch(() => undefined);
             throw error;
           }
         } finally {
