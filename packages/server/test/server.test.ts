@@ -452,6 +452,75 @@ describe("HTTP server with the fake Image Model", () => {
     expect((await fetch(new URL("/health", server.url))).status).toBe(503);
   }, 30_000);
 
+  test("stalls that ignore the signal leave no listener behind, and a late response is freed", async () => {
+    const data = await temporaryDirectory();
+    const started = [2, 3, 4].map(() => Promise.withResolvers<void>());
+    const retry = Promise.withResolvers<void>();
+    const holding = Promise.withResolvers<void>();
+    const late = Promise.withResolvers<Response>();
+    let calls = 0;
+    let sleeps = 0;
+    const { logged } = await serve(data, fakeImageModels([]).layer, {
+      // The first attempt fails at once, so the stalled ones run on fake timers; the
+      // fourth wait lasts until the server stops.
+      sleep: (_, signal) => {
+        if (++sleeps === 1) {
+          signal.addEventListener("abort", () => retry.resolve(), { once: true });
+          return retry.promise;
+        }
+        if (sleeps < 4) return Promise.resolve();
+        holding.resolve();
+        return retry.promise;
+      },
+      // Ignores its signal: only the first stalled attempt ever answers, late.
+      fetchModels: () => {
+        if (++calls === 1) return Promise.reject(new Error("network down"));
+        started[calls - 2]?.resolve();
+        return calls === 2 ? late.promise : new Promise<Response>(() => {});
+      },
+    });
+    await logged((line) => String(line.error).includes("network down"));
+    // Every abort listener added from here on, by the signal it waits on.
+    const listening = new Map<unknown, AbortSignal>();
+    const { addEventListener, removeEventListener } = AbortSignal.prototype;
+    AbortSignal.prototype.addEventListener = function (
+      this: AbortSignal,
+      ...[type, listener, options]: Parameters<AbortSignal["addEventListener"]>
+    ) {
+      if (type === "abort") listening.set(listener, this);
+      addEventListener.call(this, type, listener, options);
+    };
+    AbortSignal.prototype.removeEventListener = function (
+      this: AbortSignal,
+      ...[type, listener, options]: Parameters<AbortSignal["removeEventListener"]>
+    ) {
+      if (type === "abort") listening.delete(listener);
+      removeEventListener.call(this, type, listener, options);
+    };
+    try {
+      jest.useFakeTimers();
+      try {
+        retry.resolve();
+        for (const attempt of started) {
+          await attempt.promise;
+          jest.advanceTimersByTime(modelDownloadIdleTimeoutMs);
+        }
+      } finally {
+        jest.useRealTimers();
+      }
+      await holding.promise;
+      // A listener on a signal that never aborts (the server's stop) would keep its
+      // attempt alive until shutdown.
+      expect([...listening.values()].filter((signal) => !signal.aborted)).toEqual([]);
+    } finally {
+      AbortSignal.prototype.addEventListener = addEventListener;
+      AbortSignal.prototype.removeEventListener = removeEventListener;
+    }
+    const cancelled = Promise.withResolvers<void>();
+    late.resolve(new Response(new ReadableStream({ cancel: () => cancelled.resolve() })));
+    await cancelled.promise;
+  }, 30_000);
+
   test("reports the database as failed when the Run database can't be read", async () => {
     const data = await volumeWithPhotos();
     const { server } = await serve(data, fakeImageModels([]).layer);

@@ -332,15 +332,25 @@ export async function startServer(
   const stopping = new AbortController();
   /** Downloads that stopping the server or a stall aborts, so no temp file is left open. */
   const download: Fetch = async (url, init) => {
-    stopping.signal.throwIfAborted();
-    const { promise: aborted, reject } = Promise.withResolvers<never>();
-    const onAbort = () => reject(stopping.signal.reason);
-    stopping.signal.addEventListener("abort", onAbort, { once: true });
     const signal = init?.signal ? AbortSignal.any([stopping.signal, init.signal]) : stopping.signal;
+    signal.throwIfAborted();
+    // Settles on either abort, even when an injected `fetchModels` ignores the signal, so
+    // no stalled attempt keeps a listener on the server-lifetime stop signal.
+    const { promise: aborted, reject } = Promise.withResolvers<never>();
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    const fetching = Promise.try(() => (fetchModels ?? fetch)(url, { signal }));
     try {
-      return await Promise.race([(fetchModels ?? fetch)(url, { signal }), aborted]);
+      return await Promise.race([fetching, aborted]);
+    } catch (error) {
+      // Nobody else sees a response that arrives after the abort: free its connection.
+      fetching.then(
+        (late) => late.body?.cancel().catch(() => undefined),
+        () => undefined,
+      );
+      throw error;
     } finally {
-      stopping.signal.removeEventListener("abort", onAbort);
+      signal.removeEventListener("abort", onAbort);
     }
   };
   /**
