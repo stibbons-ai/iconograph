@@ -138,7 +138,7 @@ export interface RunningServer {
    * Stop retrying the face models and abort a download in progress (an injected
    * `fetchModels` that ignores its signal only until its response arrives),
    * start no more restarts, stop listening, then close Mastra, the Run database
-   * and the Image Models. Cancelled Runs still unwinding get up to 10 s to record
+   * and the Image Models. Cancelled Runs still unwinding get up to 5 s to record
    * their Lanes `cancelled` first. Runs already running, or restarted by Mastra's
    * lease timer, are not cancelled: closing storage under them fails them, and
    * Mastra may log that.

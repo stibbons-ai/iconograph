@@ -17,7 +17,6 @@ import type {
   RunRequest,
 } from "@iconograph/domain";
 import { Mastra } from "@mastra/core/mastra";
-import type { MastraCompositeStore } from "@mastra/core/storage";
 import { Effect, Layer, Logger, ManagedRuntime, Schema } from "effect";
 import { runReport } from "./report";
 import { defaultRunConfig, type PhotoPaths, RunConfig } from "./run-steps";
@@ -27,12 +26,13 @@ import { CancelRecordings, createRunWorkflow, RUN_WORKFLOW_ID } from "./workflow
 
 export type { EstimateEvent, RunResult } from "./schemas";
 export { RUN_WORKFLOW_ID } from "./workflow";
+export { RunSnapshotError } from "./report";
 export type { PhotoPaths } from "./run-steps";
 export type { RunWarning } from "./warnings";
 export { nativeVendors, type OpenVendors, type VendorsResource } from "./vendors";
 
 /** How long closing waits for cancelled Runs to unwind and record their Lanes. */
-const CANCEL_SETTLE_TIMEOUT_MS = 10_000;
+const CANCEL_SETTLE_TIMEOUT_MS = 5_000;
 const decodeEvent = Schema.decodeUnknownOption(EstimateEvent);
 
 export interface RunApplicationOptions {
@@ -149,8 +149,7 @@ export async function createRunApplication(options: RunApplicationOptions) {
         );
       },
       /** The stored Run: Candidates, Outcomes, costs and stop reasons. */
-      report: async (runId: string) =>
-        runtime.runPromise(runReport(runId, await workflowCancelled(storage, runId))),
+      report: (runId: string) => runtime.runPromise(runReport(storage, runId)),
       /** Mastra's persisted snapshot of a Run's workflow. */
       async snapshot(runId: string) {
         const snapshot = await workflows.loadWorkflowSnapshot({
@@ -180,17 +179,6 @@ export class RunFailedError extends Error {
   }
 }
 
-/**
- * Whether Mastra stored the Run as cancelled. Its report then shows every Lane
- * without a stop reason as `cancelled`: recording them may have been cut off
- * (the process stopped while the Run's steps unwound).
- */
-async function workflowCancelled(storage: MastraCompositeStore, runId: string) {
-  const workflows = await workflowsStore(storage);
-  const snapshot = await workflows.loadWorkflowSnapshot({ workflowName: RUN_WORKFLOW_ID, runId });
-  return snapshot?.status === "canceled";
-}
-
 /** Read a stored Run's report without starting Mastra, the face models or any Image Model. */
 export async function readRunReport(databasePath: string, dataDirectory: string, runId: string) {
   const runtime = ManagedRuntime.make(
@@ -209,7 +197,7 @@ export async function readRunReport(databasePath: string, dataDirectory: string,
       );
       const storage = createLocalStore(databasePath);
       try {
-        return await runtime.runPromise(runReport(runId, await workflowCancelled(storage, runId)));
+        return await runtime.runPromise(runReport(storage, runId));
       } finally {
         await storage.close();
       }

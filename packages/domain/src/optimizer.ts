@@ -127,17 +127,18 @@ function largestRequest(targetLook: TargetLook, candidates: number): OptimizerRe
 const LARGEST_REQUEST_MARGIN = 0.01;
 
 /**
- * What a Run quotes for each of its Optimizer calls: the estimate of the
- * largest request it can send (`largestRequest`), plus a margin. It is no
+ * What a Run quotes for each of its Optimizer calls, as the other roles'
+ * estimates are: the estimate of the largest request it can send
+ * (`largestRequest`, whose usage it keeps), its cost plus a margin. It is no
  * lower than any realistic request's estimate, and far above a typical one.
  */
 export function quoteOptimizerCall(
   estimate: (request: OptimizerRequest) => CallEstimate,
   targetLook: TargetLook,
   candidates: number,
-): number {
-  const { micros } = estimate(largestRequest(targetLook, candidates));
-  return Math.ceil(micros * (1 + LARGEST_REQUEST_MARGIN));
+): CallEstimate {
+  const largest = estimate(largestRequest(targetLook, candidates));
+  return { ...largest, micros: Math.ceil(largest.micros * (1 + LARGEST_REQUEST_MARGIN)) };
 }
 
 /**
