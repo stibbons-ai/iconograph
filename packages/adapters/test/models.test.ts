@@ -11,10 +11,22 @@ import {
 } from "bun:test";
 import { heapSize } from "bun:jsc";
 import * as fsPromises from "node:fs/promises";
-import { mkdir, open, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import {
+  lutimes,
+  mkdir,
+  open,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { uptime } from "node:os";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { CleanupErrors } from "../src/errors";
 import {
   ensureModels,
   type EnsuredModel,
@@ -120,6 +132,15 @@ function rejectionOf(promise: Promise<unknown>): Promise<Error> {
     },
     (error: unknown) => error as Error,
   );
+}
+
+/** The prototype of `node:fs/promises` file handles (untyped), so a test can patch what downloads call. */
+async function fileHandlePrototype(directory: string) {
+  const probe = join(directory, "probe");
+  const handle = await open(probe, "w");
+  await handle.close();
+  await rm(probe);
+  return Object.getPrototypeOf(handle);
 }
 
 // The lock schema admits only HTTPS URLs, so locks for the plain-HTTP local
@@ -274,11 +295,7 @@ describe("ensureModels", () => {
   });
 
   test("the gate hashes stored bytes, so a short write is never accepted", async () => {
-    const probePath = join(directory, "probe");
-    const probe = await open(probePath, "w");
-    const fileHandle = Object.getPrototypeOf(probe);
-    await probe.close();
-    await rm(probePath);
+    const fileHandle = await fileHandlePrototype(directory);
     const write = fileHandle.write;
     // Simulate a short write (as near ENOSPC): every chunk loses its last byte on disk.
     fileHandle.write = function (this: unknown, chunk: Uint8Array) {
@@ -521,20 +538,22 @@ describe("ensureModels", () => {
     });
 
     test("time spent storing a chunk is no stall", async () => {
-      // Stands in for a slow disk: reading the first chunk's byteLength, which the download
-      // does only while storing it, lets twice the idle period pass, while the timer is paused.
-      const first = recognizer.slice(0, 500);
-      Object.defineProperty(first, "byteLength", {
-        get() {
-          jest.advanceTimersByTime(modelDownloadIdleTimeoutMs * 2);
-          return 500;
-        },
+      // Stands in for a slow disk: storing the first chunk lets twice the idle period pass.
+      const fileHandle = await fileHandlePrototype(directory);
+      const write = fileHandle.write;
+      let writes = 0;
+      const storing = spyOn(fileHandle, "write").mockImplementation(function (
+        this: unknown,
+        ...args: unknown[]
+      ) {
+        if (++writes === 1) jest.advanceTimersByTime(modelDownloadIdleTimeoutMs * 2);
+        return Reflect.apply(write, this, args);
       });
       const fetchSlowly: Fetch = async () =>
         new Response(
           new ReadableStream({
             start(controller) {
-              controller.enqueue(first);
+              controller.enqueue(recognizer.slice(0, 500));
               controller.enqueue(recognizer.slice(500));
               controller.close();
             },
@@ -548,9 +567,11 @@ describe("ensureModels", () => {
           ids: ["recognizer"],
           fetch: fetchSlowly,
         });
+        expect(writes).toBe(2);
         expect(new Uint8Array(await readFile(model!.path))).toEqual(recognizer);
       } finally {
         jest.useRealTimers();
+        storing.mockRestore();
       }
       expect(await readdir(directory)).toEqual(["recognizer.onnx"]);
     });
@@ -642,9 +663,8 @@ describe("ensureModels", () => {
       const crashed = tempOf("detector.onnx", gone);
       // Left by a version that named temp files without their owner.
       const legacy = `detector.onnx.${crypto.randomUUID()}.partial`;
-      const young = tempOf("detector.onnx", gone);
+      const young = [tempOf("detector.onnx", gone), `detector.onnx.${crypto.randomUUID()}.partial`];
       const keep = [
-        young,
         tempOf("recognizer.onnx", gone), // another model's
         `recognizer.onnx.${crypto.randomUUID()}.partial`, // another model's
         "detector.onnx.partial", // not writeFileAtomically's pattern
@@ -658,14 +678,100 @@ describe("ensureModels", () => {
         `xdetector.onnx.${crypto.randomUUID()}.partial`,
         "notes.txt",
       ];
+      // A stale-named symlink is no file: the sweep removes only regular files, never links.
+      const link = tempOf("detector.onnx", gone);
       await place(crashed, secondsAgo(10 * 60 + 5));
       await place(legacy, secondsAgo(10 * 60 + 5));
-      await place(young, secondsAgo(10 * 60 - 5));
-      for (const name of keep.slice(1)) await place(name, secondsAgo(60 * 60));
+      for (const name of young) await place(name, secondsAgo(10 * 60 - 5));
+      for (const name of keep) await place(name, secondsAgo(60 * 60));
+      await symlink("notes.txt", join(directory, link));
+      await lutimes(join(directory, link), secondsAgo(60 * 60), secondsAgo(60 * 60));
 
       await ensureModels({ lock, directory, ids: ["detector"] });
-      expect((await readdir(directory)).sort()).toEqual(["detector.onnx", ...keep].sort());
+      expect((await readdir(directory)).sort()).toEqual(
+        ["detector.onnx", ...young, ...keep, link].sort(),
+      );
     });
+
+    // A restarted container's server is PID 1 again, so its own process id proves nothing.
+    test("a stale temp file naming this process, which isn't writing it, is removed", async () => {
+      const crashed = tempOf("detector.onnx", process.pid);
+      await place(crashed, secondsAgo(60 * 60));
+      await ensureModels({ lock, directory, ids: ["detector"] });
+      expect(await readdir(directory)).toEqual(["detector.onnx"]);
+    });
+
+    // Only ESRCH proves a process gone: EPERM (PID 1, not ours) and an invalid id do not.
+    test.skipIf(process.pid === 1)(
+      "a stale temp file whose owner can't be probed is kept",
+      async () => {
+        const unprobeable = [tempOf("detector.onnx", 1), tempOf("detector.onnx", 99_999_999_999)];
+        for (const name of unprobeable) await place(name, secondsAgo(60 * 60));
+        await ensureModels({ lock, directory, ids: ["detector"] });
+        expect((await readdir(directory)).sort()).toEqual(["detector.onnx", ...unprobeable].sort());
+      },
+    );
+
+    test("this process's own live temp file is kept even before it was ever refreshed", async () => {
+      const held: ModelLock = { models: [weight("detector", "/silent.onnx", detector)] };
+      const entries = () => readdir(directory);
+      const live = ensureModels({ lock: held, directory, idleTimeoutMs: 20 * 60_000 });
+      try {
+        await until(async () => hits.get("/silent.onnx") === 1);
+        const [name] = await entries();
+        await utimes(join(directory, name!), secondsAgo(60 * 60), secondsAgo(60 * 60));
+
+        await ensureModels({ lock, directory, ids: ["detector"] });
+        expect((await entries()).sort()).toEqual(["detector.onnx", name!].sort());
+
+        gate.resolve();
+        const [model] = await live;
+        expect(model?.downloaded).toBe(true);
+        expect(await entries()).toEqual(["detector.onnx"]);
+      } finally {
+        gate.resolve();
+        await live.catch(() => undefined);
+      }
+    });
+
+    test.each([
+      ["EPERM", true],
+      ["ENOENT", false],
+    ])(
+      "a failed download carries its first refresh failure, unless ENOENT (%s, attached: %p)",
+      async (code, attached) => {
+        const refreshFailure = Object.assign(new Error(`${code}: refresh failed`), { code });
+        const handles = await fileHandlePrototype(directory);
+        const refreshed = Promise.withResolvers<void>();
+        spyOn(handles, "utimes").mockImplementation(async () => {
+          refreshed.resolve();
+          throw refreshFailure;
+        });
+        const fetched = Promise.withResolvers<void>();
+        const hangs: Fetch = (_, init) => {
+          fetched.resolve();
+          const { promise, reject } = Promise.withResolvers<Response>();
+          init!.signal!.addEventListener("abort", () => reject(init!.signal!.reason));
+          return promise;
+        };
+        jest.useFakeTimers();
+        const failure = rejectionOf(
+          ensureModels({ lock, directory, ids: ["detector"], fetch: hangs, idleTimeoutMs: 90_000 }),
+        );
+        await fetched.promise;
+        // One refresh fails, then the download stalls.
+        jest.advanceTimersByTime(60_000);
+        await refreshed.promise;
+        // Lets the refresh's rejection handler run before the stall.
+        for (let turn = 0; turn < 10; turn++) await Promise.resolve();
+        jest.advanceTimersByTime(30_000);
+        const error = (await failure) as Error & CleanupErrors;
+        expect(error.message).toStartWith(
+          `Model detector download from ${lock.models[0].url} stalled`,
+        );
+        expect(error.cleanupErrors ?? []).toEqual(attached ? [refreshFailure] : []);
+      },
+    );
 
     // A suspended process (SIGSTOP, a sleeping laptop) can't refresh its temp file, so age
     // alone never proves it was abandoned.

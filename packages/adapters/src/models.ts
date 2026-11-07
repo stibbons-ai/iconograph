@@ -2,7 +2,7 @@ import { lstat, mkdir, readdir, rm, utimes } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { Schema } from "effect";
 import bundledLock from "../models.lock.json";
-import { errorMessage } from "./errors";
+import { attachCleanupError, errorMessage } from "./errors";
 import { isTemporaryFileOf, writeFileAtomically } from "./files";
 
 /**
@@ -194,7 +194,9 @@ export async function ensureModels(options: EnsureModelsOptions): Promise<Ensure
       // renamed or removed, whatever its idle period and however long storing or verifying
       // takes, and names it with its process id. One unmodified for far longer whose process
       // is gone was left by a killed process; a suspended one can't refresh, but still runs.
-      // The `10 * idleTimeoutMs` term stays as the margin issue #18's triage set.
+      // This process's id proves nothing (a restarted container is PID 1 again): its own temp
+      // is live only while it writes it. The `10 * idleTimeoutMs` term stays as the margin
+      // issue #18's triage set.
       await removeStaleTemps(
         directory,
         model.file,
@@ -233,21 +235,45 @@ const partialSuffix = ".partial";
 const ownedPartialSuffix = (pid: number | string) => `.${pid}${partialSuffix}`;
 
 /**
+ * How many downloads in this process write each destination path (resolved) now,
+ * counted from before their temp file is opened until it is renamed or removed.
+ */
+const writing = new Map<string, number>();
+
+/**
+ * The owner process id `name` carries if it is a temp file of `file`: null for
+ * one without an owner, undefined for any other name.
+ */
+function tempOwner(name: string, file: string): number | null | undefined {
+  if (isTemporaryFileOf(name, file, partialSuffix)) return null;
+  const stem = name.slice(0, -partialSuffix.length);
+  const pid = stem.slice(stem.lastIndexOf(".") + 1);
+  return /^\d+$/.test(pid) && isTemporaryFileOf(name, file, ownedPartialSuffix(pid))
+    ? Number(pid)
+    : undefined;
+}
+
+/**
  * Best effort: remove `<file>.<uuid>.<pid>.partial` temp files in `directory` not
  * modified for `olderThanMs` whose process `pid` no longer runs, and
  * `<file>.<uuid>.partial` ones (left by versions that named no owner) by age
- * alone. Any other file is never touched, and a failure (e.g. another caller
- * removed it first) is ignored. Hosts sharing the folder from separate process id
- * namespaces (containers) can't see each other's processes and rely on the age.
+ * alone; one naming this process counts as live only while it writes `file`,
+ * otherwise by age alone. Any other file is never touched, and a failure (e.g.
+ * another caller removed it first) is ignored. Hosts sharing the folder from
+ * separate process id namespaces (containers) can't see each other's processes
+ * and rely on the age.
  */
 async function removeStaleTemps(directory: string, file: string, olderThanMs: number) {
   const cutoff = Date.now() - olderThanMs;
+  const destination = resolve(directory, file);
   const names = await readdir(directory).catch(() => []);
   for (const name of names) {
-    const pid = /\.(\d+)\.partial$/.exec(name)?.[1];
-    const owned = pid !== undefined && isTemporaryFileOf(name, file, ownedPartialSuffix(pid));
-    if (!owned && !isTemporaryFileOf(name, file, partialSuffix)) continue;
-    if (owned && isRunning(Number(pid))) continue;
+    const owner = tempOwner(name, file);
+    if (owner === undefined) continue;
+    // Checked per entry: a download in this process may start while the sweep awaits.
+    const live =
+      owner !== null && (owner === process.pid ? writing.has(destination) : isRunning(owner));
+    if (live) continue;
     const temp = join(directory, name);
     try {
       const stats = await lstat(temp);
@@ -318,12 +344,19 @@ async function download(
   );
   // Keeps the temp file younger than any sweep's threshold: through the open handle while
   // writing and syncing, by path once it is closed for verifying. Best effort: a failed
-  // refresh (e.g. the file was just renamed) never fails the download.
+  // refresh never fails the download; one other than ENOENT (the file was just renamed)
+  // may mean refreshing never works here, so a failing download carries the first.
   let refreshTemp: (now: Date) => Promise<void> = async () => undefined;
+  let refreshError: unknown;
   const heartbeat = setInterval(
-    () => refreshTemp(new Date()).catch(() => undefined),
+    () =>
+      refreshTemp(new Date()).catch((error: unknown) => {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") refreshError ??= error;
+      }),
     tempHeartbeatMs,
   );
+  const destination = resolve(path);
+  writing.set(destination, (writing.get(destination) ?? 0) + 1);
   let size = 0;
   try {
     await writeFileAtomically(
@@ -355,7 +388,7 @@ async function download(
               const { done, value: chunk } = await idle.guard(reader.read());
               if (done) break;
               // An empty chunk is no data: it must not renew the watchdog.
-              if (chunk.length === 0) continue;
+              if (chunk.byteLength === 0) continue;
               // Paused while the chunk is stored: a slow local disk is no network stall.
               idle.stop();
               size += chunk.byteLength;
@@ -399,12 +432,19 @@ async function download(
   } catch (error) {
     // A stall is the watchdog's reason, a ModelWeightError; the timer is paused while storing,
     // so a storage failure is never mistaken for one.
-    if (error instanceof ModelWeightError) throw error;
-    throw new ModelWeightError(
-      `Model ${model.id} download from ${model.url} to ${path} failed: ${errorMessage(error)}`,
-      { cause: error },
-    );
+    const failure =
+      error instanceof ModelWeightError
+        ? error
+        : new ModelWeightError(
+            `Model ${model.id} download from ${model.url} to ${path} failed: ${errorMessage(error)}`,
+            { cause: error },
+          );
+    if (refreshError !== undefined) attachCleanupError(failure, refreshError);
+    throw failure;
   } finally {
     clearInterval(heartbeat);
+    const writers = writing.get(destination)! - 1;
+    if (writers === 0) writing.delete(destination);
+    else writing.set(destination, writers);
   }
 }

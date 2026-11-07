@@ -167,8 +167,9 @@ are re-hashed on every use and never downloaded again once verified. A download 
 data for 30 s (headers or body) is aborted with an error naming the model and URL; a slow but
 progressing one is never cut off. A download names its temp file with its process id
 (`<file>.<uuid>.<pid>.partial`) and refreshes it every minute; the next download of that model
-removes one only once unmodified for 10 minutes and its process is gone (machines sharing the folder
-from separate process namespaces, e.g. containers, rely on the age alone). **Offline
+removes one only once unmodified for 10 minutes and its process is gone (its own process id counts
+as gone unless it is writing that file, since a restarted container is PID 1 again; machines sharing
+the folder from separate process namespaces rely on the age alone). **Offline
 machines**: copy the locked files (same names) into `<data dir>/models` by any means; they are
 verified like downloads.
 **A checksum mismatch** is a hard error naming the model, path, expected and actual hash, and the
