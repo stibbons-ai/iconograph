@@ -1,4 +1,4 @@
-import { lstat, mkdir, readdir, rm } from "node:fs/promises";
+import { lstat, mkdir, readdir, rm, utimes } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { Schema } from "effect";
 import bundledLock from "../models.lock.json";
@@ -112,6 +112,9 @@ export const modelDownloadIdleTimeoutMs = 30_000;
  */
 const staleTempMinimumMs = 10 * 60_000;
 
+/** How often a download refreshes its temp file's mtime, far inside the staleness threshold. */
+const tempHeartbeatMs = staleTempMinimumMs / 10;
+
 /** The longest delay `setTimeout` honours; a longer one fires at once. */
 const maxTimerMs = 2 ** 31 - 1;
 
@@ -187,10 +190,9 @@ export async function ensureModels(options: EnsureModelsOptions): Promise<Ensure
           `Model ${model.id} is missing at ${path}; it is never downloaded. Build it with \`${model.build.command}\` (pass the same --data-dir).`,
         );
       }
-      // A live writer's temp file is touched by every chunk or aborted within the idle
-      // period while waiting on the network; the timer pauses while a chunk is stored, or
-      // the file synced and verified, which the 10 × / 10 minute margin covers. So one
-      // unmodified for far longer was left by a killed process.
+      // A live writer refreshes its temp file's mtime every `tempHeartbeatMs` until it is
+      // renamed or removed, whatever its idle period and however long storing or verifying
+      // takes. So one unmodified for far longer was left by a killed process.
       await removeStaleTemps(
         directory,
         model.file,
@@ -293,11 +295,20 @@ async function download(
       `Model ${model.id} download from ${model.url} stalled: no data for ${idleTimeoutMs / 1000} s`,
     ),
   );
+  // Keeps the temp file younger than any sweep's threshold: through the open handle while
+  // writing and syncing, by path once it is closed for verifying. Best effort: a failed
+  // refresh (e.g. the file was just renamed) never fails the download.
+  let refreshTemp: (now: Date) => Promise<void> = async () => undefined;
+  const heartbeat = setInterval(
+    () => refreshTemp(new Date()).catch(() => undefined),
+    tempHeartbeatMs,
+  );
   let size = 0;
   try {
     await writeFileAtomically(
       path,
       async (handle) => {
+        refreshTemp = (now) => handle.utimes(now, now);
         try {
           idle.touch();
           const fetching = fetchModel(model.url, { signal: idle.signal });
@@ -346,6 +357,7 @@ async function download(
       {
         suffix: partialSuffix,
         verify: async (temp) => {
+          refreshTemp = (now) => utimes(temp, now, now);
           if (size !== model.size) {
             throw new ModelWeightError(
               `Model ${model.id} download from ${model.url} ended after ${size} of ${model.size} bytes`,
@@ -369,5 +381,7 @@ async function download(
       `Model ${model.id} download from ${model.url} to ${path} failed: ${errorMessage(error)}`,
       { cause: error },
     );
+  } finally {
+    clearInterval(heartbeat);
   }
 }

@@ -1,11 +1,22 @@
-import { afterAll, afterEach, beforeEach, describe, expect, jest, spyOn, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  jest,
+  mock,
+  spyOn,
+  test,
+} from "bun:test";
 import { heapSize } from "bun:jsc";
 import * as fsPromises from "node:fs/promises";
-import { mkdir, open, readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdir, open, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   ensureModels,
+  type EnsuredModel,
   type Fetch,
   modelsDirectory,
   readModelLock,
@@ -442,7 +453,7 @@ describe("ensureModels", () => {
       expect(peak).toBeLessThan(large.byteLength / 4);
     }, 30_000);
 
-    test("an idle period that setTimeout can't honour is rejected before any request", async () => {
+    test("an idle period setTimeout can't honour is rejected before any request; 2^31 - 1 ms is accepted", async () => {
       for (const invalid of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 31]) {
         await expect(ensureModels({ lock, directory, idleTimeoutMs: invalid })).rejects.toThrow(
           `idleTimeoutMs must be a positive number of milliseconds up to 2147483647; got ${invalid}`,
@@ -579,6 +590,11 @@ describe("ensureModels", () => {
 
   describe("stale temp files", () => {
     const secondsAgo = (seconds: number) => new Date(Date.now() - seconds * 1_000);
+    // A test that times out is abandoned before its `finally`, so restore spies and timers here too.
+    afterEach(() => {
+      mock.restore();
+      jest.useRealTimers();
+    });
     async function place(name: string, age: Date) {
       await writeFile(join(directory, name), "partial");
       await utimes(join(directory, name), age, age);
@@ -634,6 +650,83 @@ describe("ensureModels", () => {
       await place(crashed, secondsAgo(20 * 60 + 5));
       await ensureModels({ lock, directory, ids: ["detector"], idleTimeoutMs: 120_000 });
       expect((await readdir(directory)).sort()).toEqual(["detector.onnx", kept].sort());
+    });
+
+    /**
+     * Holds the live caller `start` where `held` says, ages its temp file an hour and lets one
+     * refresh interval pass, then a caller with the default idle period sweeps and downloads the
+     * same model; once released, the live caller still completes with a verified file.
+     */
+    async function sweepBesideLiveDownload(
+      start: () => Promise<EnsuredModel[]>,
+      held: () => Promise<unknown>,
+      release: () => void,
+    ) {
+      const entries = () => readdir(directory);
+      jest.useFakeTimers();
+      const live = start();
+      try {
+        await held();
+        const name = (await entries())[0]!;
+        const temp = join(directory, name);
+        const hourAgo = new Date(Date.now() - 60 * 60_000);
+        await utimes(temp, hourAgo, hourAgo);
+        jest.advanceTimersByTime(60_000);
+        await settled(async () => (await stat(temp)).mtimeMs > hourAgo.getTime() + 30 * 60_000);
+
+        const [second] = await ensureModels({ lock, directory, ids: ["detector"] });
+        expect(second?.downloaded).toBe(true);
+        expect((await entries()).sort()).toEqual(["detector.onnx", name].sort());
+
+        release();
+        const [model] = await live;
+        expect(model?.downloaded).toBe(true);
+        expect(new Uint8Array(await readFile(model!.path))).toEqual(detector);
+        expect(await entries()).toEqual(["detector.onnx"]);
+      } finally {
+        jest.useRealTimers();
+        release();
+        await live.catch(() => undefined);
+      }
+    }
+    // Fake timers freeze Bun.sleep, so poll on the event loop instead of `until`.
+    async function settled(condition: () => Promise<boolean>) {
+      for (let attempt = 0; !(await condition()); attempt++) {
+        if (attempt > 10_000) throw new Error("Condition not reached");
+        const { promise, resolve } = Promise.withResolvers<void>();
+        setImmediate(resolve);
+        await promise;
+      }
+    }
+
+    test("a live download keeps its temp file fresh, so another caller's sweep never removes it", async () => {
+      // Held before its headers; its own idle period outlasts a default caller's threshold.
+      const held: ModelLock = { models: [weight("detector", "/silent.onnx", detector)] };
+      await sweepBesideLiveDownload(
+        () => ensureModels({ lock: held, directory, idleTimeoutMs: 20 * 60_000 }),
+        () => settled(async () => hits.get("/silent.onnx") === 1),
+        () => gate.resolve(),
+      );
+    });
+
+    test("a verified temp file stays fresh after its handle closes, until it is renamed", async () => {
+      const realRename = fsPromises.rename;
+      const renaming = Promise.withResolvers<void>();
+      const released = Promise.withResolvers<void>();
+      let renames = 0;
+      // Holds only the live caller's rename, which runs after the file is closed and verified.
+      spyOn(fsPromises, "rename").mockImplementation(async (from, to) => {
+        if (++renames === 1) {
+          renaming.resolve();
+          await released.promise;
+        }
+        return realRename(from, to);
+      });
+      await sweepBesideLiveDownload(
+        () => ensureModels({ lock, directory, ids: ["detector"] }),
+        () => renaming.promise,
+        () => released.resolve(),
+      );
     });
   });
 });
