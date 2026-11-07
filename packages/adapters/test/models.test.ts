@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeEach, describe, expect, jest, test } from "bun:test";
+import { heapSize } from "bun:jsc";
 import { mkdir, open, readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,7 +16,7 @@ import {
   type ModelLock,
   modelDownloadIdleTimeoutMs,
 } from "../src/models";
-import { main } from "../src/models-cli";
+import { main, run } from "../src/models-cli";
 import { sha256 } from "./sha256";
 import { temporaryDirectories } from "./temporary-directory";
 import { until } from "./until";
@@ -23,6 +24,8 @@ import { until } from "./until";
 // Larger than one stream chunk so streaming to disk is exercised.
 const detector = crypto.getRandomValues(new Uint8Array(200_000));
 const recognizer = crypto.getRandomValues(new Uint8Array(1_000));
+// Several times the memory a streaming download may hold at once.
+const large = new Uint8Array(32 * 2 ** 20).fill(7);
 const hits = new Map<string, number>();
 // Holds /gated.onnx after its first chunk, and /silent.onnx before its headers, until a
 // test releases it.
@@ -36,6 +39,7 @@ const server = Bun.serve({
     hits.set(path, (hits.get(path) ?? 0) + 1);
     if (path === "/detector.onnx") return new Response(detector);
     if (path === "/recognizer.onnx") return new Response(recognizer);
+    if (path === "/large.onnx") return new Response(large);
     if (path === "/short.onnx") return new Response(detector.subarray(0, 1_000));
     if (path === "/gated.onnx") {
       return new Response(
@@ -375,11 +379,69 @@ describe("ensureModels", () => {
       expect(await readdir(directory)).toEqual(["recognizer.onnx"]);
     });
 
-    test("defaults to 30 s, and aborts even a fetch that ignores the signal", async () => {
+    // Bun.serve sends headers only with the first body chunk, so a raw socket separates them.
+    test("headers arriving count as data: the wait for the first chunk starts afresh", async () => {
+      const slow = Bun.listen({
+        hostname: "127.0.0.1",
+        port: 0,
+        socket: {
+          async data(socket) {
+            await Bun.sleep(idleTimeoutMs * 0.6);
+            socket.write(
+              `HTTP/1.1 200 OK\r\nContent-Length: ${recognizer.byteLength}\r\nConnection: close\r\n\r\n`,
+            );
+            await Bun.sleep(idleTimeoutMs * 0.6);
+            socket.write(recognizer);
+            socket.end();
+          },
+        },
+      });
+      try {
+        const url = `http://127.0.0.1:${slow.port}/recognizer.onnx`;
+        const [model] = await ensureModels({
+          lock: { models: [weight("recognizer", "/", recognizer, { url })] },
+          directory,
+          idleTimeoutMs,
+        });
+        expect(new Uint8Array(await readFile(model!.path))).toEqual(recognizer);
+      } finally {
+        slow.stop(true);
+      }
+    });
+
+    test("holds only a few chunks in memory, not the whole body", async () => {
+      const big: ModelLock = { models: [weight("large", "/large.onnx", large)] };
+      Bun.gc(true);
+      const base = heapSize();
+      let peak = 0;
+      const sampler = setInterval(() => {
+        Bun.gc(true);
+        peak = Math.max(peak, heapSize() - base);
+      }, 10);
+      try {
+        await ensureModels({ lock: big, directory, idleTimeoutMs: 5_000 });
+      } finally {
+        clearInterval(sampler);
+      }
+      expect(peak).toBeLessThan(large.byteLength / 4);
+    }, 30_000);
+
+    test("an idle period that setTimeout can't honour is rejected before any request", async () => {
+      for (const invalid of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 31]) {
+        await expect(ensureModels({ lock, directory, idleTimeoutMs: invalid })).rejects.toThrow(
+          `idleTimeoutMs must be a positive number of milliseconds up to 2147483647; got ${invalid}`,
+        );
+      }
+      expect(hits.size).toBe(0);
+      expect(await readdir(directory)).toEqual([]);
+    });
+
+    test("defaults to 30 s, aborts even a fetch that ignores the signal, and frees its late response", async () => {
       const fetched = Promise.withResolvers<AbortSignal>();
+      const late = Promise.withResolvers<Response>();
       const ignoresSignal: Fetch = (_, init) => {
         fetched.resolve(init!.signal!);
-        return new Promise<Response>(() => undefined);
+        return late.promise;
       };
       jest.useFakeTimers();
       try {
@@ -395,6 +457,37 @@ describe("ensureModels", () => {
       } finally {
         jest.useRealTimers();
       }
+      const cancelled = Promise.withResolvers<void>();
+      late.resolve(new Response(new ReadableStream({ cancel: () => cancelled.resolve() })));
+      await cancelled.promise;
+      expect(await readdir(directory)).toEqual([]);
+    });
+
+    test("time spent storing a chunk is no stall, and a storage error keeps its cause", async () => {
+      // Stands in for a slow disk: reading the chunk's size lets twice the idle period pass,
+      // and the chunk is no byte buffer, so storing it fails.
+      const unstorable = {
+        get byteLength() {
+          jest.advanceTimersByTime(modelDownloadIdleTimeoutMs * 2);
+          return 1;
+        },
+      };
+      const fetchUnstorable: Fetch = async () =>
+        new Response(new ReadableStream({ start: (controller) => controller.enqueue(unstorable) }));
+      jest.useFakeTimers();
+      let failure: unknown;
+      try {
+        await ensureModels({ lock, directory, ids: ["detector"], fetch: fetchUnstorable }).catch(
+          (error: unknown) => (failure = error),
+        );
+      } finally {
+        jest.useRealTimers();
+      }
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toStartWith(
+        `Model detector download from ${lock.models[0].url} to ${join(directory, "detector.onnx")} failed: `,
+      );
+      expect((failure as Error).cause).toBeInstanceOf(TypeError);
       expect(await readdir(directory)).toEqual([]);
     });
   });
@@ -592,6 +685,37 @@ describe("models:fetch", () => {
     expect(help).toContain("ICONOGRAPH_DATA_DIR");
     await expect(capture(["--unknown"])).rejects.toThrow();
     await expect(capture(["extra"])).rejects.toThrow("Unexpected arguments");
+  });
+
+  test("walkthrough: a stalled download fails with the reason and leaves nothing; a slow one succeeds", async () => {
+    let stdout = "";
+    let stderr = "";
+    const operator = {
+      idleTimeoutMs: 150,
+      stdout: (text: string) => (stdout += text),
+      stderr: (text: string) => (stderr += text),
+    };
+    const models = join(directory, "models");
+    const gated: ModelLock = { models: [weight("detector", "/gated.onnx", detector)] };
+    expect(await run(["--data-dir", directory], { ...operator, lock: gated })).toBe(1);
+    expect(JSON.parse(stderr).error).toContain(
+      `Model detector download from ${gated.models[0].url} stalled: no data for 0.15 s`,
+    );
+    expect(stdout).toBe("");
+    expect(await readdir(models)).toEqual([]);
+
+    const trickle: ModelLock = { models: [weight("recognizer", "/trickle.onnx", recognizer)] };
+    expect(await run(["--data-dir", directory], { ...operator, lock: trickle })).toBe(0);
+    expect(JSON.parse(stdout).models).toEqual([
+      {
+        id: "recognizer",
+        path: join(models, "recognizer.onnx"),
+        sha256: sha256(recognizer),
+        downloaded: true,
+      },
+    ]);
+    expect(new Uint8Array(await readFile(join(models, "recognizer.onnx")))).toEqual(recognizer);
+    expect(await readdir(models)).toEqual(["recognizer.onnx"]);
   });
 
   // The root script, run as an operator would; neither case can reach the network.

@@ -1,9 +1,10 @@
 import { Database } from "bun:sqlite";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, jest, test } from "bun:test";
 import { copyFile, mkdir, rm, symlink } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  modelDownloadIdleTimeoutMs,
   modelsDirectory,
   NativeImageModels,
   readModelLock,
@@ -76,7 +77,7 @@ async function serve(
     "modelsRetryMs" | "databaseProbe" | "sleep" | "listActiveRuns" | "lookupRun"
   > & {
     /** `null`: the production download (global `fetch`). */
-    fetchModels?: ((url: string) => Promise<Response>) | null;
+    fetchModels?: ServerDependencies["fetchModels"] | null;
     hostname?: string;
     judges?: Layer.Layer<Judges>;
     optimizers?: Layer.Layer<Optimizers>;
@@ -390,6 +391,41 @@ describe("HTTP server with the fake Image Model", () => {
       globalThis.fetch = realFetch;
     }
     expect(signals[0]?.aborted).toBe(true);
+  }, 30_000);
+
+  test("a stalled download is aborted through the signal the server passes on", async () => {
+    const data = await temporaryDirectory();
+    const signals: AbortSignal[] = [];
+    const secondAttempt = Promise.withResolvers<void>();
+    const retry = Promise.withResolvers<void>();
+    const { server, logged } = await serve(data, fakeImageModels([]).layer, {
+      // The first attempt fails at once, so the stalled second one runs on fake timers.
+      sleep: (_, signal) => {
+        signal.addEventListener("abort", () => retry.resolve(), { once: true });
+        return retry.promise;
+      },
+      fetchModels: (_, init) => {
+        signals.push(init!.signal!);
+        if (signals.length === 1) return Promise.reject(new Error("network down"));
+        secondAttempt.resolve();
+        return new Promise<Response>(() => {});
+      },
+    });
+    await logged((line) => String(line.error).includes("network down"));
+    jest.useFakeTimers();
+    try {
+      retry.resolve();
+      await secondAttempt.promise;
+      const stalled = signals[1]!;
+      jest.advanceTimersByTime(modelDownloadIdleTimeoutMs - 1);
+      expect(stalled.aborted).toBe(false);
+      jest.advanceTimersByTime(1);
+      expect(stalled.aborted).toBe(true);
+    } finally {
+      jest.useRealTimers();
+    }
+    await logged((line) => String(line.error).includes("stalled: no data for 30 s"));
+    expect((await fetch(new URL("/health", server.url))).status).toBe(503);
   }, 30_000);
 
   test("reports the database as failed when the Run database can't be read", async () => {

@@ -20,14 +20,17 @@ it with the command in its lock entry (bun run models:export-facenet).
 Errors print JSON to stderr and exit nonzero.
 `;
 
-/** Test seam: the shipped lock admits only HTTPS, so tests inject one for a local server. */
+/** Test seams: the shipped lock admits only HTTPS, so tests inject one for a local server. */
 export interface ModelsCliDependencies {
   lock?: ModelLock;
+  /** Test-sized idle period; operators always get the default. */
+  idleTimeoutMs?: number;
   stdout?: (text: string) => void;
+  stderr?: (text: string) => void;
 }
 
 export async function main(args: string[], dependencies: ModelsCliDependencies = {}) {
-  const { stdout = (text) => process.stdout.write(text) } = dependencies;
+  const { stdout = (text) => process.stdout.write(text), idleTimeoutMs } = dependencies;
   const { values, positionals } = parseArgs({
     args,
     allowPositionals: true,
@@ -44,15 +47,25 @@ export async function main(args: string[], dependencies: ModelsCliDependencies =
   if (positionals.length > 0) throw new Error("Unexpected arguments; use --help for usage");
   const directory = modelsDirectory(resolveDataDirectory(values["data-dir"]));
   const lock = dependencies.lock ?? readModelLock();
-  const models = await ensureModels({ lock, directory, ids: downloadableModelIds(lock) });
+  const models = await ensureModels({
+    lock,
+    directory,
+    ids: downloadableModelIds(lock),
+    ...(idleTimeoutMs !== undefined && { idleTimeoutMs }),
+  });
   stdout(`${JSON.stringify({ directory, models })}\n`);
 }
 
-if (import.meta.main) {
+/** Run as the `models:fetch` script does: failures print JSON to stderr; returns the exit code. */
+export async function run(args: string[], dependencies: ModelsCliDependencies = {}) {
+  const { stderr = (text) => process.stderr.write(text) } = dependencies;
   try {
-    await main(process.argv.slice(2));
+    await main(args, dependencies);
+    return 0;
   } catch (error) {
-    process.stderr.write(errorLine(error));
-    process.exitCode = 1;
+    stderr(errorLine(error));
+    return 1;
   }
 }
+
+if (import.meta.main) process.exitCode = await run(process.argv.slice(2));

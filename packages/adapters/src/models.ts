@@ -108,6 +108,9 @@ export const modelDownloadIdleTimeoutMs = 30_000;
 /** A `.partial` temp file of a model is stale, and removed, once unmodified this long. */
 const staleTempMinimumMs = 10 * 60_000;
 
+/** The longest delay `setTimeout` honours; a longer one fires at once. */
+const maxTimerMs = 2 ** 31 - 1;
+
 export interface EnsureModelsOptions {
   /** Usually `readModelLock()`. */
   lock: ModelLock;
@@ -142,6 +145,11 @@ export async function ensureModels(options: EnsureModelsOptions): Promise<Ensure
     fetch: fetchModel = fetch,
     idleTimeoutMs = modelDownloadIdleTimeoutMs,
   } = options;
+  if (!Number.isFinite(idleTimeoutMs) || idleTimeoutMs <= 0 || idleTimeoutMs > maxTimerMs) {
+    throw new Error(
+      `idleTimeoutMs must be a positive number of milliseconds up to ${maxTimerMs}; got ${idleTimeoutMs}`,
+    );
+  }
   const models = options.ids
     ? options.ids.map((id) => {
         const model = lock.models.find((candidate) => candidate.id === id);
@@ -232,25 +240,30 @@ async function removeStaleTemps(directory: string, file: string, olderThanMs: nu
 /**
  * Aborts `signal` with `reason` once `touch` was not called for `ms`; `guard`
  * makes a promise reject with `reason` too, even when its source ignores the
- * signal. `stop` must run on every exit so no timer outlives the download.
+ * signal. `stop` pauses the timer and must run on every exit so no timer
+ * outlives the download.
  */
 function idleWatchdog(ms: number, reason: Error) {
   const controller = new AbortController();
-  const { promise: aborted, reject } = Promise.withResolvers<never>();
-  aborted.catch(() => undefined);
+  const { signal } = controller;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const stop = () => clearTimeout(timer);
   return {
-    signal: controller.signal,
+    signal,
     touch() {
       stop();
-      timer = setTimeout(() => {
-        reject(reason);
-        controller.abort(reason);
-      }, ms);
+      timer = setTimeout(() => controller.abort(reason), ms);
     },
     stop,
-    guard: <A>(promise: Promise<A>) => Promise.race([promise, aborted]),
+    // The listener is removed once `source` settles, so nothing keeps its value alive.
+    guard<A>(source: Promise<A>): Promise<A> {
+      const { promise, resolve, reject } = Promise.withResolvers<A>();
+      const onAbort = () => reject(signal.reason);
+      if (signal.aborted) onAbort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+      source.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+      return promise;
+    },
   };
 }
 
@@ -258,7 +271,7 @@ function idleWatchdog(ms: number, reason: Error) {
  * Stream into a temp file in the same directory, capped at the locked size, then
  * hash the stored file and rename only after it verifies, so no caller ever sees
  * a partial or unverified file. Receiving nothing for `idleTimeoutMs` (headers
- * or body) aborts the request.
+ * or body) aborts the request; time spent storing a chunk does not count.
  */
 async function download(
   model: DownloadedWeight,
@@ -279,7 +292,16 @@ async function download(
       async (handle) => {
         try {
           idle.touch();
-          const response = await idle.guard(fetchModel(model.url, { signal: idle.signal }));
+          const fetching = fetchModel(model.url, { signal: idle.signal });
+          const response = await idle.guard(fetching).catch((error: unknown) => {
+            // A fetch that ignores the signal may still answer: free that connection.
+            fetching.then(
+              (late) => late.body?.cancel().catch(() => undefined),
+              () => undefined,
+            );
+            throw error;
+          });
+          idle.touch();
           if (!response.ok || !response.body) {
             await response.body?.cancel().catch(() => undefined);
             throw new ModelWeightError(
@@ -291,7 +313,8 @@ async function download(
             for (;;) {
               const { done, value: chunk } = await idle.guard(reader.read());
               if (done) break;
-              idle.touch();
+              // Paused while the chunk is stored: a slow local disk is no network stall.
+              idle.stop();
               size += chunk.byteLength;
               if (size > model.size) {
                 throw new ModelWeightError(
@@ -299,6 +322,7 @@ async function download(
                 );
               }
               await handle.write(chunk);
+              idle.touch();
             }
           } catch (error) {
             // Frees the connection; a fetch that honoured the signal already errored the body.
@@ -328,9 +352,9 @@ async function download(
       },
     );
   } catch (error) {
+    // A stall is the watchdog's reason, a ModelWeightError; the timer is paused while storing,
+    // so a storage failure is never mistaken for one.
     if (error instanceof ModelWeightError) throw error;
-    // A stall that fired during a write surfaces later as the fetch's own AbortError.
-    if (idle.signal.aborted) throw idle.signal.reason;
     throw new ModelWeightError(
       `Model ${model.id} download from ${model.url} to ${path} failed: ${errorMessage(error)}`,
       { cause: error },
