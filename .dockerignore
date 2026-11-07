@@ -19,3 +19,4 @@ dist
 packages/*/test
 scripts/*.test.ts
 docs
+vendor

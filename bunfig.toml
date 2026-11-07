@@ -7,3 +7,7 @@ exact = true
 # hardening against supply chain attacks: let's not allow installing anything
 # younger than 3 days. we can add excludes, when necessary.
 minimumReleaseAge = 259200  # 3 days in seconds
+
+[test]
+# vendor/ holds read-only reference repos (git subtrees) with their own test suites.
+pathIgnorePatterns = ["vendor/**"]
