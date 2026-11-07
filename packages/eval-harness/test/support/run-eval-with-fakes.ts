@@ -6,7 +6,7 @@
  * test tree, so no production entry point or environment variable can select
  * the fakes. FAKE_IMAGE_SCRIPT is the Image Model's script (JSON).
  */
-import { errorLine } from "@iconograph/adapters";
+import { runCommand } from "@iconograph/adapters";
 import { realFaceEmbedder, realHeldOutEmbedder } from "../../../adapters/test/face-models";
 import { type FakeScript, fakeImageModels } from "../../../server/test/support/fake-image-models";
 import { judgesOnFakeVendors } from "../../../server/test/support/fake-judges";
@@ -15,8 +15,8 @@ import { main } from "../../src/cli";
 
 const script: FakeScript = JSON.parse(process.env.FAKE_IMAGE_SCRIPT ?? "[]");
 
-try {
-  await main(process.argv.slice(2), {
+await runCommand((args) =>
+  main(args, {
     vendors: async () => ({
       imageModels: fakeImageModels(script).layer,
       judges: judgesOnFakeVendors({
@@ -29,8 +29,5 @@ try {
     faceEmbedder: () => realFaceEmbedder(),
     heldOutEmbedder: () => realHeldOutEmbedder(),
     retryPolicy: { maxRetries: 2, baseDelayMs: 0 },
-  });
-} catch (error) {
-  process.stderr.write(errorLine(error));
-  process.exitCode = 1;
-}
+  }),
+);

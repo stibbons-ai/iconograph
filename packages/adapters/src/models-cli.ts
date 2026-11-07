@@ -1,6 +1,6 @@
 import { parseArgs } from "node:util";
+import { runCommand, runMain } from "./command";
 import { modelsDirectory, resolveDataDirectory } from "./data-directory";
-import { errorLine } from "./errors";
 import { downloadableModelIds, ensureModels, readModelLock, type ModelLock } from "./models";
 
 const help = `Fetch and verify every downloadable locked face-model weight file
@@ -60,15 +60,8 @@ export async function main(args: string[], dependencies: ModelsCliDependencies =
 }
 
 /** Run as the `models:fetch` script does: failures print JSON to stderr; returns the exit code. */
-export async function run(args: string[], dependencies: ModelsCliDependencies = {}) {
-  const { stderr = (text) => process.stderr.write(text) } = dependencies;
-  try {
-    await main(args, dependencies);
-    return 0;
-  } catch (error) {
-    stderr(errorLine(error));
-    return 1;
-  }
+export function run(args: string[], dependencies: ModelsCliDependencies = {}): Promise<0 | 1> {
+  return runMain((input) => main(input, dependencies), args, { stderr: dependencies.stderr });
 }
 
-if (import.meta.main) process.exitCode = await run(process.argv.slice(2));
+if (import.meta.main) await runCommand(main);

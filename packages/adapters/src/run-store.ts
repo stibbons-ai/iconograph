@@ -19,11 +19,11 @@ import {
   SettledCallKind,
   toMicros,
 } from "@iconograph/domain";
-import { type Client, createClient, type InValue, type Row } from "@libsql/client";
+import type { Client, InValue, Row } from "@libsql/client";
 import { Context, Data, Effect, Layer, Schema, Semaphore } from "effect";
 import { codeOf, errorMessage } from "./errors";
+import { openLocalClient } from "./local-database";
 import { ReferencePhotoReport } from "./reference-photos";
-import { localDatabaseUrl } from "./storage";
 
 /** How long one statement waits, synchronously, on a lock held elsewhere. */
 const BUSY_WAIT_MS = 50;
@@ -507,21 +507,16 @@ export const LibsqlRunStore = (databasePath: string, options: LibsqlRunStoreOpti
               });
               if (!info.isFile()) throw new Error("not a database file");
             }
-            const created = createClient({
-              url: localDatabaseUrl(databasePath),
-              timeout: BUSY_WAIT_MS,
-            });
-            const client = options.wrapClient?.(created) ?? created;
-            try {
-              await retryWhileLocked(client, () => rejectOutdatedTables(client));
-              if (!options.readOnly) {
-                await retryWhileLocked(client, () => client.executeMultiple(schema));
-              }
-            } catch (error) {
-              client.close();
-              throw error;
-            }
-            return client;
+            return openLocalClient(
+              databasePath,
+              async (client) => {
+                await retryWhileLocked(client, () => rejectOutdatedTables(client));
+                if (!options.readOnly) {
+                  await retryWhileLocked(client, () => client.executeMultiple(schema));
+                }
+              },
+              { busyTimeoutMs: BUSY_WAIT_MS, wrapClient: options.wrapClient },
+            );
           },
           catch: (error) =>
             new RunStoreError({

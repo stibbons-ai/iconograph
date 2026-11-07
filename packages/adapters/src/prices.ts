@@ -1,5 +1,4 @@
 import { mkdir } from "node:fs/promises";
-import { pathToFileURL } from "node:url";
 import {
   DateString,
   needsRefresh,
@@ -11,10 +10,10 @@ import {
   type PriceQuote,
   type Unpriced,
 } from "@iconograph/domain";
-import { createClient } from "@libsql/client";
 import { Data, Effect, Schema } from "effect";
 import bundledSnapshot from "../litellm-prices.snapshot.json";
 import { pricesDatabase } from "./data-directory";
+import { openLocalClient } from "./local-database";
 
 /** LiteLLM's public price data on `main`: deliberately unpinned, so prices stay current. */
 export const litellmPricesUrl =
@@ -177,17 +176,12 @@ export async function openPriceSource(options: PriceSourceOptions): Promise<Pric
   // An injected snapshot is validated like the bundled one.
   const snapshot = decodePriceSnapshot(options.snapshot ?? bundledSnapshot);
   await mkdir(options.dataDirectory, { recursive: true });
-  const client = createClient({
-    url: pathToFileURL(pricesDatabase(options.dataDirectory)).href,
+  const client = await openLocalClient(
+    pricesDatabase(options.dataDirectory),
+    (created) => created.executeMultiple(schema),
     // A server and the CLI may share the file; wait for a lock instead of failing at once.
-    timeout: 5_000,
-  });
-  try {
-    await client.executeMultiple(schema);
-  } catch (error) {
-    client.close();
-    throw error;
-  }
+    { busyTimeoutMs: 5_000 },
+  );
   const snapshotAsOf = new Date(snapshot.fetchedAt);
 
   async function fetchedAt(): Promise<Date | undefined> {

@@ -2,8 +2,9 @@ import { mkdir, open, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { REPOSITORY_ROOT } from "./cli-options";
+import { runCommand } from "./command";
 import { modelsDirectory, resolveDataDirectory } from "./data-directory";
-import { errorLine, errorMessage } from "./errors";
+import { errorMessage } from "./errors";
 import { writeFileAtomically } from "./files";
 import { hashFile, type ModelLock, readModelLock } from "./models";
 
@@ -128,11 +129,4 @@ export async function main(args: string[], dependencies: ModelsExportCliDependen
   stdout(`${JSON.stringify({ id: model.id, path, sha256: model.sha256, built: true })}\n`);
 }
 
-if (import.meta.main) {
-  try {
-    await main(process.argv.slice(2));
-  } catch (error) {
-    process.stderr.write(errorLine(error));
-    process.exitCode = 1;
-  }
-}
+if (import.meta.main) await runCommand(main);

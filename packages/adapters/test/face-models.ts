@@ -75,15 +75,3 @@ export async function dataVolume(
   await symlink(await verifiedModelsDirectory(ids), join(data, "models"));
   return data;
 }
-
-/** Run a CLI module (`src/<name>`) as its own Bun process, with stdout and stderr piped. */
-export const spawnCli = (name: string, args: readonly string[]) =>
-  Bun.spawn(
-    [process.execPath, fileURLToPath(new URL(`../src/${name}`, import.meta.url)), ...args],
-    {
-      // The current environment, so a test's changes to it (e.g. cleaned GIT_*) reach the CLI.
-      env: process.env,
-      stdout: "pipe",
-      stderr: "pipe",
-    },
-  );
