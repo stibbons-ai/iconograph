@@ -43,6 +43,7 @@ export { openaiCapabilities } from "./openai";
 export {
   downloadableModelIds,
   ensureModels,
+  modelDownloadIdleTimeoutMs,
   readModelLock,
   type EnsuredModel,
   type Fetch,

@@ -41,3 +41,14 @@ export async function writeFileAtomically(
     throw error;
   }
 }
+
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** Whether `name` is a temp file `writeFileAtomically` creates for the file named `file`. */
+export function isTemporaryFileOf(name: string, file: string, suffix: string): boolean {
+  return (
+    name.startsWith(`${file}.`) &&
+    name.endsWith(suffix) &&
+    uuid.test(name.slice(file.length + 1, name.length - suffix.length))
+  );
+}

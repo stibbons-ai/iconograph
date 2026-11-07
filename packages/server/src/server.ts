@@ -136,11 +136,11 @@ export interface RunningServer {
   booted: Promise<void>;
   /**
    * Stop retrying the face models and abort a download in progress (an injected
-   * `fetchModels` only until its response arrives), start no more restarts,
-   * stop listening, then close Mastra, the Run database and the Image Models.
-   * Cancelled Runs still unwinding get up to 5 s to record their Lanes
-   * `cancelled` first. Runs already running, or restarted by Mastra's lease
-   * timer, are not cancelled: closing storage under them fails them, and
+   * `fetchModels` that ignores its signal only until its response arrives),
+   * start no more restarts, stop listening, then close Mastra, the Run database
+   * and the Image Models. Cancelled Runs still unwinding get up to 5 s to record
+   * their Lanes `cancelled` first. Runs already running, or restarted by Mastra's
+   * lease timer, are not cancelled: closing storage under them fails them, and
    * Mastra may log that.
    */
   stop(): Promise<void>;
@@ -330,19 +330,27 @@ export async function startServer(
   });
 
   const stopping = new AbortController();
-  /** Downloads that stopping the server aborts, so no temp file is left open. */
-  const download: Fetch = async (url) => {
-    stopping.signal.throwIfAborted();
+  /** Downloads that stopping the server or a stall aborts, so no temp file is left open. */
+  const download: Fetch = async (url, init) => {
+    const signal = init?.signal ? AbortSignal.any([stopping.signal, init.signal]) : stopping.signal;
+    signal.throwIfAborted();
+    // Settles on either abort, even when an injected `fetchModels` ignores the signal, so
+    // no stalled attempt keeps a listener on the server-lifetime stop signal.
     const { promise: aborted, reject } = Promise.withResolvers<never>();
-    const onAbort = () => reject(stopping.signal.reason);
-    stopping.signal.addEventListener("abort", onAbort, { once: true });
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    const fetching = Promise.try(() => (fetchModels ?? fetch)(url, { signal }));
     try {
-      return await Promise.race([
-        fetchModels ? fetchModels(url) : fetch(url, { signal: stopping.signal }),
-        aborted,
-      ]);
+      return await Promise.race([fetching, aborted]);
+    } catch (error) {
+      // Nobody else sees a response that arrives after the abort: free its connection.
+      fetching.then(
+        (late) => late.body?.cancel().catch(() => undefined),
+        () => undefined,
+      );
+      throw error;
     } finally {
-      stopping.signal.removeEventListener("abort", onAbort);
+      signal.removeEventListener("abort", onAbort);
     }
   };
   /**
