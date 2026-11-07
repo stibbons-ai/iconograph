@@ -12,6 +12,7 @@ import {
 import { heapSize } from "bun:jsc";
 import * as fsPromises from "node:fs/promises";
 import { mkdir, open, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { uptime } from "node:os";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -714,12 +715,13 @@ describe("ensureModels", () => {
         await live.catch(() => undefined);
       }
     }
-    // Fake timers freeze Bun.sleep and Date.now, so poll on the event loop instead of `until`,
-    // bounded by the monotonic clock: a loaded machine may need many turns.
+    // Fake timers freeze Bun.sleep, Date.now and every sub-second clock, so poll on the event
+    // loop instead of `until`, bounded by `os.uptime()` (whole seconds), which they leave
+    // running: a loaded machine may need many turns, yet the test's 5 s timeout must not win.
     async function settled(condition: () => Promise<boolean>) {
-      const deadline = Bun.nanoseconds() + 5_000 * 1e6;
+      const deadline = uptime() + 3;
       while (!(await condition())) {
-        if (Bun.nanoseconds() > deadline) throw new Error("Condition not reached");
+        if (uptime() > deadline) throw new Error("Condition not reached");
         const { promise, resolve } = Promise.withResolvers<void>();
         setImmediate(resolve);
         await promise;
