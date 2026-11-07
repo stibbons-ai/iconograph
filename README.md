@@ -165,9 +165,10 @@ Weights are otherwise downloaded on first use. Missing files stream into a temp 
 destination, are hashed, and are renamed into place only after the SHA-256 matches; present files
 are re-hashed on every use and never downloaded again once verified. A download that receives no
 data for 30 s (headers or body) is aborted with an error naming the model and URL; a slow but
-progressing one is never cut off. A download refreshes its temp file (`<file>.<uuid>.partial`)
-every minute until it is renamed or removed, so one left by a killed download is removed on the
-next download of that model once unmodified for 10 minutes, and a running concurrent caller's never. **Offline
+progressing one is never cut off. A download names its temp file with its process id
+(`<file>.<uuid>.<pid>.partial`) and refreshes it every minute; the next download of that model
+removes one only once unmodified for 10 minutes and its process is gone (machines sharing the folder
+from separate process namespaces, e.g. containers, rely on the age alone). **Offline
 machines**: copy the locked files (same names) into `<data dir>/models` by any means; they are
 verified like downloads.
 **A checksum mismatch** is a hard error naming the model, path, expected and actual hash, and the

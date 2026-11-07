@@ -351,7 +351,10 @@ describe("ensureModels", () => {
       // Polled: ensureModels exposes no mid-download signal, and the server can't tell when
       // the client has opened its temp file.
       await until(async () => (await entries()).length === 1);
-      expect((await entries())[0]).toEndWith(".partial");
+      // `<file>.<uuid>.<pid>.partial`: the owner's process id lets a sweep spare a live owner.
+      expect((await entries())[0]).toMatch(
+        new RegExp(`^detector\\.onnx\\.[0-9a-f-]{36}\\.${process.pid}\\.partial$`),
+      );
       const second = ensureModels({ lock: gated, directory });
       callers.push(second);
       await until(async () => (await entries()).length === 2);
@@ -625,16 +628,30 @@ describe("ensureModels", () => {
       await writeFile(join(directory, name), "partial");
       await utimes(join(directory, name), age, age);
     }
+    /** The id of a process that has exited and been reaped, so no process has it. */
+    async function exitedPid() {
+      const child = Bun.spawn(["true"]);
+      await child.exited;
+      return child.pid;
+    }
+    /** A temp file name a download in process `pid` creates. */
+    const tempOf = (file: string, pid: number) => `${file}.${crypto.randomUUID()}.${pid}.partial`;
 
-    test("removes only this model's temp files older than 10 minutes", async () => {
-      const crashed = `detector.onnx.${crypto.randomUUID()}.partial`;
-      const live = `detector.onnx.${crypto.randomUUID()}.partial`;
+    test("removes only this model's temp files older than 10 minutes whose process is gone", async () => {
+      const gone = await exitedPid();
+      const crashed = tempOf("detector.onnx", gone);
+      // Left by a version that named temp files without their owner.
+      const legacy = `detector.onnx.${crypto.randomUUID()}.partial`;
+      const young = tempOf("detector.onnx", gone);
       const keep = [
-        live,
+        young,
+        tempOf("recognizer.onnx", gone), // another model's
         `recognizer.onnx.${crypto.randomUUID()}.partial`, // another model's
         "detector.onnx.partial", // not writeFileAtomically's pattern
         "detector.onnx.backup.partial", // not a UUID
         `detector.onnx.x${crypto.randomUUID()}.partial`, // more than a UUID
+        `detector.onnx.${crypto.randomUUID()}.x${gone}.partial`, // not a process id
+        `detector.onnx.${crypto.randomUUID()}.${gone}.${gone}.partial`, // more than a process id
         `detector.onnx.${crypto.randomUUID()}.partia1`, // another suffix
         `detector.onnx-${crypto.randomUUID()}.partial`, // no dot after the file name
         `detector.onnx.${crypto.randomUUID()}.partial.bak`,
@@ -642,15 +659,36 @@ describe("ensureModels", () => {
         "notes.txt",
       ];
       await place(crashed, secondsAgo(10 * 60 + 5));
-      await place(live, secondsAgo(10 * 60 - 5));
+      await place(legacy, secondsAgo(10 * 60 + 5));
+      await place(young, secondsAgo(10 * 60 - 5));
       for (const name of keep.slice(1)) await place(name, secondsAgo(60 * 60));
 
       await ensureModels({ lock, directory, ids: ["detector"] });
       expect((await readdir(directory)).sort()).toEqual(["detector.onnx", ...keep].sort());
     });
 
+    // A suspended process (SIGSTOP, a sleeping laptop) can't refresh its temp file, so age
+    // alone never proves it was abandoned.
+    test("a stale temp file whose process still runs, even suspended, is kept", async () => {
+      const owner = Bun.spawn(["sleep", "60"]);
+      try {
+        owner.kill("SIGSTOP");
+        const suspended = tempOf("detector.onnx", owner.pid);
+        const crashed = tempOf("detector.onnx", await exitedPid());
+        await place(suspended, secondsAgo(60 * 60));
+        await place(crashed, secondsAgo(60 * 60));
+
+        const [model] = await ensureModels({ lock, directory, ids: ["detector"] });
+        expect(model?.downloaded).toBe(true);
+        expect((await readdir(directory)).sort()).toEqual(["detector.onnx", suspended].sort());
+      } finally {
+        owner.kill("SIGKILL");
+        await owner.exited;
+      }
+    });
+
     test("a stale temp file that can't be removed never fails the download", async () => {
-      const stuck = join(directory, `detector.onnx.${crypto.randomUUID()}.partial`);
+      const stuck = join(directory, tempOf("detector.onnx", await exitedPid()));
       await place(basename(stuck), secondsAgo(60 * 60));
       const realRm = fsPromises.rm;
       const removal = spyOn(fsPromises, "rm").mockImplementation(async (path, options) => {
@@ -670,8 +708,9 @@ describe("ensureModels", () => {
     });
 
     test("the staleness threshold is 10x a longer idle timeout", async () => {
-      const kept = `detector.onnx.${crypto.randomUUID()}.partial`;
-      const crashed = `detector.onnx.${crypto.randomUUID()}.partial`;
+      const gone = await exitedPid();
+      const kept = tempOf("detector.onnx", gone);
+      const crashed = tempOf("detector.onnx", gone);
       await place(kept, secondsAgo(20 * 60 - 5));
       await place(crashed, secondsAgo(20 * 60 + 5));
       await ensureModels({ lock, directory, ids: ["detector"], idleTimeoutMs: 120_000 });

@@ -192,9 +192,9 @@ export async function ensureModels(options: EnsureModelsOptions): Promise<Ensure
       }
       // A live writer refreshes its temp file's mtime every `tempHeartbeatMs` until it is
       // renamed or removed, whatever its idle period and however long storing or verifying
-      // takes. So one unmodified for far longer was left by a killed process. The
-      // `10 * idleTimeoutMs` term stays as the margin issue #18's triage set: with the
-      // heartbeat it is a safety margin, not what keeps a live temp file.
+      // takes, and names it with its process id. One unmodified for far longer whose process
+      // is gone was left by a killed process; a suspended one can't refresh, but still runs.
+      // The `10 * idleTimeoutMs` term stays as the margin issue #18's triage set.
       await removeStaleTemps(
         directory,
         model.file,
@@ -226,19 +226,28 @@ export async function hashFile(path: string): Promise<string | undefined> {
   return hasher.digest("hex");
 }
 
-/** Suffix of a download's temp file, `<file>.<uuid>.partial`. */
+/** Suffix of a download's temp file without an owner, `<file>.<uuid>.partial`, as older versions named it. */
 const partialSuffix = ".partial";
 
+/** Suffix of the temp file a download in process `pid` writes, `<file>.<uuid>.<pid>.partial`. */
+const ownedPartialSuffix = (pid: number | string) => `.${pid}${partialSuffix}`;
+
 /**
- * Best effort: remove `<file>.<uuid>.partial` temp files in `directory` not
- * modified for `olderThanMs`. Any other file is never touched, and a failure
- * (e.g. another caller removed it first) is ignored.
+ * Best effort: remove `<file>.<uuid>.<pid>.partial` temp files in `directory` not
+ * modified for `olderThanMs` whose process `pid` no longer runs, and
+ * `<file>.<uuid>.partial` ones (left by versions that named no owner) by age
+ * alone. Any other file is never touched, and a failure (e.g. another caller
+ * removed it first) is ignored. Hosts sharing the folder from separate process id
+ * namespaces (containers) can't see each other's processes and rely on the age.
  */
 async function removeStaleTemps(directory: string, file: string, olderThanMs: number) {
   const cutoff = Date.now() - olderThanMs;
   const names = await readdir(directory).catch(() => []);
   for (const name of names) {
-    if (!isTemporaryFileOf(name, file, partialSuffix)) continue;
+    const pid = /\.(\d+)\.partial$/.exec(name)?.[1];
+    const owned = pid !== undefined && isTemporaryFileOf(name, file, ownedPartialSuffix(pid));
+    if (!owned && !isTemporaryFileOf(name, file, partialSuffix)) continue;
+    if (owned && isRunning(Number(pid))) continue;
     const temp = join(directory, name);
     try {
       const stats = await lstat(temp);
@@ -246,6 +255,16 @@ async function removeStaleTemps(directory: string, file: string, olderThanMs: nu
     } catch {
       // Best effort: a temp file that can't be removed never fails the download.
     }
+  }
+}
+
+/** Whether process `pid` may still run on this host: only ESRCH proves it gone. */
+function isRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
   }
 }
 
@@ -359,7 +378,7 @@ async function download(
         }
       },
       {
-        suffix: partialSuffix,
+        suffix: ownedPartialSuffix(process.pid),
         verify: async (temp) => {
           refreshTemp = (now) => utimes(temp, now, now);
           if (size !== model.size) {
