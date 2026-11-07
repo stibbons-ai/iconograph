@@ -994,13 +994,14 @@ describe("price refresh", () => {
     fileURLToPath(new URL("../../adapters/test/fixtures/litellm-prices.json", import.meta.url)),
   );
   const start = new Date("2026-11-01T12:00:00Z");
+  const HOUR_MS = 60 * 60 * 1000;
   const nextDayAt = new Date(start.getTime() + priceRefreshIntervalMs).toISOString();
 
   /**
    * The server on a volume with verified face models, refreshing a real price
    * source whose LiteLLM fetches each wait for the test to answer them (and
-   * reject on abort, unless `ignoresAbort`), on a test clock; the daily wait
-   * ends when the test calls `nextDay`.
+   * reject on abort, unless `ignoresAbort`), on a test clock; the wait for the
+   * next price check ends when the test calls `tick`.
    */
   async function serveWithPrices({ ignoresAbort = false } = {}) {
     const data = await dataVolume(temporaryDirectory, SFACE_IDS);
@@ -1009,6 +1010,8 @@ describe("price refresh", () => {
     const source = await openPriceSource({
       dataDirectory: data,
       now: () => clock.now,
+      // Far past the test's timeout: a stop that doesn't abort the fetch hangs the test.
+      timeoutMs: 600_000,
       // Like `fetch`: an abort rejects with the signal's reason.
       fetch: (_, init) => {
         const answer = Promise.withResolvers<Response>();
@@ -1024,7 +1027,7 @@ describe("price refresh", () => {
     const events: string[] = [];
     let refreshes = 0;
     const waits: number[] = [];
-    let day = Promise.withResolvers<void>();
+    const wakes: (() => void)[] = [];
     const served = await serve(data, fakeImageModels([]).layer, {
       priceSource: {
         ensureFresh: (options) => {
@@ -1039,8 +1042,10 @@ describe("price refresh", () => {
       sleep: (ms, signal) => {
         waits.push(ms);
         if (signal.aborted) return Promise.resolve();
-        signal.addEventListener("abort", () => day.resolve(), { once: true });
-        return day.promise;
+        const wake = Promise.withResolvers<void>();
+        signal.addEventListener("abort", () => wake.resolve(), { once: true });
+        wakes.push(wake.resolve);
+        return wake.promise;
       },
     });
     /** Answers the `n`th LiteLLM fetch (1-based) once it is made. */
@@ -1048,11 +1053,12 @@ describe("price refresh", () => {
       await until(async () => fetches.length >= n);
       fetches[n - 1]!(response);
     };
-    const nextDay = () => {
-      clock.now = new Date(clock.now.getTime() + priceRefreshIntervalMs);
-      const ended = day;
-      day = Promise.withResolvers<void>();
-      ended.resolve();
+    let ticks = 0;
+    /** Once the server waits for its next price check, moves the clock on by `ms` and ends the wait. */
+    const tick = async (ms: number) => {
+      await until(async () => wakes.length > ticks);
+      clock.now = new Date(clock.now.getTime() + ms);
+      wakes[ticks++]!();
     };
     const priceSource = () =>
       Effect.runPromise(source.lookup("claude-sonnet-5-5")).then((quote) => quote.source);
@@ -1063,13 +1069,13 @@ describe("price refresh", () => {
       waits,
       refreshes: () => refreshes,
       answerFetch,
-      nextDay,
+      tick,
       priceSource,
     };
   }
 
-  test("refreshes at boot without holding the start, then every 24 h", async () => {
-    const { server, logs, logged, waits, refreshes, answerFetch, nextDay, priceSource } =
+  test("refreshes at boot without holding the start, then once the prices are 24 h old", async () => {
+    const { server, logs, logged, waits, refreshes, answerFetch, tick, priceSource } =
       await serveWithPrices();
     // Started, booted and healthy while the boot refresh's fetch is unanswered.
     expect(refreshes()).toBe(1);
@@ -1077,12 +1083,13 @@ describe("price refresh", () => {
     expect((await request(server, "/health")).status).toBe(200);
     await answerFetch(1, new Response(litellm));
     await logged((line) => line.event === "prices-fresh");
-    expect(waits).toEqual([priceRefreshIntervalMs]);
 
-    nextDay();
+    await tick(priceRefreshIntervalMs);
     await answerFetch(2, new Response(litellm));
     await logged((line) => line.fetchedAt === nextDayAt);
     expect(refreshes()).toBe(2);
+    await until(async () => waits.length === 2);
+    expect(waits).toEqual([HOUR_MS, HOUR_MS]);
     expect(logs.filter((line) => line.event === "prices-fresh")).toEqual([
       { event: "prices-fresh", refreshed: true, fetchedAt: start.toISOString() },
       {
@@ -1094,11 +1101,24 @@ describe("price refresh", () => {
     expect(await priceSource()).toMatchObject({ _tag: "litellm", ageSeconds: 0, stale: false });
   }, 30_000);
 
-  test("a failed refresh is logged once and the server keeps serving the previous cache", async () => {
-    const { server, logs, logged, answerFetch, nextDay, priceSource } = await serveWithPrices();
+  test("an hourly check of prices younger than 24 h fetches and logs nothing", async () => {
+    const { logs, logged, waits, fetches, refreshes, answerFetch, tick } = await serveWithPrices();
     await answerFetch(1, new Response(litellm));
     await logged((line) => line.event === "prices-fresh");
-    nextDay();
+    await tick(priceRefreshIntervalMs - HOUR_MS);
+    // The check is done once the server waits for the next one.
+    await until(async () => waits.length === 2);
+    expect(refreshes()).toBe(2);
+    expect(fetches).toHaveLength(1);
+    const reported = logs.filter((line) => line.event === "prices-fresh" || "warning" in line);
+    expect(reported).toHaveLength(1);
+  }, 30_000);
+
+  test("a failed refresh is logged once and the server keeps serving the previous cache", async () => {
+    const { server, logs, logged, answerFetch, tick, priceSource } = await serveWithPrices();
+    await answerFetch(1, new Response(litellm));
+    await logged((line) => line.event === "prices-fresh");
+    await tick(priceRefreshIntervalMs);
     await answerFetch(2, new Response("unavailable", { status: 503 }));
     await logged((line) => "warning" in line);
     expect(logs.filter((line) => "warning" in line || "error" in line)).toEqual([
@@ -1116,6 +1136,21 @@ describe("price refresh", () => {
       ageSeconds: priceRefreshIntervalMs / 1000,
       stale: true,
     });
+  }, 30_000);
+
+  test("a failed refresh is retried at the next hourly check", async () => {
+    const { logs, logged, answerFetch, tick, priceSource } = await serveWithPrices();
+    await answerFetch(1, new Response(litellm));
+    await logged((line) => line.event === "prices-fresh");
+    await tick(priceRefreshIntervalMs);
+    await answerFetch(2, new Response("unavailable", { status: 503 }));
+    await logged((line) => "warning" in line);
+    await tick(HOUR_MS);
+    await answerFetch(3, new Response(litellm));
+    const retriedAt = new Date(start.getTime() + priceRefreshIntervalMs + HOUR_MS).toISOString();
+    await logged((line) => line.fetchedAt === retriedAt);
+    expect(logs.filter((line) => "warning" in line)).toHaveLength(1);
+    expect(await priceSource()).toMatchObject({ _tag: "litellm", asOf: retriedAt, stale: false });
   }, 30_000);
 
   describe("stopping", () => {

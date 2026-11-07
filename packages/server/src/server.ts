@@ -15,7 +15,6 @@ import {
   withCleanup,
   workflowsStore,
 } from "@iconograph/adapters";
-import { priceRefreshIntervalMs } from "@iconograph/domain";
 import type { WorkflowRunStatus } from "@mastra/core/workflows";
 import { type HonoBindings, type HonoVariables, MastraServer } from "@mastra/hono";
 import { Hono } from "hono";
@@ -33,6 +32,12 @@ const LOOPBACK_HOSTS = ["localhost", "127.0.0.1", "[::1]"];
 /** The first retry of a failed face-model download or verification, doubling up to 5 minutes. */
 const MODELS_RETRY_MS = 5_000;
 const MODELS_RETRY_MAX_MS = 300_000;
+/**
+ * How often the server checks the prices' age; `ensureFresh` refetches them
+ * only once they are `priceRefreshIntervalMs` old, so they reach at most about
+ * 25 h and a failed fetch is retried within the hour.
+ */
+const PRICES_CHECK_MS = 60 * 60 * 1000;
 
 /**
  * The Mastra routes a Run needs (method and path as Mastra declares them):
@@ -108,8 +113,8 @@ export interface ServerDependencies extends Pick<
   /** The first delay before retrying failed face models (default 5 s), doubling up to 5 minutes. */
   modelsRetryMs?: number;
   /**
-   * Test seam: waits between face-model attempts and between daily price
-   * refreshes (`priceRefreshIntervalMs`); must end when `signal` aborts.
+   * Test seam: waits between face-model attempts and between price checks
+   * (`PRICES_CHECK_MS`, hourly); must end when `signal` aborts.
    */
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   /** Test seam: wraps `/health`'s database query, e.g. to make it fail. */
@@ -336,9 +341,11 @@ export async function startServer(
 
   const stopping = new AbortController();
   /**
-   * Brings the prices up to date now and every `priceRefreshIntervalMs` until the
-   * server stops; one refresh at a time, never blocking boot. A failed refresh
-   * is logged and the existing cache (or the bundled snapshot) keeps serving.
+   * Checks the prices now and every `PRICES_CHECK_MS` until the server stops,
+   * refetching them once they are `priceRefreshIntervalMs` old; one check at a
+   * time, never blocking boot. A refetch is logged; a failed one is logged as a
+   * warning, the existing cache (or the bundled snapshot) keeps serving, and the
+   * next check retries it.
    */
   const pricesRefreshed = (async () => {
     const { ensurePricesFresh } = models;
@@ -346,12 +353,13 @@ export async function startServer(
     while (!stopping.signal.aborted) {
       try {
         const { refreshed, fetchedAt } = await ensurePricesFresh({ signal: stopping.signal });
-        log({ event: "prices-fresh", refreshed, fetchedAt: fetchedAt.toISOString() });
+        if (refreshed)
+          log({ event: "prices-fresh", refreshed, fetchedAt: fetchedAt.toISOString() });
       } catch (error) {
         if (stopping.signal.aborted) break;
         log({ warning: `Price refresh failed, keeping the current prices: ${errorChain(error)}` });
       }
-      await sleep(priceRefreshIntervalMs, stopping.signal);
+      await sleep(PRICES_CHECK_MS, stopping.signal);
     }
   })();
   /** Downloads that stopping the server or a stall aborts, so no temp file is left open. */

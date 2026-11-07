@@ -64,16 +64,25 @@ export function refreshOnFirstLookup(
 
 /**
  * The native Image Model adapters and the Mastra Judges and Optimizers, priced
- * by the price source in the data volume.
+ * by `source` with refresh-on-first-lookup, whose refresh `ensurePricesFresh`
+ * can take over. `env` is where they read API keys (default: the process
+ * environment).
  */
-export const nativeVendors: OpenVendors = async (dataDirectory, warn) => {
-  const source = await openPriceSource({ dataDirectory });
+export function vendorsPricedBy(
+  source: PriceSource,
+  warn: (message: string) => void,
+  env: Record<string, string | undefined> = process.env,
+): VendorsResource {
   const prices = refreshOnFirstLookup(source, warn);
   return {
-    imageModels: NativeImageModels({ prices }),
-    judges: MastraJudges({ prices }),
-    optimizers: MastraOptimizers({ prices }),
+    imageModels: NativeImageModels({ prices, env }),
+    judges: MastraJudges({ prices, env }),
+    optimizers: MastraOptimizers({ prices, env }),
     ensurePricesFresh: prices.ensureFresh,
     close: () => source.close(),
   };
-};
+}
+
+/** `vendorsPricedBy` the price source in the data volume. */
+export const nativeVendors: OpenVendors = async (dataDirectory, warn) =>
+  vendorsPricedBy(await openPriceSource({ dataDirectory }), warn);
