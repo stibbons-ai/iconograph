@@ -50,8 +50,8 @@ const temporaryDirectory = temporaryDirectories("eval");
 
 /** Fake keys for the real Judges on fake vendor APIs. */
 const KEYS = {
-  ANTHROPIC_API_KEY: "sk-ant-fake-eval-test-key-000001",
-  OPENAI_API_KEY: "sk-fake-eval-test-key-0000000001",
+  ICONOGRAPH_ANTHROPIC_API_KEY: "sk-ant-fake-eval-test-key-000001",
+  ICONOGRAPH_OPENAI_API_KEY: "sk-fake-eval-test-key-0000000001",
 };
 
 /** A Subjects folder with the Subjects `names` (default `biden`), each with two photos and `extra` files. */
@@ -744,7 +744,7 @@ describe("eval harness with fake vendors", () => {
     try {
       const subjects = await subjectsFolder();
       const origins = { anthropic: anthropic.origin, openai: openai.origin };
-      const { ANTHROPIC_API_KEY } = KEYS;
+      const { ICONOGRAPH_ANTHROPIC_API_KEY } = KEYS;
       const empty = await temporaryDirectory();
       const target = await temporaryDirectory();
       const linked = join(await temporaryDirectory(), "linked");
@@ -753,9 +753,9 @@ describe("eval harness with fake vendors", () => {
       for (const out of [fresh, empty, linked]) {
         // No OpenAI key: the second Judge's is checked before any billable call.
         const missing = await evaluate([...common(out), "--max-iterations", "1", subjects], {
-          judges: judgesOnFakeVendors(origins, { ANTHROPIC_API_KEY }),
+          judges: judgesOnFakeVendors(origins, { ICONOGRAPH_ANTHROPIC_API_KEY }),
         });
-        expect((missing.error as Error).message).toContain("OPENAI_API_KEY");
+        expect((missing.error as Error).message).toContain("ICONOGRAPH_OPENAI_API_KEY");
         expect(missing.images.requests).toEqual([]);
       }
       expect(await absent(fresh)).toBe(true);

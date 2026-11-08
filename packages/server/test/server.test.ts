@@ -1452,14 +1452,14 @@ test("a Run without a vendor key fails cleanly before any billable call or price
   await native.server.booted;
   const withoutJudgeKey = await startRun(native.server.url, runInput());
   expect(withoutJudgeKey.status).toBe("failed");
-  expect(withoutJudgeKey.error!.message).toContain("ANTHROPIC_API_KEY is not set");
+  expect(withoutJudgeKey.error!.message).toContain("ICONOGRAPH_ANTHROPIC_API_KEY is not set");
   // Then every Lane's key, in Lane order.
   const { server } = await serve(data, layer);
   await server.booted;
   const lanes = [{ model: "gpt-image-2.5-sunburst" }, { model: "gemini-nano-banana-2.1" }];
   const result = await startRun(server.url, runInput({ lanes }));
   expect(result.status).toBe("failed");
-  expect(result.error!.message).toContain("OPENAI_API_KEY is not set");
+  expect(result.error!.message).toContain("ICONOGRAPH_OPENAI_API_KEY is not set");
   expect(calls).toBe(0);
 }, 30_000);
 
@@ -1469,7 +1469,7 @@ describe("server process", () => {
 
   /** The server (by default with fakes) as its own process, so a test can signal or kill it. */
   function spawnServer(data: string, env: Record<string, string>, entry = withFakes) {
-    const { GEMINI_API_KEY: _, ...base } = Bun.env;
+    const { ICONOGRAPH_GEMINI_API_KEY: _, ...base } = Bun.env;
     const child = Bun.spawn([process.execPath, entry], {
       env: {
         ...base,
@@ -1597,7 +1597,7 @@ describe("server process", () => {
     const server = spawnServer(data, {
       FAKE_IMAGE_SCRIPT: JSON.stringify(["same"]),
       FAKE_ANTHROPIC_ORIGIN: vendor.origin,
-      ANTHROPIC_API_KEY: key,
+      ICONOGRAPH_ANTHROPIC_API_KEY: key,
       ANTHROPIC_BASE_URL: trap.origin,
     });
     try {
