@@ -30,6 +30,7 @@ import {
   MAX_ITERATIONS,
   MAX_REFERENCE_PHOTOS,
   OptimizerConfig,
+  pricingSpec,
   type RetryPolicy,
   sameVendorLanes,
   StopRules,
@@ -56,8 +57,8 @@ import { FACES_FILE, LOOK_FILE, PROMPT_FILE, readSubjectsFolder } from "./subjec
 
 /** The second Judge by default: the first of these from another vendor than the loop's Judge. */
 const EVAL_JUDGE_CHOICES = [
-  "openai/gpt-5.5",
-  "google/gemini-3.1-pro-preview",
+  "openai/gpt-6.1-sol",
+  "google/gemini-4-argon",
   "anthropic/claude-sonnet-5-5",
 ] as const;
 const DEFAULT_MODELS = ["gemini", "openai"] as const;
@@ -301,9 +302,10 @@ export async function main(args: string[], dependencies: EvalCliDependencies = {
     outputFolder: output.folder,
   });
   // A second Judge may favour images of its own vendor's Image Models.
-  const sameVendor = sameVendorLanes(settings.evalJudge.model, models).map(
-    (index) => models[index]!,
-  );
+  const sameVendor = sameVendorLanes(
+    settings.evalJudge.model,
+    models.map((model) => pricingSpec(model).mode),
+  ).map((index) => models[index]!);
   if (sameVendor.length > 0) {
     warn({
       code: "eval-judge-same-vendor",

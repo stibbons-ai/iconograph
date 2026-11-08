@@ -162,13 +162,13 @@ describe("Comparing the Arms", () => {
     run({ subject: "bob", arm: "resample", candidates: [imaged(0.9, 9)] }),
     run({
       subject: "ada",
-      model: "gpt-image-2.5-sunburst",
+      model: "gpt-image-2.6-sunburst",
       arm: "optimizer",
       candidates: [imaged(0.1, 1)],
     }),
     run({
       subject: "ada",
-      model: "gpt-image-2.5-sunburst",
+      model: "gpt-image-2.6-sunburst",
       arm: "resample",
       candidates: [imaged(0.6, 7)],
     }),
@@ -187,7 +187,7 @@ describe("Comparing the Arms", () => {
       ]),
     ).toEqual([
       ["gemini-nano-banana-2.1", 2, 2],
-      ["gpt-image-2.5-sunburst", 1, 1],
+      ["gpt-image-2.6-sunburst", 1, 1],
     ]);
     expect(
       comparison.bySubject.map(({ subject, model, arms }) => [
@@ -199,7 +199,7 @@ describe("Comparing the Arms", () => {
     ).toEqual([
       ["ada", "gemini-nano-banana-2.1", 8, 6],
       ["bob", "gemini-nano-banana-2.1", 4, 9],
-      ["ada", "gpt-image-2.5-sunburst", 1, 7],
+      ["ada", "gpt-image-2.6-sunburst", 1, 7],
     ]);
   });
 
@@ -242,7 +242,7 @@ describe("Comparing the Arms", () => {
           ...runs.slice(0, 5),
           run({
             subject: "ada",
-            model: "gpt-image-2.5-sunburst",
+            model: "gpt-image-2.6-sunburst",
             arm: "resample",
             candidates: [],
             armCost: { estimatedUsd: 1, actualUsd: 0.5, committedUsd: 0.7, unknownCostCalls: 1 },
@@ -250,24 +250,24 @@ describe("Comparing the Arms", () => {
         ],
         3,
       ),
-      "openai/gpt-5.5",
+      "openai/gpt-6.1-sol",
     );
     const rows = table.split("\n");
     // Both tables, the held-out one and the loop's.
     expect(rows.filter((row) => row.startsWith("All"))).toHaveLength(2);
     // Its Resample Run has no image: dashes for its scores.
-    const at = rows.findIndex((row) => row.startsWith("ada / gpt-image-2.5-sunburst"));
+    const at = rows.findIndex((row) => row.startsWith("ada / gpt-image-2.6-sunburst"));
     expect(rows[at + 1]).toMatch(/resample\s+1\s+0\s+-\s+-\s+-\s+-\s+0\/0/);
     expect(table).toContain("$0.5000 (~$0.7000, 1 unknown)");
     expect(table).toContain("Compared: 3 of 3");
-    expect(table).toContain("openai/gpt-5.5");
+    expect(table).toContain("openai/gpt-6.1-sol");
   });
 });
 
 describe("A flat second Judge", () => {
-  const JUDGE = "google/gemini-3.1-pro-preview";
+  const JUDGE = "google/gemini-4-argon";
   const GEMINI = "gemini-nano-banana-2.1";
-  const OPENAI = "gpt-image-2.5-sunburst";
+  const OPENAI = "gpt-image-2.6-sunburst";
   /** Candidates the second Judge judged at `scores`, in order. */
   const judged = (...scores: number[]) => scores.map((score) => imaged(0.6, score));
   /** `count` Candidates the second Judge judged at 7.5, and `other` more at distinct other scores. */

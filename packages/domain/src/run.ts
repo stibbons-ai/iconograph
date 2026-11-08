@@ -20,9 +20,9 @@ export const MAX_BUDGET_USD = 1_000_000;
 /** The Image Model of the M0 Gemini Lane. */
 export const GEMINI_IMAGE_MODEL = "gemini-nano-banana-2.1";
 /** The default Image Model of an OpenAI Lane. */
-export const OPENAI_IMAGE_MODEL = "gpt-image-2.5-sunburst";
+export const OPENAI_IMAGE_MODEL = "gpt-image-2.6-sunburst";
 /** The faster OpenAI Image Model, selectable per Lane. */
-export const OPENAI_FLARE_IMAGE_MODEL = "gpt-image-2.5-flare";
+export const OPENAI_FLARE_IMAGE_MODEL = "gpt-image-2.6-flare";
 
 /** A number from 1, as photos and faces are numbered in the Reference Photo report. */
 const Ordinal = Schema.Int.check(Schema.isGreaterThanOrEqualTo(1));

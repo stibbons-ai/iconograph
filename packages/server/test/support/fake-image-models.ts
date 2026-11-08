@@ -54,6 +54,13 @@ export const FAKE_PRICE: PriceQuote = {
   source: { _tag: "override", asOf: "2026-11-01T00:00:00.000Z", ageSeconds: 0 },
 };
 
+/** The fake price of an OpenAI Image Model: free tokens, billed as an OpenAI image model. */
+export const FAKE_OPENAI_PRICE: PriceQuote = {
+  model: "fake",
+  pricing: { _tag: "OpenAIImage", inputPerToken: 0, inputPerImageToken: 0, outputPerImageToken: 0 },
+  source: FAKE_PRICE.source,
+};
+
 /** A request the fake received, with the model it was sent to. */
 export interface FakeRequest extends ImageRequest {
   readonly model: string;
@@ -85,15 +92,23 @@ export interface FakeOptions {
   beforeGet?: (price: PriceQuote | undefined) => void;
   /** What a face image (`same`, `different`, `no-face`) costs; `garbage` keeps `FAKE_ACTUAL_MICROS`. */
   actualMicros?: number;
+  /**
+   * The price of a model given no recorded one, e.g. for a model id no longer
+   * in the price table; undefined (or no option) falls back to
+   * `FAKE_OPENAI_PRICE` for an OpenAI model id, `FAKE_PRICE` for any other.
+   */
+  price?: (id: string) => PriceQuote | undefined;
   /** Each call's estimate (default `FAKE_ESTIMATE_MICROS`). */
   estimateMicros?: (request: ImageRequest) => number;
 }
 
 /**
  * An Image Model that answers from a script, for Run-engine tests. Any model id
- * resolves to it, unless `unpriced` is set. It declares the real adapters'
- * capabilities (OpenAI's for OpenAI model ids, Gemini's for any other), so the
- * engine plans as it would in production.
+ * resolves to it, unless `unpriced` is set; production would reject an id no
+ * longer in the price table, which resolves here only so a test can build a
+ * Run stored with an old id. It declares the real adapters' capabilities by
+ * its price (OpenAI's for an OpenAI image price, Gemini's for any other), so
+ * the engine plans as it would in production.
  */
 export function fakeImageModels(script: FakeScript, options: FakeOptions = {}): FakeImageModels {
   const requests: FakeRequest[] = [];
@@ -148,23 +163,30 @@ export function fakeImageModels(script: FakeScript, options: FakeOptions = {}): 
         throw new Error(`The fake Image Model got call ${requests.length} beyond its script`);
     }
   };
-  const model = (id: string, price: PriceQuote | undefined): ImageModel => ({
-    model: id,
-    capabilities: pricingSpec(id).mode === "OpenAIImage" ? openaiCapabilities : geminiCapabilities,
-    price: price ?? { ...FAKE_PRICE, model: id },
-    estimate: (request) => ({
-      micros: options.estimateMicros?.(request) ?? FAKE_ESTIMATE_MICROS,
-      usage: { outputImageTokens: 1680 },
-    }),
-    call: (request) =>
-      Effect.promise(async (signal) => {
-        const call = requests.push({ ...request, model: id }) - 1;
-        // Picked at once: other calls may arrive while `beforeAnswer` waits.
-        const response = scripted(id, call);
-        await untilAborted(signal, options.beforeAnswer?.(call, id));
-        return respond(response);
+  const model = (id: string, recorded: PriceQuote | undefined): ImageModel => {
+    const price = recorded ??
+      options.price?.(id) ?? {
+        ...(pricingSpec(id).mode === "OpenAIImage" ? FAKE_OPENAI_PRICE : FAKE_PRICE),
+        model: id,
+      };
+    return {
+      model: id,
+      capabilities: price.pricing._tag === "OpenAIImage" ? openaiCapabilities : geminiCapabilities,
+      price,
+      estimate: (request) => ({
+        micros: options.estimateMicros?.(request) ?? FAKE_ESTIMATE_MICROS,
+        usage: { outputImageTokens: 1680 },
       }),
-  });
+      call: (request) =>
+        Effect.promise(async (signal) => {
+          const call = requests.push({ ...request, model: id }) - 1;
+          // Picked at once: other calls may arrive while `beforeAnswer` waits.
+          const response = scripted(id, call);
+          await untilAborted(signal, options.beforeAnswer?.(call, id));
+          return respond(response);
+        }),
+    };
+  };
   return {
     requests,
     layer: Layer.succeed(ImageModels)({

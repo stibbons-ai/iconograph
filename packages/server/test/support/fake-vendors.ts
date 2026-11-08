@@ -28,7 +28,7 @@ export function vendorAnswer(vendor: LlmVendor, text: string, cutOff = false): R
       id: "resp_fake",
       object: "response",
       created_at: 1_793_700_000,
-      model: "gpt-5.5",
+      model: "gpt-6.1-sol",
       status: cutOff ? "incomplete" : "completed",
       incomplete_details: cutOff ? { reason: "max_output_tokens" } : null,
       output: [

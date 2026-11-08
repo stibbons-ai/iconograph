@@ -1,9 +1,9 @@
 import { fileURLToPath } from "node:url";
 import type { OpenAIImagePricing, PriceQuote } from "@iconograph/domain";
 
-/** OpenAI image prices for tests (the snapshot's GPT Image 2.5 rates when the fixtures were written). */
+/** OpenAI image prices for tests (the snapshot's GPT Image 2.6 rates). */
 export const openaiTestPrice: PriceQuote & { pricing: OpenAIImagePricing } = {
-  model: "gpt-image-2.5-sunburst",
+  model: "gpt-image-2.6-sunburst",
   pricing: {
     _tag: "OpenAIImage",
     inputPerToken: 5e-6,

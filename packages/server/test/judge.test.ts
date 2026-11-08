@@ -204,18 +204,18 @@ describe("Mastra Judge", () => {
       { model: "claude-sonnet-5-5", output_config: { effort: "low" } },
     ],
     [
-      "openai/gpt-5.5",
+      "openai/gpt-6.1-sol",
       "medium",
       "OPENAI_BASE_URL",
       "https://api.openai.com/v1/responses",
       ["authorization", `Bearer ${KEY}`],
-      { model: "gpt-5.5", reasoning: { effort: "medium" } },
+      { model: "gpt-6.1-sol", reasoning: { effort: "medium" } },
     ],
     [
-      "google/gemini-3.1-pro-preview",
+      "google/gemini-4-argon",
       "high",
       "GOOGLE_BASE_URL",
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent",
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-4-argon:generateContent",
       ["x-goog-api-key", KEY],
       // The model is in the URL. @ai-sdk/google reads no base-URL variable (only Mastra's router
       // read GOOGLE_BASE_URL), so this case guards the endpoint rather than an override.
@@ -247,7 +247,7 @@ describe("Mastra Judge", () => {
     },
   );
 
-  test.each(["anthropic/claude-sonnet-5-5", "openai/gpt-5.5", "google/gemini-3.1-pro-preview"])(
+  test.each(["anthropic/claude-sonnet-5-5", "openai/gpt-6.1-sol", "google/gemini-4-argon"])(
     "%s: a call past the timeout aborts the vendor request itself",
     async (model) => {
       const signals: (AbortSignal | undefined)[] = [];
@@ -268,7 +268,7 @@ describe("Mastra Judge", () => {
     },
   );
 
-  test.each(["anthropic/claude-sonnet-5-5", "openai/gpt-5.5", "google/gemini-3.1-pro-preview"])(
+  test.each(["anthropic/claude-sonnet-5-5", "openai/gpt-6.1-sol", "google/gemini-4-argon"])(
     "%s: an answer cut off at the output cap fails the judging at its cost",
     async (model) => {
       const layer = providerJudges(async () =>
@@ -319,7 +319,7 @@ describe("Mastra Judge", () => {
     const vendor = fakeVendorServer(() => vendorAnswer("anthropic", JSON.stringify(FAKE_VERDICT)));
     try {
       const result = await withEnvironment({ OPENAI_API_KEY: KEY }, async () =>
-        call(await getJudge(judgesOnFakeVendor(vendor.origin), "openai/gpt-5.5")),
+        call(await getJudge(judgesOnFakeVendor(vendor.origin), "openai/gpt-6.1-sol")),
       );
       // Failed at $0 and not retried, so no test can reach a live vendor by accident.
       expect(result).toMatchObject({ kind: "failed", costMicros: 0 });
@@ -427,8 +427,8 @@ describe("Mastra Judge", () => {
     expect(fake.lookups).toEqual([]);
     expect(result).toMatchObject({ kind: "judged", costMicros: 210_000 });
     await expect(
-      fake.get("anthropic/claude-sonnet-5-5", "low", { ...sonnetPrice, model: "gpt-5.5" }),
-    ).rejects.toThrow("the recorded price is for gpt-5.5");
+      fake.get("anthropic/claude-sonnet-5-5", "low", { ...sonnetPrice, model: "gpt-6.1-sol" }),
+    ).rejects.toThrow("the recorded price is for gpt-6.1-sol");
   });
 
   test("a content-filtered answer is a refusal", async () => {
@@ -617,7 +617,7 @@ describe("Mastra Judge", () => {
     await expect(noKey.get()).rejects.toThrow("ANTHROPIC_API_KEY is not set");
     expect(noKey.lookups).toEqual([]);
     await expect(
-      judges(answer("{}"), { GOOGLE_API_KEY: KEY }).get("google/gemini-3.1-pro-preview"),
+      judges(answer("{}"), { GOOGLE_API_KEY: KEY }).get("google/gemini-4-argon"),
     ).resolves.toBeDefined();
     await expect(judges(answer("{}")).get("mistral/large")).rejects.toThrow(
       'No Judge for "mistral/large"',

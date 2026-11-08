@@ -65,10 +65,12 @@ export type GeminiImagePricing = typeof GeminiImagePricing.Type;
 
 export const Pricing = Schema.Union([LlmPricing, OpenAIImagePricing, GeminiImagePricing]);
 export type Pricing = typeof Pricing.Type;
+/** How a model is billed: the tag of its `Pricing`. */
+export type PricingMode = Pricing["_tag"];
 
 /** How a model is billed, and the LiteLLM key holding its prices. */
 export type PricingSpec =
-  | { readonly mode: "Llm" | "OpenAIImage"; readonly litellmKey: string }
+  | { readonly mode: Exclude<PricingMode, "GeminiImage">; readonly litellmKey: string }
   | {
       readonly mode: "GeminiImage";
       readonly litellmKey: string;
@@ -77,8 +79,11 @@ export type PricingSpec =
     };
 
 /**
- * The models Iconograph uses by default, mapped explicitly to LiteLLM keys.
- * `gemini/…` is LiteLLM's Gemini Developer API entry; the bare Gemini key is Vertex AI.
+ * The models Iconograph uses by default (Image Models, the loop's Judge and
+ * Optimizer, the eval harness's second-Judge choices), mapped explicitly to
+ * LiteLLM keys, so the bundled snapshot prices them. Language models are keyed
+ * as priced (`llmPriceModel`). `gemini/…` is LiteLLM's Gemini Developer API
+ * entry; the bare Gemini key is Vertex AI.
  */
 export const pricingSpecs: Readonly<Record<string, PricingSpec>> = {
   "gemini-nano-banana-2.1": {
@@ -87,9 +92,11 @@ export const pricingSpecs: Readonly<Record<string, PricingSpec>> = {
     // https://ai.google.dev/gemini-api/docs/pricing#gemini-nano-banana-2.1
     outputTokensPer2KImage: 1680,
   },
-  "gpt-image-2.5-sunburst": { mode: "OpenAIImage", litellmKey: "gpt-image-2.5-sunburst" },
-  "gpt-image-2.5-flare": { mode: "OpenAIImage", litellmKey: "gpt-image-2.5-flare" },
+  "gpt-image-2.6-sunburst": { mode: "OpenAIImage", litellmKey: "gpt-image-2.6-sunburst" },
+  "gpt-image-2.6-flare": { mode: "OpenAIImage", litellmKey: "gpt-image-2.6-flare" },
   "claude-sonnet-5-5": { mode: "Llm", litellmKey: "claude-sonnet-5-5" },
+  "gpt-6.1-sol": { mode: "Llm", litellmKey: "gpt-6.1-sol" },
+  "gemini/gemini-4-argon": { mode: "Llm", litellmKey: "gemini/gemini-4-argon" },
 };
 
 /**
@@ -112,7 +119,7 @@ export class Unpriced extends Schema.TaggedError<Unpriced>()("Unpriced", {
   }
 }
 
-const required: Record<Pricing["_tag"], ReadonlyArray<keyof PriceFields>> = {
+const required: Record<PricingMode, ReadonlyArray<keyof PriceFields>> = {
   Llm: ["input_cost_per_token", "output_cost_per_token"],
   OpenAIImage: [
     "input_cost_per_token",

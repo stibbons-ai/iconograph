@@ -121,7 +121,13 @@ function vendorLanguageModel(
 /**
  * The provider options setting a role's effort through each vendor's reasoning
  * parameter (checked against the pinned AI SDK providers): Anthropic `effort`,
- * OpenAI `reasoningEffort`, Gemini `thinkingConfig.thinkingLevel`.
+ * OpenAI `reasoningEffort`, Gemini `thinkingConfig.thinkingLevel`. Every
+ * `Effort` level passes through unchanged; the eval harness's second-Judge
+ * choices accept all three (checked 2026-11-08): gpt-6.1-sol's
+ * `reasoning.effort` takes `low`, `medium`, `high`, `xhigh` and `max`, no
+ * `none` (https://developers.openai.com/api/docs/models/gpt-6.1-sol), and
+ * gemini-4-argon thinks at `low`, `medium` or `high`
+ * (https://ai.google.dev/gemini-api/docs/models/gemini-4-argon).
  */
 function reasoningOptions(vendor: LlmVendor, effort: Effort) {
   switch (vendor) {

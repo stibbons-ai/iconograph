@@ -28,8 +28,8 @@ const request: ImageRequest = {
   size: "1024x1024",
 };
 
-const modelWith = (fetch: OpenAIFetch) =>
-  openaiImageModel({ model: "gpt-image-2.5-sunburst", apiKey: API_KEY, price, fetch });
+const modelWith = (fetch: OpenAIFetch, model = "gpt-image-2.6-sunburst") =>
+  openaiImageModel({ model, apiKey: API_KEY, price, fetch });
 
 const generate = (fetch: OpenAIFetch) => generateRecorded(modelWith(fetch), request);
 
@@ -37,35 +37,41 @@ const classify = async (respond: () => Promise<Response>) =>
   Effect.runPromise(modelWith(scriptedFetch([respond]).fetch).call(request));
 
 describe("OpenAI adapter against recorded responses", () => {
-  test("sends one high-quality square image edit with the prompt and 16 references, key in a header only", async () => {
-    const { fetch, sent } = scriptedFetch([reply(200, "image-with-usage.json")]);
-    await Effect.runPromise(modelWith(fetch).call(request));
-    expect(sent).toHaveLength(1);
-    const [{ url, init }] = sent as [Sent];
-    expect(url).toBe(OPENAI_IMAGE_EDITS_URL);
-    expect(init.method).toBe("POST");
-    const headers = new Headers(init.headers);
-    expect(headers.get("authorization")).toBe(`Bearer ${API_KEY}`);
-    expect(headers.get("content-type")).toBe("application/json");
-    const body = JSON.parse(String(init.body));
-    expect(body).toEqual({
-      model: "gpt-image-2.5-sunburst",
-      prompt: request.prompt,
-      images: request.references.map(({ bytes }) => ({
-        image_url: `data:image/jpeg;base64,${Buffer.from(bytes).toString("base64")}`,
-      })),
-      quality: "high",
-      size: "1024x1024",
-      n: 1,
-      output_format: "jpeg",
-    });
-    expect(String(init.body)).not.toContain(API_KEY);
-    expect(modelWith(fetch).capabilities).toEqual({
-      maxCharacterReferences: 16,
-      sizes: ["1024x1024"],
-      qualities: ["high"],
-    });
-  });
+  test.each(["gpt-image-2.6-sunburst", "gpt-image-2.6-flare"])(
+    "%s: one high-quality square image edit with the prompt and 16 references, no complexity, key in a header only",
+    async (model) => {
+      const { fetch, sent } = scriptedFetch([reply(200, "image-with-usage.json")]);
+      const imageModel = modelWith(fetch, model);
+      await Effect.runPromise(imageModel.call(request));
+      expect(sent).toHaveLength(1);
+      const [{ url, init }] = sent as [Sent];
+      expect(url).toBe(OPENAI_IMAGE_EDITS_URL);
+      expect(init.method).toBe("POST");
+      const headers = new Headers(init.headers);
+      expect(headers.get("authorization")).toBe(`Bearer ${API_KEY}`);
+      expect(headers.get("content-type")).toBe("application/json");
+      const body = JSON.parse(String(init.body));
+      // The Image API reference's edit body for GPT Image 2.6; `complexity` is
+      // left unset, so the model plans at its default.
+      expect(body).toEqual({
+        model,
+        prompt: request.prompt,
+        images: request.references.map(({ bytes }) => ({
+          image_url: `data:image/jpeg;base64,${Buffer.from(bytes).toString("base64")}`,
+        })),
+        quality: "high",
+        size: "1024x1024",
+        n: 1,
+        output_format: "jpeg",
+      });
+      expect(String(init.body)).not.toContain(API_KEY);
+      expect(imageModel.capabilities).toEqual({
+        maxCharacterReferences: 16,
+        sizes: ["1024x1024"],
+        qualities: ["high"],
+      });
+    },
+  );
 
   test("an image with usage yields the image, its usage and the actual cost from usage", async () => {
     const result = await classify(reply(200, "image-with-usage.json"));
@@ -511,7 +517,7 @@ describe("OpenAI Image Model selection", () => {
     ] as const) {
       const { fetch, sent } = scriptedFetch([]);
       const layer = NativeImageModels({ prices, env, openaiFetch: fetch });
-      const error = await Effect.runPromise(Effect.flip(get(layer, "gpt-image-2.5-sunburst")));
+      const error = await Effect.runPromise(Effect.flip(get(layer, "gpt-image-2.6-sunburst")));
       expect(error).toMatchObject({ _tag: "ImageModelUnavailable" });
       expect(error.message).toContain(message);
       expect(JSON.stringify(error)).not.toContain("FAKE");
@@ -521,7 +527,7 @@ describe("OpenAI Image Model selection", () => {
   });
 
   test("with a key, sunburst and flare are priced and each sends its own model id", async () => {
-    for (const id of ["gpt-image-2.5-sunburst", "gpt-image-2.5-flare"]) {
+    for (const id of ["gpt-image-2.6-sunburst", "gpt-image-2.6-flare"]) {
       const { fetch, sent } = scriptedFetch([reply(200, "image-with-usage.json")]);
       const layer = NativeImageModels({
         prices,
@@ -534,7 +540,7 @@ describe("OpenAI Image Model selection", () => {
       await Effect.runPromise(model.call(request));
       expect(JSON.parse(String(sent[0]!.init.body)).model).toBe(id);
     }
-    expect(lookups).toEqual(["gpt-image-2.5-sunburst", "gpt-image-2.5-flare"]);
+    expect(lookups).toEqual(["gpt-image-2.6-sunburst", "gpt-image-2.6-flare"]);
   });
 
   test("an OpenAI model priced in another mode is Unpriced, not called", async () => {
@@ -542,7 +548,7 @@ describe("OpenAI Image Model selection", () => {
       prices: { lookup: (model) => Effect.succeed({ ...geminiTestPrice, model }) },
       env: { OPENAI_API_KEY: API_KEY },
     });
-    const error = await Effect.runPromise(Effect.flip(get(layer, "gpt-image-2.5-sunburst")));
+    const error = await Effect.runPromise(Effect.flip(get(layer, "gpt-image-2.6-sunburst")));
     expect(error).toMatchObject({
       _tag: "Unpriced",
       reason: "priced as GeminiImage, not as an OpenAI image model",

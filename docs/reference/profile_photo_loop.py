@@ -39,7 +39,7 @@ TARGET_SCORE = 9.0
 IDENTITY_GATE = 0.45  # ArcFace cosine below this = different person, reject outright
 
 GEMINI_MODEL = "gemini-nano-banana-2.1"
-OPENAI_IMAGE_MODEL = "gpt-image-2.5-sunburst"
+OPENAI_IMAGE_MODEL = "gpt-image-2.6-sunburst"
 JUDGE_MODEL = "claude-opus-5-5"
 
 # Target look; the judge scores against this, the optimizer may only refine wording, never change it
