@@ -80,7 +80,7 @@ test("the vendors' prices refresh through their caller's refresh: one fetch, rep
   });
   const warnings: string[] = [];
   const vendors = vendorsPricedBy(source, (warning) => warnings.push(warning), {
-    GEMINI_API_KEY: "AIzaFAKEFAKEFAKEFAKEFAKE",
+    ICONOGRAPH_GEMINI_API_KEY: "AIzaFAKEFAKEFAKEFAKEFAKE",
   });
   const get = () =>
     Effect.runPromise(
