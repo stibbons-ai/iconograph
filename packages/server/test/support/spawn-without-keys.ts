@@ -9,11 +9,9 @@ export async function spawnWithoutKeys(
   env: Record<string, string> = {},
 ) {
   const {
-    GEMINI_API_KEY: _gemini,
-    ANTHROPIC_API_KEY: _anthropic,
-    OPENAI_API_KEY: _openai,
-    GOOGLE_GENERATIVE_AI_API_KEY: _google,
-    GOOGLE_API_KEY: _googleAlias,
+    ICONOGRAPH_GEMINI_API_KEY: _gemini,
+    ICONOGRAPH_ANTHROPIC_API_KEY: _anthropic,
+    ICONOGRAPH_OPENAI_API_KEY: _openai,
     ...inherited
   } = Bun.env;
   const child = Bun.spawn([Bun.which("bun") ?? "bun", entry, ...args], {

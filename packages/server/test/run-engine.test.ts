@@ -2038,7 +2038,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
     try {
       const custom = { model: "anthropic/claude-haiku-5", effort: "high" } as const;
       const { runId } = await withEnvironment(
-        { ANTHROPIC_API_KEY: "test-optimizer-key-0123456789" },
+        { ICONOGRAPH_ANTHROPIC_API_KEY: "test-optimizer-key-0123456789" },
         () => application.start(loop({ optimizer: custom, ...rules({ maxIterations: 2 }) })),
       );
       expect(vendor.requests).toHaveLength(1);
@@ -2083,7 +2083,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
     );
     try {
       const key = "test-optimizer-key-0123456789";
-      const { runId } = await withEnvironment({ ANTHROPIC_API_KEY: key }, () =>
+      const { runId } = await withEnvironment({ ICONOGRAPH_ANTHROPIC_API_KEY: key }, () =>
         application.start(loop(rules({ maxIterations: 2 }))),
       );
       const [first, second] = (await application.report(runId)).lanes[0]!.prompts;
@@ -2600,25 +2600,28 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
       optimizersOnFakeVendor(vendor.origin),
     );
     try {
-      await withEnvironment({ ANTHROPIC_API_KEY: "test-optimizer-key-0123456789" }, async () => {
-        const { run, started } = await startCancellable(application, loop());
-        await until(async () => vendor.requests.length === 1, { timeoutMs: 20_000 });
-        await run.cancel();
-        await started;
-        const report = await untilStopped(application, databasePath, run.runId);
-        expect(report.lanes[0]!.stopReason).toBe("cancelled");
-        await until(async () => aborted.length === 1, { timeoutMs: 10_000 });
-        await until(
-          async () =>
-            (await application.report(run.runId)).lanes[0]!.prompts[0]!.optimizerCost.calls[0]
-              ?.settled === true,
-          { timeoutMs: 10_000 },
-        );
-        const [first] = (await application.report(run.runId)).lanes[0]!.prompts;
-        expect(first!.optimizerCost.calls).toEqual([
-          expect.objectContaining({ result: "transient", actualUsd: null }),
-        ]);
-      });
+      await withEnvironment(
+        { ICONOGRAPH_ANTHROPIC_API_KEY: "test-optimizer-key-0123456789" },
+        async () => {
+          const { run, started } = await startCancellable(application, loop());
+          await until(async () => vendor.requests.length === 1, { timeoutMs: 20_000 });
+          await run.cancel();
+          await started;
+          const report = await untilStopped(application, databasePath, run.runId);
+          expect(report.lanes[0]!.stopReason).toBe("cancelled");
+          await until(async () => aborted.length === 1, { timeoutMs: 10_000 });
+          await until(
+            async () =>
+              (await application.report(run.runId)).lanes[0]!.prompts[0]!.optimizerCost.calls[0]
+                ?.settled === true,
+            { timeoutMs: 10_000 },
+          );
+          const [first] = (await application.report(run.runId)).lanes[0]!.prompts;
+          expect(first!.optimizerCost.calls).toEqual([
+            expect.objectContaining({ result: "transient", actualUsd: null }),
+          ]);
+        },
+      );
     } finally {
       await application.close();
       await vendor.stop();
@@ -2688,7 +2691,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
       what: `HTTP ${status}`,
       vendor: "anthropic" as const,
       model: undefined,
-      env: "ANTHROPIC_API_KEY",
+      env: "ICONOGRAPH_ANTHROPIC_API_KEY",
       answer: (key: string) => turnedAway(status, key),
       detail: `HTTP ${status}: invalid x-api-key [redacted]`,
     })),
@@ -2696,7 +2699,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
       what: "Google's HTTP 400 API_KEY_INVALID",
       vendor: "google" as const,
       model: GOOGLE_MODEL,
-      env: "GOOGLE_GENERATIVE_AI_API_KEY",
+      env: "ICONOGRAPH_GEMINI_API_KEY",
       answer: googleRejectsKey,
       detail: "HTTP 400: API key [redacted] not valid. Please pass a valid API key.",
     },
@@ -2893,7 +2896,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
       );
       try {
         const { runId, lanes } = await withEnvironment(
-          { OPENAI_API_KEY: "SENTINEL-OPENAI-KEY-0123456789" },
+          { ICONOGRAPH_OPENAI_API_KEY: "SENTINEL-OPENAI-KEY-0123456789" },
           () => application.start({ ...loop(), ...request }),
         );
         const stored = storedStops(databasePath, runId, "stop_detail")[0] ?? "";
@@ -2934,7 +2937,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
       judgesOnFakeVendor(vendor.origin),
     );
     try {
-      const { runId, lanes } = await withEnvironment({ ANTHROPIC_API_KEY: key }, () =>
+      const { runId, lanes } = await withEnvironment({ ICONOGRAPH_ANTHROPIC_API_KEY: key }, () =>
         application.start(loop()),
       );
       expect(lanes[0]).toMatchObject({ stopReason: "judge-failed", iterations: 1 });
@@ -2982,7 +2985,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
         optimizersOnFakeVendor(vendor.origin),
       );
       try {
-        const { runId, lanes } = await withEnvironment({ ANTHROPIC_API_KEY: key }, () =>
+        const { runId, lanes } = await withEnvironment({ ICONOGRAPH_ANTHROPIC_API_KEY: key }, () =>
           application.start(loop(rules({ maxIterations: 2 }))),
         );
         expect(lanes[0]).toMatchObject({ stopReason: "iteration-limit", iterations: 2 });
@@ -3015,7 +3018,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
     );
     try {
       const { runId, lanes } = await withEnvironment(
-        { GOOGLE_GENERATIVE_AI_API_KEY: "test-google-key-0123456789" },
+        { ICONOGRAPH_GEMINI_API_KEY: "test-google-key-0123456789" },
         () =>
           application.start(
             loop({
@@ -3051,7 +3054,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
     );
     try {
       const { runId, lanes } = await withEnvironment(
-        { GOOGLE_GENERATIVE_AI_API_KEY: "test-google-key-0123456789" },
+        { ICONOGRAPH_GEMINI_API_KEY: "test-google-key-0123456789" },
         () =>
           application.start(
             loop({
@@ -3097,7 +3100,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
       judgesOnFakeVendor(vendor.origin),
     );
     try {
-      await withEnvironment({ ANTHROPIC_API_KEY: key }, async () => {
+      await withEnvironment({ ICONOGRAPH_ANTHROPIC_API_KEY: key }, async () => {
         const { run, started } = await startCancellable(application, loop({ candidates: 2 }));
         await until(
           async () =>
@@ -3140,7 +3143,9 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
       keylessOptimizers(lookups),
     );
     try {
-      await expect(application.start(loop())).rejects.toThrow("ANTHROPIC_API_KEY is not set");
+      await expect(application.start(loop())).rejects.toThrow(
+        "ICONOGRAPH_ANTHROPIC_API_KEY is not set",
+      );
       expect(lookups).toEqual([]);
       // Not even the Judge's price.
       expect(judge.gets).toEqual([]);
@@ -3181,7 +3186,7 @@ describe("Run engine with the real adapters and a scripted network", () => {
     const recorded = await recordedGemini("completed-image.json");
     const layer = NativeImageModels({
       prices: { lookup: () => Effect.succeed(price) },
-      env: { GEMINI_API_KEY: SENTINEL },
+      env: { ICONOGRAPH_GEMINI_API_KEY: SENTINEL },
       geminiFetch: async (_, init) => {
         bodies.push(String(init.body));
         return new Response(recorded, { status: 200 });
@@ -3254,7 +3259,7 @@ describe("Run engine with the real adapters and a scripted network", () => {
     };
     const layer = NativeImageModels({
       prices: { lookup: () => Effect.sync(() => (lookups++ === 0 ? recordedPrice : tenfold)) },
-      env: { GEMINI_API_KEY: SENTINEL },
+      env: { ICONOGRAPH_GEMINI_API_KEY: SENTINEL },
       geminiFetch: async () => new Response(recorded, { status: 200 }),
     });
     const { application } = await runApplication(layer);
@@ -3289,7 +3294,7 @@ describe("Run engine with the real adapters and a scripted network", () => {
     };
     const layer = NativeImageModels({
       prices: { lookup: (model) => Effect.succeed(prices[model]!) },
-      env: { GEMINI_API_KEY: SENTINEL, OPENAI_API_KEY: OPENAI_SENTINEL },
+      env: { ICONOGRAPH_GEMINI_API_KEY: SENTINEL, ICONOGRAPH_OPENAI_API_KEY: OPENAI_SENTINEL },
       geminiFetch: async () => new Response(geminiRecorded, { status: 200 }),
       openaiFetch: async (_, init) => {
         openaiBodies.push(String(init.body));

@@ -397,16 +397,18 @@ describe("Image Model selection", () => {
   const lookups: string[] = [];
   const prices = { lookup: (model: string) => Effect.sync(() => (lookups.push(model), price)) };
 
-  test("a missing GEMINI_API_KEY fails before any call or price lookup", async () => {
+  test("a missing ICONOGRAPH_GEMINI_API_KEY fails before any call or price lookup", async () => {
     const { fetch, sent } = scriptedFetch([]);
-    const layer = NativeImageModels({ prices, env: {}, geminiFetch: fetch });
+    // Google's standard variables are never read: coding agents would bill the API with them.
+    const standard = { GEMINI_API_KEY: API_KEY, GOOGLE_API_KEY: API_KEY };
+    const layer = NativeImageModels({ prices, env: standard, geminiFetch: fetch });
     const error = await Effect.runPromise(
       Effect.gen(function* () {
         return yield* (yield* ImageModels).get("gemini-nano-banana-2.1");
       }).pipe(Effect.flip, Effect.provide(layer)),
     );
     expect(error).toMatchObject({ _tag: "ImageModelUnavailable" });
-    expect(error.message).toContain("GEMINI_API_KEY is not set");
+    expect(error.message).toContain("ICONOGRAPH_GEMINI_API_KEY is not set");
     expect(sent).toHaveLength(0);
     expect(lookups).toHaveLength(0);
   });
@@ -420,7 +422,11 @@ describe("Image Model selection", () => {
       "AIzaFAKEFAKEFAKEFAK", // 19 characters
     ]) {
       const { fetch, sent } = scriptedFetch([]);
-      const layer = NativeImageModels({ prices, env: { GEMINI_API_KEY: bad }, geminiFetch: fetch });
+      const layer = NativeImageModels({
+        prices,
+        env: { ICONOGRAPH_GEMINI_API_KEY: bad },
+        geminiFetch: fetch,
+      });
       const error = await Effect.runPromise(
         Effect.gen(function* () {
           return yield* (yield* ImageModels).get("gemini-nano-banana-2.1");
@@ -431,7 +437,10 @@ describe("Image Model selection", () => {
       expect(sent).toHaveLength(0);
     }
     // 20 characters is long enough (given a recorded price, so nothing is looked up).
-    const minimal = NativeImageModels({ prices, env: { GEMINI_API_KEY: "AIzaFAKEFAKEFAKEFAKE" } });
+    const minimal = NativeImageModels({
+      prices,
+      env: { ICONOGRAPH_GEMINI_API_KEY: "AIzaFAKEFAKEFAKEFAKE" },
+    });
     await Effect.runPromise(
       Effect.gen(function* () {
         return yield* (yield* ImageModels).get("gemini-nano-banana-2.1", price);
@@ -442,7 +451,7 @@ describe("Image Model selection", () => {
 
   test("given the price recorded at Run start, the model uses it and looks nothing up", async () => {
     const before = lookups.length;
-    const layer = NativeImageModels({ prices, env: { GEMINI_API_KEY: API_KEY } });
+    const layer = NativeImageModels({ prices, env: { ICONOGRAPH_GEMINI_API_KEY: API_KEY } });
     const recordedPrice = { ...price, source: { ...price.source, ageSeconds: 99 } };
     const model = await Effect.runPromise(
       Effect.gen(function* () {
@@ -454,7 +463,7 @@ describe("Image Model selection", () => {
   });
 
   test("a recorded price for another model is refused, not used", async () => {
-    const layer = NativeImageModels({ prices, env: { GEMINI_API_KEY: API_KEY } });
+    const layer = NativeImageModels({ prices, env: { ICONOGRAPH_GEMINI_API_KEY: API_KEY } });
     const error = await Effect.runPromise(
       Effect.gen(function* () {
         return yield* (yield* ImageModels).get("gemini-nano-banana-2.1", {
@@ -470,7 +479,7 @@ describe("Image Model selection", () => {
   });
 
   test("with a key, the Gemini model is priced and ready; other models have no adapter", async () => {
-    const layer = NativeImageModels({ prices, env: { GEMINI_API_KEY: API_KEY } });
+    const layer = NativeImageModels({ prices, env: { ICONOGRAPH_GEMINI_API_KEY: API_KEY } });
     const [model, missing] = await Effect.runPromise(
       Effect.gen(function* () {
         const models = yield* ImageModels;

@@ -40,11 +40,16 @@ import { Effect, Schema } from "effect";
  * and costed. Each role adds its own message and output schema.
  */
 
-/** The environment variables holding each vendor's key. */
-const VENDOR_KEYS: { readonly [V in LlmVendor]: readonly [string, ...string[]] } = {
-  anthropic: ["ANTHROPIC_API_KEY"],
-  openai: ["OPENAI_API_KEY"],
-  google: ["GOOGLE_GENERATIVE_AI_API_KEY", "GOOGLE_API_KEY"],
+/**
+ * The environment variable holding each vendor's key. Prefixed so the shell
+ * exporting them (devenv `enterShell`) doesn't hand them to coding agents
+ * (Claude Code, omp, Codex, Gemini CLI), which would bill the API over a
+ * subscription; Gemini image Lanes and google/ roles share one key.
+ */
+const VENDOR_KEYS: { readonly [V in LlmVendor]: string } = {
+  anthropic: "ICONOGRAPH_ANTHROPIC_API_KEY",
+  openai: "ICONOGRAPH_OPENAI_API_KEY",
+  google: "ICONOGRAPH_GEMINI_API_KEY",
 };
 
 /**

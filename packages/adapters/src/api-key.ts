@@ -1,5 +1,5 @@
 /**
- * Read a vendor API key from the first of `variables` set in `env`, trimmed.
+ * Read a vendor API key from `variable` in `env`, trimmed.
  * Returns the key, or why it can't be used; the reason never contains the key.
  * Keys are read per use and never stored.
  *
@@ -10,21 +10,18 @@
  */
 export function apiKeyFromEnv(
   env: Record<string, string | undefined>,
-  variables: readonly [string, ...string[]],
+  variable: string,
   model: string,
 ): { readonly key: string } | { readonly problem: string } {
-  for (const name of variables) {
-    const key = env[name]?.trim();
-    if (!key) continue;
-    return /^[\x21-\x7e]{20,}$/.test(key)
-      ? { key }
-      : {
-          problem: `${name} is shorter than 20 characters or contains spaces, control or non-ASCII characters; check how it was set`,
-        };
+  const key = env[variable]?.trim();
+  if (!key) {
+    return { problem: `${variable} is not set; ${model} needs an API key in the environment` };
   }
-  return {
-    problem: `${variables.join(" or ")} is not set; ${model} needs an API key in the environment`,
-  };
+  return /^[\x21-\x7e]{20,}$/.test(key)
+    ? { key }
+    : {
+        problem: `${variable} is shorter than 20 characters or contains spaces, control or non-ASCII characters; check how it was set`,
+      };
 }
 
 /** Removes an API key from error text, e.g. from a runtime rejecting the header value. */

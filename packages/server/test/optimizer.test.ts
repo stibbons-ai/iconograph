@@ -19,9 +19,9 @@ import { vendorAnswer } from "./support/fake-vendors";
 
 const KEY = "SENTINEL-OPTIMIZER-KEY-0123456789";
 const allKeys = {
-  ANTHROPIC_API_KEY: KEY,
-  OPENAI_API_KEY: KEY,
-  GOOGLE_GENERATIVE_AI_API_KEY: KEY,
+  ICONOGRAPH_ANTHROPIC_API_KEY: KEY,
+  ICONOGRAPH_OPENAI_API_KEY: KEY,
+  ICONOGRAPH_GEMINI_API_KEY: KEY,
 };
 const sonnetPricing = { _tag: "Llm", inputPerToken: 2e-6, outputPerToken: 1e-5 } as const;
 const sonnetPrice: PriceQuote = {
@@ -193,7 +193,9 @@ describe("Mastra Optimizer", () => {
         () => "got an Optimizer",
         (error: unknown) => String(error),
       );
-    expect(await failure("anthropic/claude-sonnet-5-5")).toContain("ANTHROPIC_API_KEY is not set");
+    expect(await failure("anthropic/claude-sonnet-5-5")).toContain(
+      "ICONOGRAPH_ANTHROPIC_API_KEY is not set",
+    );
     expect(await failure("xai/grok-5")).toContain(
       'No Optimizer for "xai/grok-5"; the Optimizer is an anthropic/, openai/ or google/ model',
     );
