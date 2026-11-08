@@ -25,7 +25,7 @@ test("prices refresh once, on the first lookup, and never without a key", async 
     );
   expect((await get({}))._tag).toBe("Failure");
   expect(refreshes).toBe(0);
-  const key = { GEMINI_API_KEY: "AIzaFAKEFAKEFAKEFAKEFAKE" };
+  const key = { ICONOGRAPH_GEMINI_API_KEY: "AIzaFAKEFAKEFAKEFAKEFAKE" };
   expect((await get(key))._tag).toBe("Success");
   expect((await get(key))._tag).toBe("Success");
   expect(refreshes).toBe(1);

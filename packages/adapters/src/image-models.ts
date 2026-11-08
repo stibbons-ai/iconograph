@@ -25,7 +25,7 @@ export interface NativeImageModelsOptions {
 
 /** The API key in `variable` of `env`, checked before any price lookup or billable call. */
 const apiKey = (env: Record<string, string | undefined>, variable: string, model: string) => {
-  const read = apiKeyFromEnv(env, [variable], model);
+  const read = apiKeyFromEnv(env, variable, model);
   return "problem" in read
     ? Effect.fail(new ImageModelUnavailable({ model, message: read.problem }))
     : Effect.succeed(read.key);
@@ -53,7 +53,7 @@ export const NativeImageModels = (options: NativeImageModelsOptions) => {
 
   const gemini = (model: string, recorded: PriceQuote | undefined) =>
     Effect.gen(function* () {
-      const key = yield* apiKey(env, "GEMINI_API_KEY", model);
+      const key = yield* apiKey(env, "ICONOGRAPH_GEMINI_API_KEY", model);
       const price = yield* lookup(model, recorded);
       if (price.pricing._tag !== "GeminiImage") {
         return yield* mispriced(model, price, "a Gemini image model");
@@ -68,7 +68,7 @@ export const NativeImageModels = (options: NativeImageModelsOptions) => {
 
   const openai = (model: string, recorded: PriceQuote | undefined) =>
     Effect.gen(function* () {
-      const key = yield* apiKey(env, "OPENAI_API_KEY", model);
+      const key = yield* apiKey(env, "ICONOGRAPH_OPENAI_API_KEY", model);
       const price = yield* lookup(model, recorded);
       if (price.pricing._tag !== "OpenAIImage") {
         return yield* mispriced(model, price, "an OpenAI image model");

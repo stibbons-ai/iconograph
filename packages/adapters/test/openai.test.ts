@@ -275,7 +275,7 @@ describe("OpenAI adapter against recorded responses", () => {
         "OpenAI HTTP 401 invalid_request_error invalid_api_key: Incorrect API key provided: [redacted]. You can find your API key at https://platform.openai.com/account/api-keys.",
       budgetExhausted: false,
     });
-    // Whatever the key's prefix, e.g. a Gemini key pasted into OPENAI_API_KEY.
+    // Whatever the key's prefix, e.g. a Gemini key pasted into ICONOGRAPH_OPENAI_API_KEY.
     const result = await classify(async () =>
       Response.json(
         {
@@ -531,12 +531,20 @@ describe("OpenAI Image Model selection", () => {
       return yield* (yield* ImageModels).get(model);
     }).pipe(Effect.provide(layer));
 
-  test("a missing or malformed OPENAI_API_KEY fails before any call or price lookup", async () => {
+  test("a missing or malformed ICONOGRAPH_OPENAI_API_KEY fails before any call or price lookup", async () => {
     for (const [env, message] of [
-      [{}, "OPENAI_API_KEY is not set"],
-      [{ GEMINI_API_KEY: "AIzaFAKEFAKEFAKEFAKEFAKE" }, "OPENAI_API_KEY is not set"],
-      [{ OPENAI_API_KEY: "sk-FAKE" }, "OPENAI_API_KEY is shorter than 20 characters"],
-      [{ OPENAI_API_KEY: "sk-FAKE FAKEFAKEFAKEFAKE" }, "contains spaces"],
+      [{}, "ICONOGRAPH_OPENAI_API_KEY is not set"],
+      [
+        { ICONOGRAPH_GEMINI_API_KEY: "AIzaFAKEFAKEFAKEFAKEFAKE" },
+        "ICONOGRAPH_OPENAI_API_KEY is not set",
+      ],
+      // OpenAI's standard variable is never read: coding agents would bill the API with it.
+      [{ OPENAI_API_KEY: "sk-FAKEFAKEFAKEFAKEFAKE" }, "ICONOGRAPH_OPENAI_API_KEY is not set"],
+      [
+        { ICONOGRAPH_OPENAI_API_KEY: "sk-FAKE" },
+        "ICONOGRAPH_OPENAI_API_KEY is shorter than 20 characters",
+      ],
+      [{ ICONOGRAPH_OPENAI_API_KEY: "sk-FAKE FAKEFAKEFAKEFAKE" }, "contains spaces"],
     ] as const) {
       const { fetch, sent } = scriptedFetch([]);
       const layer = NativeImageModels({ prices, env, openaiFetch: fetch });
@@ -554,7 +562,7 @@ describe("OpenAI Image Model selection", () => {
       const { fetch, sent } = scriptedFetch([reply(200, "image-with-usage.json")]);
       const layer = NativeImageModels({
         prices,
-        env: { OPENAI_API_KEY: API_KEY },
+        env: { ICONOGRAPH_OPENAI_API_KEY: API_KEY },
         openaiFetch: fetch,
       });
       const model = await Effect.runPromise(get(layer, id));
@@ -569,7 +577,7 @@ describe("OpenAI Image Model selection", () => {
   test("an OpenAI model priced in another mode is Unpriced, not called", async () => {
     const layer = NativeImageModels({
       prices: { lookup: (model) => Effect.succeed({ ...geminiTestPrice, model }) },
-      env: { OPENAI_API_KEY: API_KEY },
+      env: { ICONOGRAPH_OPENAI_API_KEY: API_KEY },
     });
     const error = await Effect.runPromise(Effect.flip(get(layer, "gpt-image-2.5-sunburst")));
     expect(error).toMatchObject({

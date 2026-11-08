@@ -135,9 +135,10 @@ Options:
                       must be built first (bun run models:export-facenet).
   --help, -h          Show this help.
 
-Keys come from the environment, as for bun run run: GEMINI_API_KEY, OPENAI_API_KEY,
-and the Judges' and Optimizer's vendors' (ANTHROPIC_API_KEY, OPENAI_API_KEY,
-GOOGLE_GENERATIVE_AI_API_KEY). Both Judges' keys and prices, every Image Model's
+Keys come from the environment, as for bun run run: ICONOGRAPH_GEMINI_API_KEY,
+ICONOGRAPH_OPENAI_API_KEY, and the Judges' and Optimizer's vendors'
+(ICONOGRAPH_ANTHROPIC_API_KEY, ICONOGRAPH_OPENAI_API_KEY,
+ICONOGRAPH_GEMINI_API_KEY). Both Judges' keys and prices, every Image Model's
 and, unless --max-iterations is 1, the Optimizer's are checked, the photos
 validated and the face models loaded before the first billable call and before
 anything is written to the output folder.

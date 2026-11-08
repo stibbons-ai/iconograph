@@ -68,10 +68,10 @@ too. One-time setup:
    whose `value` field holds the key (fish; `read -s` keeps it off the screen and out of history):
 
    ```fish
-   read -s -P "ANTHROPIC_API_KEY: " value
+   read -s -P "ICONOGRAPH_ANTHROPIC_API_KEY: " value
    op item create --account my.1password.com --vault Iconograph --category "Secure Note" \
-       --title "secretspec/iconograph/default/ANTHROPIC_API_KEY" --tags automated,iconograph \
-       "project[text]=iconograph" "key[text]=ANTHROPIC_API_KEY" "value[concealed]=$value"
+       --title "secretspec/iconograph/default/ICONOGRAPH_ANTHROPIC_API_KEY" --tags automated,iconograph \
+       "project[text]=iconograph" "key[text]=ICONOGRAPH_ANTHROPIC_API_KEY" "value[concealed]=$value"
    set -e value
    ```
 
@@ -82,19 +82,22 @@ too. One-time setup:
    secretspec check --explain
    ```
 
-The keys are `ANTHROPIC_API_KEY` (the default Judge and Optimizer), `OPENAI_API_KEY` (OpenAI
-Lanes, an `openai/` Judge or Optimizer) and `GEMINI_API_KEY` (Gemini Lanes).
-`GOOGLE_GENERATIVE_AI_API_KEY`, read by a `google/` Judge or Optimizer, is derived from
-`GEMINI_API_KEY` and is never stored. All are optional, and a missing or rejected service token
-only warns: the shell still opens, and a Run names the key it is missing.
+The keys are `ICONOGRAPH_ANTHROPIC_API_KEY` (the default Judge and Optimizer),
+`ICONOGRAPH_OPENAI_API_KEY` (OpenAI Lanes, an `openai/` Judge or Optimizer) and
+`ICONOGRAPH_GEMINI_API_KEY` (Gemini Lanes, a `google/` Judge or Optimizer). They carry the
+`ICONOGRAPH_` prefix, and Iconograph reads no other names, so that an AI coding agent started in
+the shell (Claude Code, omp, Codex, Gemini CLI) doesn't find a vendor's standard variable
+(`ANTHROPIC_API_KEY`, …) and bill the API instead of your subscription. All are optional, and a
+missing or rejected service token only warns: the shell still opens, and a Run names the key it
+is missing.
 
 How it works: `enterShell` in `devenv.nix` runs `secretspec export` and exports the result into
 the live shell. The keys are never set through devenv's `env`, which would write them into the
 world-readable Nix store, and devenv's own SecretSpec integration (`secretspec.enable`) stays off:
 it would fetch the keys a second time and refuse to open the shell when the token is missing.
-Every process in the shell, including an AI coding agent started there, sees the keys. To read
-them from another store, set the provider on entry, for example
-`SECRETSPEC_PROVIDER=keyring devenv shell`.
+Every process in the shell, including an AI coding agent started there, sees the keys, under
+names no vendor's tool reads. To read them from another store, set the provider on entry, for
+example `SECRETSPEC_PROVIDER=keyring devenv shell`.
 
 ## Commands
 
@@ -106,8 +109,9 @@ validation use plain commands; `check` composes the scripts and finishes with `b
 Outside the shell, set both variables when invoking Bun or Mastra directly instead of the scripts.
 
 ```sh
-# Start a Run (see "Runs" below); needs GEMINI_API_KEY (and OPENAI_API_KEY for an OpenAI Lane) and
-# the Judge's key (ANTHROPIC_API_KEY), which the shell exports (see "Vendor keys").
+# Start a Run (see "Runs" below); needs ICONOGRAPH_GEMINI_API_KEY (and ICONOGRAPH_OPENAI_API_KEY
+# for an OpenAI Lane) and the Judge's key (ICONOGRAPH_ANTHROPIC_API_KEY), which the shell exports
+# (see "Vendor keys").
 bun run run --budget 0.50 me-1.jpg me-2.jpg me-3.jpg
 
 # Print a stored Run again from the database.
@@ -552,12 +556,12 @@ Judge's in the Lane's first Iteration with a Scored Candidate.
   any `anthropic/`, `openai/` or `google/` vision model as a `vendor/model` id; any other vendor is
   refused before any billable call. `--judge-effort` takes `low`, `medium` or `high`, passed as
   the vendor's reasoning parameter (Anthropic `effort`, OpenAI `reasoningEffort`, Gemini
-  `thinkingConfig.thinkingLevel`). Its key comes from the environment only: `ANTHROPIC_API_KEY`,
-  `OPENAI_API_KEY`, or `GOOGLE_GENERATIVE_AI_API_KEY` (or `GOOGLE_API_KEY`). The Judge is checked
-  first, before any billable call: its key, then (for a Run of more than one Iteration) the
-  Optimizer's key, before any price is looked up; then their prices, then each Lane's Image Model,
-  its key before its own price. The key and the Reference Photos go only to the vendor's own API
-  (`https://api.anthropic.com/v1`, `https://api.openai.com/v1`,
+  `thinkingConfig.thinkingLevel`). Its key comes from the environment only:
+  `ICONOGRAPH_ANTHROPIC_API_KEY`, `ICONOGRAPH_OPENAI_API_KEY`, or `ICONOGRAPH_GEMINI_API_KEY`
+  (`google/`). The Judge is checked first, before any billable call: its key, then (for a Run of
+  more than one Iteration) the Optimizer's key, before any price is looked up; then their prices,
+  then each Lane's Image Model, its key before its own price. The key and the Reference Photos go
+  only to the vendor's own API (`https://api.anthropic.com/v1`, `https://api.openai.com/v1`,
   `https://generativelanguage.googleapis.com/v1beta`), set explicitly: the base-URL variables
   `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL` and `GOOGLE_BASE_URL` have no effect on the Judge. A
   proxy set by `HTTPS_PROXY` (or `ALL_PROXY`) still carries the connection, tunnelled with TLS to
@@ -748,7 +752,7 @@ starting Prompt at the same Budget? For every Subject and Image Model it runs tw
 each, then scores every generated image of both with judges the loop never sees.
 
 ```sh
-GEMINI_API_KEY=… OPENAI_API_KEY=… ANTHROPIC_API_KEY=… \
+ICONOGRAPH_GEMINI_API_KEY=… ICONOGRAPH_OPENAI_API_KEY=… ICONOGRAPH_ANTHROPIC_API_KEY=… \
   bun run eval --out ~/eval-out --budget 2 --candidates 3 ~/subjects
 ```
 
@@ -901,10 +905,10 @@ data. The volume also holds the Runs database (`iconograph.db`, with Mastra's sn
 content-addressed images (`images/`) and the price cache (`prices.db`). Offline machines can copy
 the locked weights into the volume's `models/` folder first (see "Model weights").
 
-**Keys** come from `.env` only: the Judge's and the Optimizer's vendor (`ANTHROPIC_API_KEY` for
-the default `anthropic/claude-sonnet-5-5`, `OPENAI_API_KEY` for `openai/`,
-`GOOGLE_GENERATIVE_AI_API_KEY` for `google/`) and every Lane's Image Model (`GEMINI_API_KEY`,
-`OPENAI_API_KEY`).
+**Keys** come from `.env` only: the Judge's and the Optimizer's vendor
+(`ICONOGRAPH_ANTHROPIC_API_KEY` for the default `anthropic/claude-sonnet-5-5`,
+`ICONOGRAPH_OPENAI_API_KEY` for `openai/`, `ICONOGRAPH_GEMINI_API_KEY` for `google/`) and every
+Lane's Image Model (`ICONOGRAPH_GEMINI_API_KEY`, `ICONOGRAPH_OPENAI_API_KEY`).
 
 **Only localhost can reach it.** The server listens on `127.0.0.1` by default; outside a
 container `ICONOGRAPH_HOST` and `ICONOGRAPH_PORT` change that, and any non-loopback address logs a

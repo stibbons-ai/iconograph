@@ -56,9 +56,9 @@ const answer =
 
 /** Every vendor's key. */
 const allKeys = {
-  ANTHROPIC_API_KEY: KEY,
-  OPENAI_API_KEY: KEY,
-  GOOGLE_GENERATIVE_AI_API_KEY: KEY,
+  ICONOGRAPH_ANTHROPIC_API_KEY: KEY,
+  ICONOGRAPH_OPENAI_API_KEY: KEY,
+  ICONOGRAPH_GEMINI_API_KEY: KEY,
 };
 
 /** Gets a Judge from Judges built by `layer`. */
@@ -318,7 +318,7 @@ describe("Mastra Judge", () => {
   test("the fake Anthropic Judge refuses a request to any other vendor before it is sent", async () => {
     const vendor = fakeVendorServer(() => vendorAnswer("anthropic", JSON.stringify(FAKE_VERDICT)));
     try {
-      const result = await withEnvironment({ OPENAI_API_KEY: KEY }, async () =>
+      const result = await withEnvironment({ ICONOGRAPH_OPENAI_API_KEY: KEY }, async () =>
         call(await getJudge(judgesOnFakeVendor(vendor.origin), "openai/gpt-5.5")),
       );
       // Failed at $0 and not retried, so no test can reach a live vendor by accident.
@@ -349,7 +349,7 @@ describe("Mastra Judge", () => {
       return vendorAnswer("anthropic", JSON.stringify(FAKE_VERDICT));
     });
     const child = Bun.spawn([process.execPath, script, vendor.origin], {
-      env: { ...Bun.env, ANTHROPIC_API_KEY: KEY, BUN_CONFIG_HTTP_IDLE_TIMEOUT: "1" },
+      env: { ...Bun.env, ICONOGRAPH_ANTHROPIC_API_KEY: KEY, BUN_CONFIG_HTTP_IDLE_TIMEOUT: "1" },
       stderr: "inherit",
     });
     try {
@@ -614,16 +614,16 @@ describe("Mastra Judge", () => {
 
   test("a missing key, an unknown vendor or a non-LLM price fail before any call or lookup", async () => {
     const noKey = judges(answer("{}"), {});
-    await expect(noKey.get()).rejects.toThrow("ANTHROPIC_API_KEY is not set");
+    await expect(noKey.get()).rejects.toThrow("ICONOGRAPH_ANTHROPIC_API_KEY is not set");
     expect(noKey.lookups).toEqual([]);
     await expect(
-      judges(answer("{}"), { GOOGLE_API_KEY: KEY }).get("google/gemini-3.1-pro-preview"),
+      judges(answer("{}"), { ICONOGRAPH_GEMINI_API_KEY: KEY }).get("google/gemini-3.1-pro-preview"),
     ).resolves.toBeDefined();
     await expect(judges(answer("{}")).get("mistral/large")).rejects.toThrow(
       'No Judge for "mistral/large"',
     );
     const wrongPrice = MastraJudges({
-      env: { ANTHROPIC_API_KEY: KEY },
+      env: { ICONOGRAPH_ANTHROPIC_API_KEY: KEY },
       prices: {
         lookup: () =>
           Effect.succeed({
@@ -649,5 +649,25 @@ describe("Mastra Judge", () => {
     );
     expect(error).toMatchObject({ _tag: "Unpriced" });
     expect(JSON.stringify(error)).not.toContain(KEY);
+  });
+
+  // Coding agents bill the API instead of a subscription when they find these in the shell.
+  test("the vendors' standard key variables are never read", async () => {
+    const standard = {
+      ANTHROPIC_API_KEY: KEY,
+      OPENAI_API_KEY: KEY,
+      GEMINI_API_KEY: KEY,
+      GOOGLE_GENERATIVE_AI_API_KEY: KEY,
+      GOOGLE_API_KEY: KEY,
+    };
+    for (const [model, variable] of [
+      ["anthropic/claude-sonnet-5-5", "ICONOGRAPH_ANTHROPIC_API_KEY"],
+      ["openai/gpt-5.5", "ICONOGRAPH_OPENAI_API_KEY"],
+      ["google/gemini-3.1-pro-preview", "ICONOGRAPH_GEMINI_API_KEY"],
+    ] as const) {
+      await expect(judges(answer("{}"), standard).get(model)).rejects.toThrow(
+        `${variable} is not set`,
+      );
+    }
   });
 });
