@@ -3,11 +3,11 @@ import { mkdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { verifiedModelsDirectory } from "../../adapters/test/face-models";
+import { spawnCli } from "../../adapters/test/spawn-cli";
 import { temporaryDirectories } from "../../adapters/test/temporary-directory";
 import { faceFixture, type FakeScript, subjectPhotos } from "./support/fake-image-models";
 import { FAKE_VERDICT, levels } from "./support/fake-judges";
 import { fakeVendorServer, vendorAnswer, vendorError } from "./support/fake-vendors";
-import { spawnWithoutKeys } from "./support/spawn-without-keys";
 
 const cli = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const withFakes = fileURLToPath(new URL("./support/run-cli-with-fakes.ts", import.meta.url));
@@ -19,9 +19,8 @@ async function invoke(
   script: FakeScript = [],
   extraEnv: Record<string, string> = {},
 ) {
-  const { stdout, stderr, exitCode } = await spawnWithoutKeys(entry, args, {
-    FAKE_IMAGE_SCRIPT: JSON.stringify(script),
-    ...extraEnv,
+  const { stdout, stderr, exitCode } = await spawnCli([entry, ...args], {
+    env: { FAKE_IMAGE_SCRIPT: JSON.stringify(script), ...extraEnv },
   });
   const lines = stderr.trim().split("\n").filter(Boolean);
   return { stdout, lines, exitCode };
@@ -105,7 +104,7 @@ test("a Run's Judge sends its key and the photos to the Anthropic API, whatever 
       ["same"],
       {
         FAKE_ANTHROPIC_ORIGIN: vendor.origin,
-        ANTHROPIC_API_KEY: key,
+        ICONOGRAPH_ANTHROPIC_API_KEY: key,
         ANTHROPIC_BASE_URL: trap.origin,
       },
     );
@@ -163,7 +162,7 @@ test("a Run iterates: the Optimizer rewrites the Prompt until the target score s
       withFakes,
       [...common, "--candidates", "1", ...subjectPhotos],
       ["same", "same"],
-      { FAKE_ANTHROPIC_ORIGIN: vendor.origin, ANTHROPIC_API_KEY: key },
+      { FAKE_ANTHROPIC_ORIGIN: vendor.origin, ICONOGRAPH_ANTHROPIC_API_KEY: key },
     );
     expect(exitCode).toBe(0);
     const report = JSON.parse(stdout);
@@ -221,7 +220,7 @@ test("a Run whose Optimizer key is rejected stops its Lane optimizer-failed and 
       withFakes,
       [...common, "--candidates", "1", ...subjectPhotos],
       ["same", "same"],
-      { FAKE_ANTHROPIC_ORIGIN: vendor.origin, ANTHROPIC_API_KEY: key },
+      { FAKE_ANTHROPIC_ORIGIN: vendor.origin, ICONOGRAPH_ANTHROPIC_API_KEY: key },
     );
     expect(exitCode).toBe(0);
     const report = JSON.parse(stdout);
@@ -425,9 +424,9 @@ test("help documents the arguments, the Budget and the key", async () => {
     "openai:flare",
     "--judge-model ID",
     "--judge-effort LEVEL",
-    "GEMINI_API_KEY",
-    "OPENAI_API_KEY",
-    "ANTHROPIC_API_KEY",
+    "ICONOGRAPH_GEMINI_API_KEY",
+    "ICONOGRAPH_OPENAI_API_KEY",
+    "ICONOGRAPH_ANTHROPIC_API_KEY",
     "30 days",
     "store=false",
     "read",
@@ -487,7 +486,7 @@ test("errors are one JSON line on stderr with a nonzero exit and nothing on stdo
     ],
     // The real CLI, with every key cleared: the Judge's key is checked first, before any call
     // or price refresh.
-    [cli, [...common, ...subjectPhotos], "ANTHROPIC_API_KEY is not set"],
+    [cli, [...common, ...subjectPhotos], "ICONOGRAPH_ANTHROPIC_API_KEY is not set"],
     [cli, ["read", ...common, "--run-id", "missing"], "Run not found"],
     [cli, ["read", "--db", join(directory, "typo.db"), "--run-id", "x"], "no such database file"],
     [cli, ["--unknown"], "Unknown option"],

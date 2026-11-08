@@ -4,11 +4,12 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ModelLock } from "../src/models";
 import { main, type Runner } from "../src/models-export-cli";
-import { spawnCli } from "./face-models";
 import { sha256 } from "./sha256";
+import { spawnCli } from "./spawn-cli";
 import { temporaryDirectories } from "./temporary-directory";
 
 const temporaryDirectory = temporaryDirectories("models-export");
+const cli = fileURLToPath(new URL("../src/models-export-cli.ts", import.meta.url));
 const exported = new TextEncoder().encode("exported facenet");
 const lock: ModelLock = {
   models: [
@@ -138,24 +139,21 @@ describe("models:export-facenet", () => {
   });
 
   test("as a process, exits nonzero with a JSON error", async () => {
-    const child = spawnCli("models-export-cli.ts", ["--bogus"]);
-    expect(await child.exited).toBe(1);
-    expect(await new Response(child.stdout).text()).toBe("");
-    expect(JSON.parse(await new Response(child.stderr).text()).error).toContain("--bogus");
+    const { stdout, stderr, exitCode } = await spawnCli([cli, "--bogus"]);
+    expect(exitCode).toBe(1);
+    expect(stdout).toBe("");
+    expect(JSON.parse(stderr).error).toContain("--bogus");
   });
 
   test("as a process without uv on PATH, exits 1 with the install hint", async () => {
     const data = await temporaryDirectory();
     const emptyPath = await temporaryDirectory();
-    const cli = fileURLToPath(new URL("../src/models-export-cli.ts", import.meta.url));
-    const child = Bun.spawn([process.execPath, cli, "--data-dir", data], {
-      env: { ...process.env, PATH: emptyPath },
-      stdout: "pipe",
-      stderr: "pipe",
+    const { stdout, stderr, exitCode } = await spawnCli([cli, "--data-dir", data], {
+      env: { PATH: emptyPath },
     });
-    expect(await child.exited).toBe(1);
-    expect(await new Response(child.stdout).text()).toBe("");
-    const { error } = JSON.parse(await new Response(child.stderr).text());
+    expect(exitCode).toBe(1);
+    expect(stdout).toBe("");
+    const { error } = JSON.parse(stderr);
     expect(error).toContain("install uv: https://docs.astral.sh/uv/");
     expect(await readdir(join(data, "models"))).toEqual([]);
   });

@@ -40,7 +40,6 @@ import { tamper } from "../../adapters/test/tamper";
 import { temporaryDirectories } from "../../adapters/test/temporary-directory";
 import { until } from "../../adapters/test/until";
 import { createRunApplication, type EstimateEvent, readRunReport, type RunWarning } from "../src";
-import { runReport } from "../src/report";
 import {
   defaultRunConfig,
   generateIteration,
@@ -50,7 +49,7 @@ import {
 } from "../src/run-steps";
 import { MastraOptimizers } from "../src/optimizer";
 import type { LaneState } from "../src/schemas";
-import { LANE_CONCURRENCY } from "../src/workflow";
+import { CancelRecordings, LANE_CONCURRENCY } from "../src/workflow";
 import {
   FAKE_ACTUAL_MICROS,
   FAKE_ESTIMATE_MICROS,
@@ -184,16 +183,20 @@ async function setup(
   };
 }
 
-/** The Lanes' stop reasons as stored (not as the report derives them). */
-const storedStopReasons = (databasePath: string, runId: string) => {
+/** One stop column of the Lanes as stored (not as the report derives it). */
+const storedStops = (
+  databasePath: string,
+  runId: string,
+  column: "stop_reason" | "stop_detail" = "stop_reason",
+) => {
   const db = new Database(databasePath, { readonly: true });
   try {
     return db
-      .query<{ stop_reason: string | null }, [string]>(
-        "SELECT stop_reason FROM lanes WHERE run_id = ? ORDER BY lane",
+      .query<{ value: string | null }, [string]>(
+        `SELECT ${column} AS value FROM lanes WHERE run_id = ? ORDER BY lane`,
       )
       .all(runId)
-      .map(({ stop_reason }) => stop_reason);
+      .map(({ value }) => value);
   } finally {
     db.close();
   }
@@ -212,6 +215,7 @@ describe("Run engine with a fake Image Model", () => {
           runId: result.runId,
           lane: 0,
           stopReason: "iteration-limit",
+          stopDetail: null,
           iterations: 1,
           best: { iteration: 1, candidate: 0, score: expect.any(Number) },
         },
@@ -307,6 +311,7 @@ describe("Run engine with a fake Image Model", () => {
             runId,
             lane: 0,
             stopReason: "iteration-limit",
+            stopDetail: null,
             iterations: 3,
             best: { iteration: 1, candidate: 0, score: expect.any(Number) },
           },
@@ -536,7 +541,7 @@ describe("Run engine with a fake Image Model", () => {
         if (!blockSettle) {
           expect(warnings).toEqual([]);
           // A failed Run isn't a cancelled one: its unstopped Lane keeps no stop reason.
-          expect(storedStopReasons(databasePath, runId)).toEqual([null]);
+          expect(storedStops(databasePath, runId)).toEqual([null]);
           expect(call).toMatchObject({
             candidate: 0,
             settled: true,
@@ -1356,7 +1361,7 @@ describe("Run engine with a fake Judge", () => {
         // Nothing was left to judge, and nothing ran out: the Lane's state passes on unchanged.
         expect(await runtime.runPromise(judgeIteration(state))).toEqual(state);
         expect(again.requests).toHaveLength(0);
-        const after = await runtime.runPromise(runReport(runId));
+        const after = await readRunReport(databasePath, dataDirectory, runId);
         expect(after.lanes).toEqual(before.lanes);
         expect(after.totals).toEqual(before.totals);
       } finally {
@@ -1467,7 +1472,7 @@ describe("Run engine with a fake Judge", () => {
     try {
       await runtime.runPromise(judgeIteration(lane0Iteration1(runId)));
       expect(again.requests).toHaveLength(1);
-      const report = await runtime.runPromise(runReport(runId));
+      const report = await readRunReport(databasePath, dataDirectory, runId);
       const [first, second] = report.lanes[0]!.candidates;
       expect(first!.judgeCost.calls.map(({ attempt }) => attempt)).toEqual([0]);
       expect(second!.judgement?.status).toBe("judged");
@@ -1570,6 +1575,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
           runId,
           lane: 0,
           stopReason: "target-score",
+          stopDetail: null,
           iterations: 2,
           best: { iteration: 2, candidate: 0, score: total(second)! },
         },
@@ -1836,7 +1842,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
       expect(await again.iteration(lane0Iteration1(runId))).toEqual(next);
       expect(await again.iteration(next)).toEqual({ ...next, stopReason: "iteration-limit" });
       expect(again.optimizer.requests).toHaveLength(0);
-      const after = await again.runtime.runPromise(runReport(runId));
+      const after = await readRunReport(databasePath, dataDirectory, runId);
       expect(after.lanes[0]!.prompts.map(({ prompt, source }) => [prompt, source])).toEqual([
         [initialPrompt(DEFAULT_TARGET_LOOK), "initial"],
         [initialPrompt(DEFAULT_TARGET_LOOK), "resampled"],
@@ -2032,7 +2038,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
     try {
       const custom = { model: "anthropic/claude-haiku-5", effort: "high" } as const;
       const { runId } = await withEnvironment(
-        { ANTHROPIC_API_KEY: "test-optimizer-key-0123456789" },
+        { ICONOGRAPH_ANTHROPIC_API_KEY: "test-optimizer-key-0123456789" },
         () => application.start(loop({ optimizer: custom, ...rules({ maxIterations: 2 }) })),
       );
       expect(vendor.requests).toHaveLength(1);
@@ -2077,7 +2083,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
     );
     try {
       const key = "test-optimizer-key-0123456789";
-      const { runId } = await withEnvironment({ ANTHROPIC_API_KEY: key }, () =>
+      const { runId } = await withEnvironment({ ICONOGRAPH_ANTHROPIC_API_KEY: key }, () =>
         application.start(loop(rules({ maxIterations: 2 }))),
       );
       const [first, second] = (await application.report(runId)).lanes[0]!.prompts;
@@ -2178,7 +2184,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
       const interrupted = again.runtime.runPromise(Fiber.interrupt(fiber));
       release();
       await interrupted;
-      const report = await again.runtime.runPromise(runReport(runId));
+      const report = await readRunReport(databasePath, dataDirectory, runId);
       expect(report.unattributedCalls).toEqual([
         expect.objectContaining({ purpose: "generate", settled: true, actualUsd: 0 }),
       ]);
@@ -2209,7 +2215,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
       expect(again.images.requests).toHaveLength(0);
       expect(again.judge.requests).toHaveLength(0);
       expect(again.optimizer.requests).toHaveLength(0);
-      const after = await again.runtime.runPromise(runReport(runId));
+      const after = await readRunReport(databasePath, dataDirectory, runId);
       expect(after.lanes).toEqual(before.lanes);
       expect(after.totals).toEqual(before.totals);
     } finally {
@@ -2268,7 +2274,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
           ...lane0Iteration1(runId),
           stopReason: "budget-exhausted",
         });
-        const after = await again.runtime.runPromise(runReport(runId));
+        const after = await readRunReport(databasePath, dataDirectory, runId);
         expect(after.lanes[0]!.iterations).toBe(1);
         expect(after.totals).toEqual(before.totals);
       } finally {
@@ -2297,7 +2303,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
     const again = stepsOn(databasePath, dataDirectory);
     try {
       expect(await again.iteration(lane0Iteration1(runId))).toMatchObject({ iteration: 2 });
-      const report = await again.runtime.runPromise(runReport(runId));
+      const report = await readRunReport(databasePath, dataDirectory, runId);
       expect(
         report.lanes[0]!.prompts[0]!.optimizerCost.calls.map(({ attempt, settled }) => [
           attempt,
@@ -2354,7 +2360,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
     try {
       await again.runtime.runPromise(generateIteration(lane0Iteration1(runId)));
       expect(again.images.requests).toHaveLength(1);
-      const report = await again.runtime.runPromise(runReport(runId));
+      const report = await readRunReport(databasePath, dataDirectory, runId);
       const [first, second] = report.lanes[0]!.candidates;
       expect(first!.calls.map(({ attempt }) => attempt)).toEqual([0]);
       expect(second!.calls.map(({ attempt, settled }) => [attempt, settled])).toEqual([
@@ -2381,10 +2387,9 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
     databasePath: string,
     runId: string,
   ) => {
-    await until(
-      async () => storedStopReasons(databasePath, runId).every((reason) => reason !== null),
-      { timeoutMs: 10_000 },
-    );
+    await until(async () => storedStops(databasePath, runId).every((reason) => reason !== null), {
+      timeoutMs: 10_000,
+    });
     return application.report(runId);
   };
 
@@ -2402,10 +2407,10 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
         if (output?.event === "estimate") await run.cancel();
       }
       await stream.result;
-      await until(async () => !storedStopReasons(databasePath, run.runId).includes(null), {
+      await until(async () => !storedStops(databasePath, run.runId).includes(null), {
         timeoutMs: 10_000,
       });
-      expect(storedStopReasons(databasePath, run.runId)).toEqual(["cancelled", "cancelled"]);
+      expect(storedStops(databasePath, run.runId)).toEqual(["cancelled", "cancelled"]);
       expect(fake.requests).toEqual([]);
     } finally {
       await application.close();
@@ -2425,7 +2430,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
       await run.cancel();
       await application.close();
       closed = true;
-      expect(storedStopReasons(databasePath, run.runId)).toEqual(["cancelled"]);
+      expect(storedStops(databasePath, run.runId)).toEqual(["cancelled"]);
     } finally {
       release();
       if (!closed) await application.close();
@@ -2453,6 +2458,68 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
     }
   }, 60_000);
 
+  test("a report whose workflow snapshot can't be read fails naming the Run", async () => {
+    const { application, databasePath, dataDirectory } = await setup(["same"]);
+    try {
+      const { runId } = await application.start(loop(rules({ maxIterations: 1 })));
+      tamper(databasePath, "DROP TABLE mastra_workflow_snapshot");
+      const failure = {
+        _tag: "RunSnapshotError",
+        runId,
+        message: expect.stringContaining(`Reading the workflow snapshot of Run ${runId} failed: `),
+      };
+      await expect(application.report(runId)).rejects.toMatchObject(failure);
+      await expect(readRunReport(databasePath, dataDirectory, runId)).rejects.toMatchObject(
+        failure,
+      );
+    } finally {
+      await application.close();
+    }
+  }, 60_000);
+
+  test("closing names the cancelled Runs still unwinding when it stops waiting; a later close doesn't wait for them", async () => {
+    const warnings: RunWarning[] = [];
+    const cancels = new CancelRecordings((warning) => warnings.push(warning));
+    const cancel = new AbortController();
+    for (const runId of ["stuck-1", "stuck-2", "recorded"]) cancels.watch(runId, cancel.signal);
+    cancel.abort();
+    await cancels.finished("recorded", true, async () => {});
+    await cancels.settled(50);
+    expect(warnings).toEqual([
+      {
+        level: "Warn",
+        warning: expect.stringContaining("Cancelled Runs stuck-1, stuck-2 were still unwinding"),
+        runIds: ["stuck-1", "stuck-2"],
+      },
+    ]);
+    // The Runs whose `onFinish` never ran no longer hold up a close (the test's timeout would).
+    await cancels.settled(60_000);
+    expect(warnings).toHaveLength(1);
+    // One that finishes after all records as ever, without a warning.
+    let recorded = false;
+    await cancels.finished("stuck-1", true, async () => {
+      recorded = true;
+    });
+    expect(recorded).toBe(true);
+    expect(warnings).toHaveLength(1);
+  });
+
+  test("overlapping closes that stop waiting warn once about the Runs still unwinding", async () => {
+    const warnings: RunWarning[] = [];
+    const cancels = new CancelRecordings((warning) => warnings.push(warning));
+    const cancel = new AbortController();
+    cancels.watch("stuck", cancel.signal);
+    cancel.abort();
+    await Promise.all([cancels.settled(50), cancels.settled(50)]);
+    expect(warnings).toEqual([
+      {
+        level: "Warn",
+        warning: expect.stringContaining("Cancelled Runs stuck were still unwinding"),
+        runIds: ["stuck"],
+      },
+    ]);
+  });
+
   test("cancelling stops only the Lanes still running; a Lane that already stopped keeps its reason", async () => {
     const { promise: held, resolve: release } = Promise.withResolvers<void>();
     const { application, databasePath, fake } = await setup(
@@ -2470,8 +2537,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
       );
       // The Gemini Lane stops on repeated refusals while the OpenAI Lane's call is held.
       await until(
-        async () =>
-          fake.requests.length === 3 && storedStopReasons(databasePath, run.runId)[0] !== null,
+        async () => fake.requests.length === 3 && storedStops(databasePath, run.runId)[0] !== null,
         { timeoutMs: 20_000 },
       );
       await run.cancel();
@@ -2534,25 +2600,28 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
       optimizersOnFakeVendor(vendor.origin),
     );
     try {
-      await withEnvironment({ ANTHROPIC_API_KEY: "test-optimizer-key-0123456789" }, async () => {
-        const { run, started } = await startCancellable(application, loop());
-        await until(async () => vendor.requests.length === 1, { timeoutMs: 20_000 });
-        await run.cancel();
-        await started;
-        const report = await untilStopped(application, databasePath, run.runId);
-        expect(report.lanes[0]!.stopReason).toBe("cancelled");
-        await until(async () => aborted.length === 1, { timeoutMs: 10_000 });
-        await until(
-          async () =>
-            (await application.report(run.runId)).lanes[0]!.prompts[0]!.optimizerCost.calls[0]
-              ?.settled === true,
-          { timeoutMs: 10_000 },
-        );
-        const [first] = (await application.report(run.runId)).lanes[0]!.prompts;
-        expect(first!.optimizerCost.calls).toEqual([
-          expect.objectContaining({ result: "transient", actualUsd: null }),
-        ]);
-      });
+      await withEnvironment(
+        { ICONOGRAPH_ANTHROPIC_API_KEY: "test-optimizer-key-0123456789" },
+        async () => {
+          const { run, started } = await startCancellable(application, loop());
+          await until(async () => vendor.requests.length === 1, { timeoutMs: 20_000 });
+          await run.cancel();
+          await started;
+          const report = await untilStopped(application, databasePath, run.runId);
+          expect(report.lanes[0]!.stopReason).toBe("cancelled");
+          await until(async () => aborted.length === 1, { timeoutMs: 10_000 });
+          await until(
+            async () =>
+              (await application.report(run.runId)).lanes[0]!.prompts[0]!.optimizerCost.calls[0]
+                ?.settled === true,
+            { timeoutMs: 10_000 },
+          );
+          const [first] = (await application.report(run.runId)).lanes[0]!.prompts;
+          expect(first!.optimizerCost.calls).toEqual([
+            expect.objectContaining({ result: "transient", actualUsd: null }),
+          ]);
+        },
+      );
     } finally {
       await application.close();
       await vendor.stop();
@@ -2622,7 +2691,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
       what: `HTTP ${status}`,
       vendor: "anthropic" as const,
       model: undefined,
-      env: "ANTHROPIC_API_KEY",
+      env: "ICONOGRAPH_ANTHROPIC_API_KEY",
       answer: (key: string) => turnedAway(status, key),
       detail: `HTTP ${status}: invalid x-api-key [redacted]`,
     })),
@@ -2630,7 +2699,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
       what: "Google's HTTP 400 API_KEY_INVALID",
       vendor: "google" as const,
       model: GOOGLE_MODEL,
-      env: "GOOGLE_GENERATIVE_AI_API_KEY",
+      env: "ICONOGRAPH_GEMINI_API_KEY",
       answer: googleRejectsKey,
       detail: "HTTP 400: API key [redacted] not valid. Please pass a valid API key.",
     },
@@ -2785,6 +2854,80 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
     60_000,
   );
 
+  /** OpenAI's answer to a bad key: its masked echo of the key, then more text than is kept. */
+  const openaiRejectsKey = () =>
+    Response.json(
+      {
+        error: {
+          message: `Incorrect API key provided: sk-proj-****abcd. ${"Check your key. ".repeat(200)}`,
+          type: "invalid_request_error",
+          param: null,
+          code: "invalid_api_key",
+        },
+      },
+      { status: 401 },
+    );
+
+  test.each([
+    {
+      role: "Judge",
+      reason: "judge-failed",
+      judges: (origin: string) => judgesOnFakeVendor(origin, "openai"),
+      optimizers: () => fakeOptimizers().layer,
+      request: { judge: { ...DEFAULT_JUDGE, model: "openai/gpt-6.1-sol" } },
+    },
+    {
+      role: "Optimizer",
+      reason: "optimizer-failed",
+      judges: () => fakeJudges().layer,
+      optimizers: (origin: string) => optimizersOnFakeVendor(origin, "openai"),
+      request: { optimizer: { ...DEFAULT_OPTIMIZER, model: "openai/gpt-6.1-sol" } },
+    },
+  ])(
+    "an OpenAI $role turned away with a masked key echo stops the Lane with the reason scrubbed and cut, stored, returned, reported and warned",
+    async ({ role, reason, judges, optimizers, request }) => {
+      const vendor = fakeVendorServer(openaiRejectsKey);
+      const warnings: RunWarning[] = [];
+      const { application, databasePath } = await runApplication(
+        fakeImageModels(["same"]).layer,
+        (warning) => warnings.push(warning),
+        judges(vendor.origin),
+        optimizers(vendor.origin),
+      );
+      try {
+        const { runId, lanes } = await withEnvironment(
+          { ICONOGRAPH_OPENAI_API_KEY: "SENTINEL-OPENAI-KEY-0123456789" },
+          () => application.start({ ...loop(), ...request }),
+        );
+        const stored = storedStops(databasePath, runId, "stop_detail")[0] ?? "";
+        expect(stored).toStartWith(`${role} HTTP 401: Incorrect API key provided: [redacted]. `);
+        expect(stored).toEndWith("… (truncated)");
+        expect(stored.length).toBeLessThan(2100);
+        expect(stored).not.toContain("****");
+        expect(lanes).toEqual([
+          expect.objectContaining({ stopReason: reason, stopDetail: stored }),
+        ]);
+        const report = await application.report(runId);
+        expect(report.lanes[0]).toMatchObject({ stopReason: reason, stopDetail: stored });
+        expect(JSON.stringify(report)).not.toContain("****");
+        expect(warnings).toContainEqual(
+          expect.objectContaining({
+            level: "Warn",
+            warning: `The vendor turned the ${role} away for good; the Lane stops`,
+            reason: stored,
+            runId,
+            lane: 0,
+            iteration: 1,
+          }),
+        );
+      } finally {
+        await application.close();
+        await vendor.stop();
+      }
+    },
+    60_000,
+  );
+
   test("a re-executed Iteration whose Judge call was turned away still stops the Lane judge-failed, billing nothing more", async () => {
     const key = "SENTINEL-JUDGE-KEY-0123456789";
     const vendor = fakeVendorServer(() => turnedAway(401, key));
@@ -2794,7 +2937,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
       judgesOnFakeVendor(vendor.origin),
     );
     try {
-      const { runId, lanes } = await withEnvironment({ ANTHROPIC_API_KEY: key }, () =>
+      const { runId, lanes } = await withEnvironment({ ICONOGRAPH_ANTHROPIC_API_KEY: key }, () =>
         application.start(loop()),
       );
       expect(lanes[0]).toMatchObject({ stopReason: "judge-failed", iterations: 1 });
@@ -2811,7 +2954,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
         expect(again.images.requests).toHaveLength(0);
         expect(again.judge.requests).toHaveLength(0);
         expect(again.optimizer.requests).toHaveLength(0);
-        const after = await again.runtime.runPromise(runReport(runId));
+        const after = await readRunReport(databasePath, dataDirectory, runId);
         expect(after.lanes[0]).toMatchObject({
           stopReason: "judge-failed",
           stopDetail: "Judge HTTP 401: invalid x-api-key [redacted]",
@@ -2842,7 +2985,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
         optimizersOnFakeVendor(vendor.origin),
       );
       try {
-        const { runId, lanes } = await withEnvironment({ ANTHROPIC_API_KEY: key }, () =>
+        const { runId, lanes } = await withEnvironment({ ICONOGRAPH_ANTHROPIC_API_KEY: key }, () =>
           application.start(loop(rules({ maxIterations: 2 }))),
         );
         expect(lanes[0]).toMatchObject({ stopReason: "iteration-limit", iterations: 2 });
@@ -2875,7 +3018,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
     );
     try {
       const { runId, lanes } = await withEnvironment(
-        { GOOGLE_GENERATIVE_AI_API_KEY: "test-google-key-0123456789" },
+        { ICONOGRAPH_GEMINI_API_KEY: "test-google-key-0123456789" },
         () =>
           application.start(
             loop({
@@ -2911,7 +3054,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
     );
     try {
       const { runId, lanes } = await withEnvironment(
-        { GOOGLE_GENERATIVE_AI_API_KEY: "test-google-key-0123456789" },
+        { ICONOGRAPH_GEMINI_API_KEY: "test-google-key-0123456789" },
         () =>
           application.start(
             loop({
@@ -2957,7 +3100,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
       judgesOnFakeVendor(vendor.origin),
     );
     try {
-      await withEnvironment({ ANTHROPIC_API_KEY: key }, async () => {
+      await withEnvironment({ ICONOGRAPH_ANTHROPIC_API_KEY: key }, async () => {
         const { run, started } = await startCancellable(application, loop({ candidates: 2 }));
         await until(
           async () =>
@@ -3000,7 +3143,9 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
       keylessOptimizers(lookups),
     );
     try {
-      await expect(application.start(loop())).rejects.toThrow("ANTHROPIC_API_KEY is not set");
+      await expect(application.start(loop())).rejects.toThrow(
+        "ICONOGRAPH_ANTHROPIC_API_KEY is not set",
+      );
       expect(lookups).toEqual([]);
       // Not even the Judge's price.
       expect(judge.gets).toEqual([]);
@@ -3041,7 +3186,7 @@ describe("Run engine with the real adapters and a scripted network", () => {
     const recorded = await recordedGemini("completed-image.json");
     const layer = NativeImageModels({
       prices: { lookup: () => Effect.succeed(price) },
-      env: { GEMINI_API_KEY: SENTINEL },
+      env: { ICONOGRAPH_GEMINI_API_KEY: SENTINEL },
       geminiFetch: async (_, init) => {
         bodies.push(String(init.body));
         return new Response(recorded, { status: 200 });
@@ -3114,7 +3259,7 @@ describe("Run engine with the real adapters and a scripted network", () => {
     };
     const layer = NativeImageModels({
       prices: { lookup: () => Effect.sync(() => (lookups++ === 0 ? recordedPrice : tenfold)) },
-      env: { GEMINI_API_KEY: SENTINEL },
+      env: { ICONOGRAPH_GEMINI_API_KEY: SENTINEL },
       geminiFetch: async () => new Response(recorded, { status: 200 }),
     });
     const { application } = await runApplication(layer);
@@ -3149,7 +3294,7 @@ describe("Run engine with the real adapters and a scripted network", () => {
     };
     const layer = NativeImageModels({
       prices: { lookup: (model) => Effect.succeed(prices[model]!) },
-      env: { GEMINI_API_KEY: SENTINEL, OPENAI_API_KEY: OPENAI_SENTINEL },
+      env: { ICONOGRAPH_GEMINI_API_KEY: SENTINEL, ICONOGRAPH_OPENAI_API_KEY: OPENAI_SENTINEL },
       geminiFetch: async () => new Response(geminiRecorded, { status: 200 }),
       openaiFetch: async (_, init) => {
         openaiBodies.push(String(init.body));

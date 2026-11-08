@@ -281,7 +281,7 @@ describe("OpenAI adapter against recorded responses", () => {
         "OpenAI HTTP 401 invalid_request_error invalid_api_key: Incorrect API key provided: [redacted]. You can find your API key at https://platform.openai.com/account/api-keys.",
       budgetExhausted: false,
     });
-    // Whatever the key's prefix, e.g. a Gemini key pasted into OPENAI_API_KEY.
+    // Whatever the key's prefix, e.g. a Gemini key pasted into ICONOGRAPH_OPENAI_API_KEY.
     const result = await classify(async () =>
       Response.json(
         {
@@ -348,6 +348,35 @@ describe("OpenAI adapter against recorded responses", () => {
       reason: expect.stringContaining("Incorrect key [redacted] "),
     });
     expect(JSON.stringify(masked)).not.toContain("sk-x****");
+  });
+
+  test("a masked key straddling the cut is scrubbed whole, not left in part", async () => {
+    // The reason is "OpenAI HTTP 400 server_error: " (30 characters) + message: the echo
+    // starts 10 characters before the cut at 2000.
+    const message = `${"a".repeat(1_959)} sk-proj-****abcd ${"b".repeat(1_000)}`;
+    const result = await classify(async () =>
+      Response.json({ error: { message, code: "server_error" } }, { status: 400 }),
+    );
+    expect(result.kind).toBe("failed");
+    if (result.kind !== "failed") return;
+    expect(result.reason).not.toContain("*");
+    expect(result.reason).toEndWith("… (truncated)");
+    expect(result.reason.length).toBeLessThanOrEqual(2000 + "… (truncated)".length);
+  });
+
+  test("a masked key with a longer visible prefix is scrubbed at every offset across the cut", async () => {
+    // The reason is "OpenAI HTTP 400 server_error: " (30 characters) + message; the echo
+    // starts from 24 characters before the cut at 2000 to 8 characters after it.
+    for (let start = 1_976; start <= 2_008; start++) {
+      const message = `${"a".repeat(start - 31)} sk-proj-abcdefgh****wxyz ${"b".repeat(1_000)}`;
+      const result = await classify(async () =>
+        Response.json({ error: { message, code: "server_error" } }, { status: 400 }),
+      );
+      expect(result.kind).toBe("failed");
+      if (result.kind !== "failed") return;
+      expect(result.reason).not.toContain("*");
+      expect(result.reason).not.toContain("wxyz");
+    }
   });
 
   test("the key is removed before the cut, so the cut can't leave part of it", async () => {
@@ -508,12 +537,20 @@ describe("OpenAI Image Model selection", () => {
       return yield* (yield* ImageModels).get(model);
     }).pipe(Effect.provide(layer));
 
-  test("a missing or malformed OPENAI_API_KEY fails before any call or price lookup", async () => {
+  test("a missing or malformed ICONOGRAPH_OPENAI_API_KEY fails before any call or price lookup", async () => {
     for (const [env, message] of [
-      [{}, "OPENAI_API_KEY is not set"],
-      [{ GEMINI_API_KEY: "AIzaFAKEFAKEFAKEFAKEFAKE" }, "OPENAI_API_KEY is not set"],
-      [{ OPENAI_API_KEY: "sk-FAKE" }, "OPENAI_API_KEY is shorter than 20 characters"],
-      [{ OPENAI_API_KEY: "sk-FAKE FAKEFAKEFAKEFAKE" }, "contains spaces"],
+      [{}, "ICONOGRAPH_OPENAI_API_KEY is not set"],
+      [
+        { ICONOGRAPH_GEMINI_API_KEY: "AIzaFAKEFAKEFAKEFAKEFAKE" },
+        "ICONOGRAPH_OPENAI_API_KEY is not set",
+      ],
+      // OpenAI's standard variable is never read: coding agents would bill the API with it.
+      [{ OPENAI_API_KEY: "sk-FAKEFAKEFAKEFAKEFAKE" }, "ICONOGRAPH_OPENAI_API_KEY is not set"],
+      [
+        { ICONOGRAPH_OPENAI_API_KEY: "sk-FAKE" },
+        "ICONOGRAPH_OPENAI_API_KEY is shorter than 20 characters",
+      ],
+      [{ ICONOGRAPH_OPENAI_API_KEY: "sk-FAKE FAKEFAKEFAKEFAKE" }, "contains spaces"],
     ] as const) {
       const { fetch, sent } = scriptedFetch([]);
       const layer = NativeImageModels({ prices, env, openaiFetch: fetch });
@@ -531,7 +568,7 @@ describe("OpenAI Image Model selection", () => {
       const { fetch, sent } = scriptedFetch([reply(200, "image-with-usage.json")]);
       const layer = NativeImageModels({
         prices,
-        env: { OPENAI_API_KEY: API_KEY },
+        env: { ICONOGRAPH_OPENAI_API_KEY: API_KEY },
         openaiFetch: fetch,
       });
       const model = await Effect.runPromise(get(layer, id));
@@ -546,7 +583,7 @@ describe("OpenAI Image Model selection", () => {
   test("an OpenAI model priced in another mode is Unpriced, not called", async () => {
     const layer = NativeImageModels({
       prices: { lookup: (model) => Effect.succeed({ ...geminiTestPrice, model }) },
-      env: { OPENAI_API_KEY: API_KEY },
+      env: { ICONOGRAPH_OPENAI_API_KEY: API_KEY },
     });
     const error = await Effect.runPromise(Effect.flip(get(layer, "gpt-image-2.6-sunburst")));
     expect(error).toMatchObject({
@@ -562,7 +599,7 @@ describe("OpenAI Image Model selection", () => {
     const { fetch, sent } = scriptedFetch([reply(200, "image-with-usage.json")]);
     const layer = NativeImageModels({
       prices: { lookup: () => Effect.die("a recorded price needs no lookup") },
-      env: { OPENAI_API_KEY: API_KEY },
+      env: { ICONOGRAPH_OPENAI_API_KEY: API_KEY },
       openaiFetch: fetch,
     });
     const resumed = await Effect.runPromise(

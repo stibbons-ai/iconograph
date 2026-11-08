@@ -1,6 +1,6 @@
 # Iconograph
 
-Iconograph produces identity-preserving professional headshots of one person by iteratively generating, scoring and re-prompting image models.
+Iconograph produces identity-preserving professional headshots of one person by generating many attempts with image models, scoring them and keeping the best (best-of-N sampling); re-prompting the image models from the scores is an experimental option.
 
 ## Inputs
 
@@ -34,11 +34,15 @@ One specific image-generation model (not a vendor) that a Lane drives.
 _Avoid_: Provider, generator, backend
 
 **Lane**:
-The part of a Run that optimizes Prompts for a single Image Model, with its own Prompt history; Lanes of a Run compete only at the Pick.
+The part of a Run that drives a single Image Model, with its own Prompt history; Lanes of a Run compete only at the Pick.
 _Avoid_: Track, branch, provider run
 
+**Resample Lane**:
+A Lane that sends its starting Prompt every Iteration and never calls the Optimizer: best-of-N sampling with the Judge. It is the default; a Lane whose Optimizer rewrites the Prompt is an experimental option.
+_Avoid_: Baseline, control
+
 **Iteration**:
-One generate–score–rewrite cycle within a Lane: its Candidates are generated from one Prompt, scored and judged, then the Lane stops or the Optimizer writes the next Prompt.
+One generate–score cycle within a Lane: its Candidates are generated from one Prompt, scored and judged, then the Lane stops or goes on with the same Prompt (a Resample Lane) or one the Optimizer writes.
 _Avoid_: Round, step, epoch
 
 **Stop Reason**:
@@ -102,7 +106,7 @@ The pairwise comparison among each Lane's best Candidates, judged in both orders
 _Avoid_: Tournament, final round
 
 **Optimizer**:
-The language model that writes a Lane's next Prompt from that Lane's own recent Iterations (Prompts, outcomes, scores, issues and fixes) and Steering, rephrasing the Target Look but never changing it.
+The language model that writes a Lane's next Prompt from that Lane's own recent Iterations (Prompts, outcomes, scores, issues and fixes) and Steering, rephrasing the Target Look but never changing it; an experimental option a Resample Lane never uses.
 _Avoid_: Rewriter, prompt engineer
 
 **Steering**:
@@ -120,10 +124,10 @@ One strategy compared by the eval harness: per Subject and Image Model, each Arm
 _Avoid_: Variant, baseline run
 
 **Optimizer Arm**:
-The Arm that runs the normal Lane loop, the Optimizer rewriting the Prompt between Iterations.
+The Arm whose Lane's Optimizer rewrites the Prompt between Iterations.
 
 **Resample Arm**:
-The Arm whose Lane sends its starting Prompt every Iteration and never calls the Optimizer: best-of-N sampling with the same Judge. It runs with patience off, since a fixed Prompt never tries to improve. A Lane run this way is a Resample Lane.
+The Arm whose Lane is a Resample Lane. It runs with patience off, since a fixed Prompt never tries to improve.
 _Avoid_: Baseline, control
 
 **Second Judge**:

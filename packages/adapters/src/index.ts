@@ -5,7 +5,7 @@ export {
   resolveInsideDataDirectory,
   runsDatabase,
 } from "./data-directory";
-export { apiKeyFromEnv, redactKey } from "./api-key";
+export { apiKeyFromEnv, redactKey, redactReason } from "./api-key";
 export {
   decodeOption,
   LANE_IMAGE_MODELS,
@@ -17,6 +17,7 @@ export {
   type RunSettingValues,
   runSettingsInput,
 } from "./cli-options";
+export { runCommand } from "./command";
 export {
   attachCleanupError,
   codeOf,
@@ -43,6 +44,7 @@ export { openaiCapabilities } from "./openai";
 export {
   downloadableModelIds,
   ensureModels,
+  modelDownloadIdleTimeoutMs,
   readModelLock,
   type EnsuredModel,
   type Fetch,

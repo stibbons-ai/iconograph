@@ -8,7 +8,7 @@ import {
   hasErrorNamed,
   httpErrorResult,
   type PriceSource,
-  redactKey,
+  redactReason,
   responseBodyOf,
   statusOf,
   toMastraSchema,
@@ -40,11 +40,16 @@ import { Effect, Schema } from "effect";
  * and costed. Each role adds its own message and output schema.
  */
 
-/** The environment variables holding each vendor's key. */
-const VENDOR_KEYS: { readonly [V in LlmVendor]: readonly [string, ...string[]] } = {
-  anthropic: ["ANTHROPIC_API_KEY"],
-  openai: ["OPENAI_API_KEY"],
-  google: ["GOOGLE_GENERATIVE_AI_API_KEY", "GOOGLE_API_KEY"],
+/**
+ * The environment variable holding each vendor's key. Prefixed so the shell
+ * exporting them (devenv `enterShell`) doesn't hand them to coding agents
+ * (Claude Code, omp, Codex, Gemini CLI), which would bill the API over a
+ * subscription; Gemini image Lanes and google/ roles share one key.
+ */
+const VENDOR_KEYS: { readonly [V in LlmVendor]: string } = {
+  anthropic: "ICONOGRAPH_ANTHROPIC_API_KEY",
+  openai: "ICONOGRAPH_OPENAI_API_KEY",
+  google: "ICONOGRAPH_GEMINI_API_KEY",
 };
 
 /**
@@ -122,8 +127,8 @@ function vendorLanguageModel(
  * The provider options setting a role's effort through each vendor's reasoning
  * parameter (checked against the pinned AI SDK providers): Anthropic `effort`,
  * OpenAI `reasoningEffort`, Gemini `thinkingConfig.thinkingLevel`. Every
- * `Effort` level (`low`/`medium`/`high`) passes through unchanged; which
- * models accept them is noted where they are chosen.
+ * `Effort` level (`low`/`medium`/`high`) passes through unchanged; the eval's
+ * second-Judge choices note which levels they accept at `EVAL_JUDGE_CHOICES`.
  */
 function reasoningOptions(vendor: LlmVendor, effort: Effort) {
   switch (vendor) {
@@ -382,7 +387,7 @@ export interface LlmCallOptions<A, S> {
  * the text sent with every call (the instructions and the schema as Mastra
  * sends it), for the role's estimate.
  */
-export const llmCaller = <A, S extends object>(options: LlmCallOptions<A, S>) => {
+export const llmCaller = <A, S>(options: LlmCallOptions<A, S>) => {
   const { role, instructions, model, effort, pricing, schemaName, read } = options;
   const schema = toMastraSchema(options.schema);
   const decode = Schema.decodeUnknownSync(options.schema);
@@ -399,7 +404,7 @@ export const llmCaller = <A, S extends object>(options: LlmCallOptions<A, S>) =>
   });
   agent.__setLogger(noopLogger);
   const providerOptions = reasoningOptions(model.vendor, effort);
-  const redact = redactKey(model.apiKey);
+  const redact = redactReason(model.apiKey);
   const timedOut: UnsuccessfulCall = {
     kind: "transient",
     reason: `${role} request timed out after ${timeoutMs / 1000} s`,
@@ -415,7 +420,7 @@ export const llmCaller = <A, S extends object>(options: LlmCallOptions<A, S>) =>
     const costMicros = costOf(pricing, usage);
     const failed = (reason: string): UnsuccessfulCall => ({
       kind: "failed",
-      reason,
+      reason: redact(reason),
       usage,
       costMicros,
     });

@@ -1,11 +1,14 @@
 import { Database } from "bun:sqlite";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, jest, test } from "bun:test";
 import { copyFile, mkdir, rm, symlink } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  modelDownloadIdleTimeoutMs,
   modelsDirectory,
   NativeImageModels,
+  openPriceSource,
+  type PriceSource,
   readModelLock,
   runsDatabase,
 } from "@iconograph/adapters";
@@ -18,6 +21,7 @@ import {
   type Judges,
   type Optimizers,
   type PriceQuote,
+  priceRefreshIntervalMs,
   type RunRequest,
   toUsd,
 } from "@iconograph/domain";
@@ -58,6 +62,8 @@ const SFACE_IDS = ["yunet", "sface"];
 
 const running: RunningServer[] = [];
 afterEach(async () => {
+  // A test that times out is abandoned before its `finally`, so restore real timers here too.
+  jest.useRealTimers();
   await Promise.all(running.splice(0).map((server) => server.stop()));
 });
 
@@ -84,10 +90,12 @@ async function serve(
     "modelsRetryMs" | "databaseProbe" | "sleep" | "listActiveRuns" | "lookupRun"
   > & {
     /** `null`: the production download (global `fetch`). */
-    fetchModels?: ((url: string) => Promise<Response>) | null;
+    fetchModels?: ServerDependencies["fetchModels"] | null;
     hostname?: string;
     judges?: Layer.Layer<Judges>;
     optimizers?: Layer.Layer<Optimizers>;
+    /** The price source the vendors refresh through; default: none, so nothing refreshes. */
+    priceSource?: Pick<PriceSource, "ensureFresh" | "close">;
   } = {},
 ) {
   const {
@@ -95,6 +103,7 @@ async function serve(
     hostname,
     judges = fakeJudges().layer,
     optimizers = fakeOptimizers().layer,
+    priceSource,
     ...seams
   } = options;
   const logs: Record<string, unknown>[] = [];
@@ -114,7 +123,13 @@ async function serve(
       ...(hostname && { ICONOGRAPH_HOST: hostname }),
     }),
     {
-      vendors: async () => ({ imageModels, judges, optimizers, close: () => {} }),
+      vendors: async () => ({
+        imageModels,
+        judges,
+        optimizers,
+        ...(priceSource && { ensurePricesFresh: priceSource.ensureFresh }),
+        close: () => priceSource?.close(),
+      }),
       retryPolicy: { maxRetries: 2, baseDelayMs: 0 },
       ...seams,
       // Weights are never downloaded in tests; a test that downloads passes its own fetch.
@@ -375,14 +390,19 @@ describe("HTTP server with the fake Image Model", () => {
     expect(logs.filter((line) => "error" in line)).toEqual([]);
   }, 30_000);
 
-  test("the production download carries the stop signal", async () => {
+  test("the production download carries the stop and the stall signal", async () => {
     const data = await temporaryDirectory();
     const signals: (AbortSignal | null | undefined)[] = [];
+    const secondAttempt = Promise.withResolvers<void>();
+    const retry = Promise.withResolvers<void>();
     const realFetch = globalThis.fetch;
-    // A network that never answers; only the signal ends the request.
+    // The first attempt fails at once, so the stalled second one runs on fake timers; later
+    // attempts reach a network that never answers, where only the signal ends the request.
     globalThis.fetch = Object.assign(
       (_: unknown, init?: RequestInit) => {
         signals.push(init?.signal);
+        if (signals.length === 1) return Promise.reject(new Error("network down"));
+        if (signals.length === 2) secondAttempt.resolve();
         const { promise, reject } = Promise.withResolvers<Response>();
         init?.signal?.addEventListener("abort", () => reject(init.signal!.reason));
         return promise;
@@ -390,15 +410,157 @@ describe("HTTP server with the fake Image Model", () => {
       { preconnect: realFetch.preconnect },
     );
     try {
-      const { server } = await serve(data, fakeImageModels([]).layer, { fetchModels: null });
+      const { server, logged } = await serve(data, fakeImageModels([]).layer, {
+        fetchModels: null,
+        sleep: (_, signal) => {
+          signal.addEventListener("abort", () => retry.resolve(), { once: true });
+          return retry.promise;
+        },
+      });
       running.splice(running.indexOf(server), 1);
-      await until(async () => signals.length > 0);
+      await logged((line) => String(line.error).includes("network down"));
+      jest.useFakeTimers();
+      try {
+        retry.resolve();
+        await secondAttempt.promise;
+        jest.advanceTimersByTime(modelDownloadIdleTimeoutMs);
+        expect(signals[1]?.aborted).toBe(true);
+      } finally {
+        jest.useRealTimers();
+      }
+      // The retry after the stall starts at once and waits until the server stops.
+      await until(async () => signals.length > 2);
       await server.stop();
     } finally {
       globalThis.fetch = realFetch;
     }
-    expect(signals[0]?.aborted).toBe(true);
+    expect(signals[2]?.aborted).toBe(true);
   }, 30_000);
+
+  test("a stalled download is aborted through the signal the server passes on", async () => {
+    const data = await temporaryDirectory();
+    const signals: AbortSignal[] = [];
+    const secondAttempt = Promise.withResolvers<void>();
+    const retry = Promise.withResolvers<void>();
+    const { server, logged } = await serve(data, fakeImageModels([]).layer, {
+      // The first attempt fails at once, so the stalled second one runs on fake timers.
+      sleep: (_, signal) => {
+        signal.addEventListener("abort", () => retry.resolve(), { once: true });
+        return retry.promise;
+      },
+      fetchModels: (_, init) => {
+        signals.push(init!.signal!);
+        if (signals.length === 1) return Promise.reject(new Error("network down"));
+        secondAttempt.resolve();
+        return new Promise<Response>(() => {});
+      },
+    });
+    await logged((line) => String(line.error).includes("network down"));
+    jest.useFakeTimers();
+    try {
+      retry.resolve();
+      await secondAttempt.promise;
+      const stalled = signals[1]!;
+      jest.advanceTimersByTime(modelDownloadIdleTimeoutMs - 1);
+      expect(stalled.aborted).toBe(false);
+      jest.advanceTimersByTime(1);
+      expect(stalled.aborted).toBe(true);
+    } finally {
+      jest.useRealTimers();
+    }
+    await logged((line) => String(line.error).includes("stalled: no data for 30 s"));
+    expect((await fetch(new URL("/health", server.url))).status).toBe(503);
+  }, 30_000);
+
+  describe("abort listeners", () => {
+    const { addEventListener, removeEventListener } = AbortSignal.prototype;
+    // A test that times out is abandoned before its `finally`, so restore the prototype here.
+    afterEach(() => {
+      AbortSignal.prototype.addEventListener = addEventListener;
+      AbortSignal.prototype.removeEventListener = removeEventListener;
+    });
+    /** Every abort listener added from now on and not yet removed, by the signal it waits on. */
+    function trackAbortListeners() {
+      const listening = new Map<unknown, AbortSignal>();
+      AbortSignal.prototype.addEventListener = function (
+        this: AbortSignal,
+        ...[type, listener, options]: Parameters<AbortSignal["addEventListener"]>
+      ) {
+        if (type === "abort") listening.set(listener, this);
+        addEventListener.call(this, type, listener, options);
+      };
+      AbortSignal.prototype.removeEventListener = function (
+        this: AbortSignal,
+        ...[type, listener, options]: Parameters<AbortSignal["removeEventListener"]>
+      ) {
+        if (type === "abort") listening.delete(listener);
+        removeEventListener.call(this, type, listener, options);
+      };
+      return listening;
+    }
+
+    test("stalls that ignore the signal leave no listener behind, and a late response is freed", async () => {
+      const data = await temporaryDirectory();
+      const started = [2, 3, 4].map(() => Promise.withResolvers<void>());
+      const retry = Promise.withResolvers<void>();
+      const holding = Promise.withResolvers<void>();
+      const late = Promise.withResolvers<Response>();
+      let calls = 0;
+      let sleeps = 0;
+      const { logged } = await serve(data, fakeImageModels([]).layer, {
+        // The first attempt fails at once, so the stalled ones run on fake timers; the
+        // fourth wait lasts until the server stops.
+        sleep: (_, signal) => {
+          if (++sleeps === 1) {
+            signal.addEventListener("abort", () => retry.resolve(), { once: true });
+            return retry.promise;
+          }
+          if (sleeps < 4) return Promise.resolve();
+          holding.resolve();
+          return retry.promise;
+        },
+        // Ignores its signal: only the first stalled attempt ever answers, late.
+        fetchModels: () => {
+          if (++calls === 1) return Promise.reject(new Error("network down"));
+          started[calls - 2]?.resolve();
+          return calls === 2 ? late.promise : new Promise<Response>(() => {});
+        },
+      });
+      await logged((line) => String(line.error).includes("network down"));
+      const listening = trackAbortListeners();
+      jest.useFakeTimers();
+      retry.resolve();
+      for (const attempt of started) {
+        await attempt.promise;
+        jest.advanceTimersByTime(modelDownloadIdleTimeoutMs);
+      }
+      jest.useRealTimers();
+      await holding.promise;
+      // A listener on a signal that never aborts (the server's stop) would keep its
+      // attempt alive until shutdown.
+      expect([...listening.values()].filter((signal) => !signal.aborted)).toEqual([]);
+      const cancelled = Promise.withResolvers<void>();
+      late.resolve(new Response(new ReadableStream({ cancel: () => cancelled.resolve() })));
+      await cancelled.promise;
+    }, 30_000);
+
+    test("a download that throws before returning a promise fails, leaving no listener", async () => {
+      const data = await temporaryDirectory();
+      const listening = trackAbortListeners();
+      const signals: AbortSignal[] = [];
+      const { logged } = await serve(data, fakeImageModels([]).layer, {
+        modelsRetryMs: 60_000,
+        fetchModels: (_, init) => {
+          signals.push(init!.signal!);
+          throw new Error("no network stack");
+        },
+      });
+      await logged((line) => String(line.error).includes("no network stack"));
+      expect(signals).toHaveLength(1);
+      expect(signals[0]!.aborted).toBe(false);
+      expect([...listening.values()].filter((signal) => signal === signals[0])).toEqual([]);
+    }, 30_000);
+  });
 
   test("reports the database as failed when the Run database can't be read", async () => {
     const data = await volumeWithPhotos();
@@ -835,6 +997,225 @@ describe("HTTP server with the fake Image Model", () => {
   }, 30_000);
 });
 
+describe("price refresh", () => {
+  const litellm = Bun.file(
+    fileURLToPath(new URL("../../adapters/test/fixtures/litellm-prices.json", import.meta.url)),
+  );
+  const start = new Date("2026-11-01T12:00:00Z");
+  const HOUR_MS = 60 * 60 * 1000;
+  const nextDayAt = new Date(start.getTime() + priceRefreshIntervalMs).toISOString();
+
+  /**
+   * The server on a volume with verified face models, refreshing a real price
+   * source whose LiteLLM fetches each wait for the test to answer them (and
+   * reject on abort, unless `ignoresAbort`), on a test clock; the wait for the
+   * next price check ends when the test calls `tick`.
+   */
+  async function serveWithPrices({ ignoresAbort = false } = {}) {
+    const data = await dataVolume(temporaryDirectory, SFACE_IDS);
+    const clock = { now: start };
+    const fetches: ((response: Response) => void)[] = [];
+    const source = await openPriceSource({
+      dataDirectory: data,
+      now: () => clock.now,
+      // Far past the test's timeout: a stop that doesn't abort the fetch hangs the test.
+      timeoutMs: 600_000,
+      // Like `fetch`: an abort rejects with the signal's reason.
+      fetch: (_, init) => {
+        const answer = Promise.withResolvers<Response>();
+        if (!ignoresAbort) {
+          init?.signal?.addEventListener("abort", () => answer.reject(init.signal?.reason), {
+            once: true,
+          });
+        }
+        fetches.push(answer.resolve);
+        return answer.promise;
+      },
+    });
+    const events: string[] = [];
+    let refreshes = 0;
+    const waits: number[] = [];
+    const wakes: (() => void)[] = [];
+    const served = await serve(data, fakeImageModels([]).layer, {
+      priceSource: {
+        ensureFresh: (options) => {
+          refreshes++;
+          return source.ensureFresh(options).finally(() => events.push("refresh settled"));
+        },
+        close: () => {
+          events.push("close");
+          source.close();
+        },
+      },
+      sleep: (ms, signal) => {
+        waits.push(ms);
+        if (signal.aborted) return Promise.resolve();
+        const wake = Promise.withResolvers<void>();
+        signal.addEventListener("abort", () => wake.resolve(), { once: true });
+        wakes.push(wake.resolve);
+        return wake.promise;
+      },
+    });
+    /** Answers the `n`th LiteLLM fetch (1-based) once it is made. */
+    const answerFetch = async (n: number, response: Response) => {
+      await until(async () => fetches.length >= n);
+      fetches[n - 1]!(response);
+    };
+    let ticks = 0;
+    /** Once the server waits for its next price check, moves the clock on by `ms` and ends the wait. */
+    const tick = async (ms: number) => {
+      await until(async () => wakes.length > ticks);
+      clock.now = new Date(clock.now.getTime() + ms);
+      wakes[ticks++]!();
+    };
+    const priceSource = () =>
+      Effect.runPromise(source.lookup("claude-sonnet-5-5")).then((quote) => quote.source);
+    return {
+      ...served,
+      fetches,
+      events,
+      waits,
+      refreshes: () => refreshes,
+      answerFetch,
+      tick,
+      priceSource,
+    };
+  }
+
+  test("refreshes at boot without holding the start, then once the prices are 24 h old", async () => {
+    const { server, logs, logged, waits, refreshes, answerFetch, tick, priceSource } =
+      await serveWithPrices();
+    // Started, booted and healthy while the boot refresh's fetch is unanswered.
+    expect(refreshes()).toBe(1);
+    await server.booted;
+    expect((await request(server, "/health")).status).toBe(200);
+    await answerFetch(1, new Response(litellm));
+    await logged((line) => line.event === "prices-fresh");
+
+    await tick(priceRefreshIntervalMs);
+    await answerFetch(2, new Response(litellm));
+    await logged((line) => line.fetchedAt === nextDayAt);
+    expect(refreshes()).toBe(2);
+    await until(async () => waits.length === 2);
+    expect(waits).toEqual([HOUR_MS, HOUR_MS]);
+    expect(logs.filter((line) => line.event === "prices-fresh")).toEqual([
+      { event: "prices-fresh", refreshed: true, fetchedAt: start.toISOString() },
+      {
+        event: "prices-fresh",
+        refreshed: true,
+        fetchedAt: nextDayAt,
+      },
+    ]);
+    expect(await priceSource()).toMatchObject({ _tag: "litellm", ageSeconds: 0, stale: false });
+  }, 30_000);
+
+  test("an hourly check of prices younger than 24 h fetches and logs nothing", async () => {
+    const { logs, logged, waits, fetches, refreshes, answerFetch, tick } = await serveWithPrices();
+    await answerFetch(1, new Response(litellm));
+    await logged((line) => line.event === "prices-fresh");
+    await tick(priceRefreshIntervalMs - HOUR_MS);
+    // The check is done once the server waits for the next one.
+    await until(async () => waits.length === 2);
+    expect(refreshes()).toBe(2);
+    expect(fetches).toHaveLength(1);
+    const reported = logs.filter((line) => line.event === "prices-fresh" || "warning" in line);
+    expect(reported).toHaveLength(1);
+  }, 30_000);
+
+  test("a failed refresh is logged once and the server keeps serving the previous cache", async () => {
+    const { server, logs, logged, answerFetch, tick, priceSource } = await serveWithPrices();
+    await answerFetch(1, new Response(litellm));
+    await logged((line) => line.event === "prices-fresh");
+    await tick(priceRefreshIntervalMs);
+    await answerFetch(2, new Response("unavailable", { status: 503 }));
+    await logged((line) => "warning" in line);
+    expect(logs.filter((line) => "warning" in line || "error" in line)).toEqual([
+      {
+        warning: expect.stringMatching(
+          /^Price refresh failed, keeping the current prices: .*LiteLLM price fetch failed: HTTP 503/,
+        ),
+      },
+    ]);
+    await server.booted;
+    expect((await request(server, "/health")).status).toBe(200);
+    expect(await priceSource()).toEqual({
+      _tag: "litellm",
+      asOf: start.toISOString(),
+      ageSeconds: priceRefreshIntervalMs / 1000,
+      stale: true,
+    });
+  }, 30_000);
+
+  test("a failed refresh is retried at the next hourly check", async () => {
+    const { logs, logged, answerFetch, tick, priceSource } = await serveWithPrices();
+    await answerFetch(1, new Response(litellm));
+    await logged((line) => line.event === "prices-fresh");
+    await tick(priceRefreshIntervalMs);
+    await answerFetch(2, new Response("unavailable", { status: 503 }));
+    await logged((line) => "warning" in line);
+    await tick(HOUR_MS);
+    await answerFetch(3, new Response(litellm));
+    const retriedAt = new Date(start.getTime() + priceRefreshIntervalMs + HOUR_MS).toISOString();
+    await logged((line) => line.fetchedAt === retriedAt);
+    expect(logs.filter((line) => "warning" in line)).toHaveLength(1);
+    expect(await priceSource()).toMatchObject({ _tag: "litellm", asOf: retriedAt, stale: false });
+  }, 30_000);
+
+  describe("stopping", () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    beforeEach(() => {
+      unhandled.length = 0;
+      process.on("unhandledRejection", onUnhandled);
+    });
+    afterEach(() => {
+      process.off("unhandledRejection", onUnhandled);
+    });
+
+    test("aborts a refresh in flight without a warning or an unhandled rejection", async () => {
+      const { server, logs, fetches, events, refreshes } = await serveWithPrices();
+      running.splice(running.indexOf(server), 1);
+      await until(async () => fetches.length === 1);
+      await server.stop();
+      expect(events).toEqual(["refresh settled", "close"]);
+      expect(refreshes()).toBe(1);
+      expect(logs.filter((line) => "warning" in line || "error" in line)).toEqual([]);
+      await Bun.sleep(0); // A rejection nobody handles is reported after a turn of the event loop.
+      expect(unhandled).toEqual([]);
+    }, 30_000);
+
+    test("waits for a refresh that ignores the abort before closing the prices", async () => {
+      const { server, logs, fetches, answerFetch, events } = await serveWithPrices({
+        ignoresAbort: true,
+      });
+      running.splice(running.indexOf(server), 1);
+      await until(async () => fetches.length === 1);
+      const stopped = server.stop();
+      // Nothing to await proves a wait that doesn't end: give stop a real moment to run ahead.
+      await Bun.sleep(50);
+      expect(events).toEqual([]);
+      await answerFetch(1, new Response(litellm));
+      await stopped;
+      expect(events).toEqual(["refresh settled", "close"]);
+      expect(logs.filter((line) => "warning" in line || "error" in line)).toEqual([]);
+      await Bun.sleep(0); // A rejection nobody handles is reported after a turn of the event loop.
+      expect(unhandled).toEqual([]);
+    }, 30_000);
+
+    test("starts no refresh after stop while waiting for the next check", async () => {
+      const { server, logged, answerFetch, events, refreshes } = await serveWithPrices();
+      running.splice(running.indexOf(server), 1);
+      await answerFetch(1, new Response(litellm));
+      await logged((line) => line.event === "prices-fresh");
+      await server.stop();
+      expect(refreshes()).toBe(1);
+      expect(events).toEqual(["refresh settled", "close"]);
+      await Bun.sleep(0); // A rejection nobody handles is reported after a turn of the event loop.
+      expect(unhandled).toEqual([]);
+    }, 30_000);
+  });
+});
+
 describe("network exposure", () => {
   test("the allowed Host names: loopback, plus the configured host as URLs spell it", () => {
     const loopback = ["localhost", "127.0.0.1", "[::1]"];
@@ -1118,14 +1499,14 @@ test("a Run without a vendor key fails cleanly before any billable call or price
   await native.server.booted;
   const withoutJudgeKey = await startRun(native.server.url, runInput());
   expect(withoutJudgeKey.status).toBe("failed");
-  expect(withoutJudgeKey.error!.message).toContain("ANTHROPIC_API_KEY is not set");
+  expect(withoutJudgeKey.error!.message).toContain("ICONOGRAPH_ANTHROPIC_API_KEY is not set");
   // Then every Lane's key, in Lane order.
   const { server } = await serve(data, layer);
   await server.booted;
   const lanes = [{ model: "gpt-image-2.6-sunburst" }, { model: "gemini-nano-banana-2.1" }];
   const result = await startRun(server.url, runInput({ lanes }));
   expect(result.status).toBe("failed");
-  expect(result.error!.message).toContain("OPENAI_API_KEY is not set");
+  expect(result.error!.message).toContain("ICONOGRAPH_OPENAI_API_KEY is not set");
   expect(calls).toBe(0);
 }, 30_000);
 
@@ -1135,7 +1516,7 @@ describe("server process", () => {
 
   /** The server (by default with fakes) as its own process, so a test can signal or kill it. */
   function spawnServer(data: string, env: Record<string, string>, entry = withFakes) {
-    const { GEMINI_API_KEY: _, ...base } = Bun.env;
+    const { ICONOGRAPH_GEMINI_API_KEY: _, ...base } = Bun.env;
     const child = Bun.spawn([process.execPath, entry], {
       env: {
         ...base,
@@ -1263,7 +1644,7 @@ describe("server process", () => {
     const server = spawnServer(data, {
       FAKE_IMAGE_SCRIPT: JSON.stringify(["same"]),
       FAKE_ANTHROPIC_ORIGIN: vendor.origin,
-      ANTHROPIC_API_KEY: key,
+      ICONOGRAPH_ANTHROPIC_API_KEY: key,
       ANTHROPIC_BASE_URL: trap.origin,
     });
     try {

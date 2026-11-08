@@ -1,9 +1,12 @@
 import { expect, test } from "bun:test";
-import { NativeImageModels } from "@iconograph/adapters";
+import { NativeImageModels, openPriceSource, PriceFetchError } from "@iconograph/adapters";
 import { ImageModels } from "@iconograph/domain";
 import { Effect } from "effect";
-import { refreshOnFirstLookup } from "../src/vendors";
+import { temporaryDirectories } from "../../adapters/test/temporary-directory";
+import { refreshOnFirstLookup, vendorsPricedBy } from "../src/vendors";
 import { FAKE_PRICE } from "./support/fake-image-models";
+
+const temporaryDirectory = temporaryDirectories("vendors");
 
 test("prices refresh once, on the first lookup, and never without a key", async () => {
   let refreshes = 0;
@@ -25,8 +28,113 @@ test("prices refresh once, on the first lookup, and never without a key", async 
     );
   expect((await get({}))._tag).toBe("Failure");
   expect(refreshes).toBe(0);
-  const key = { GEMINI_API_KEY: "AIzaFAKEFAKEFAKEFAKEFAKE" };
+  const key = { ICONOGRAPH_GEMINI_API_KEY: "AIzaFAKEFAKEFAKEFAKEFAKE" };
   expect((await get(key))._tag).toBe("Success");
   expect((await get(key))._tag).toBe("Success");
   expect(refreshes).toBe(1);
+});
+
+test("a caller's refresh before the first lookup is the only one, and reports its own failure", async () => {
+  let refreshes = 0;
+  const fetch = Promise.withResolvers<{ refreshed: boolean; fetchedAt: Date }>();
+  const warnings: string[] = [];
+  const events: string[] = [];
+  const prices = refreshOnFirstLookup(
+    {
+      ensureFresh: () => {
+        refreshes++;
+        return fetch.promise;
+      },
+      lookup: (model) =>
+        Effect.sync(() => {
+          events.push("lookup");
+          return { ...FAKE_PRICE, model };
+        }),
+    },
+    (warning) => warnings.push(warning),
+  );
+  const refresh = prices.ensureFresh();
+  // Started while the caller's refresh is in flight: no second fetch, and it waits for that one.
+  const lookup = Effect.runPromise(prices.lookup("claude-sonnet-5-5"));
+  await Bun.sleep(0); // One event-loop turn: a lookup that doesn't wait would run now.
+  events.push("refresh settled");
+  fetch.reject(new Error("HTTP 503"));
+  await expect(refresh).rejects.toThrow("HTTP 503");
+  expect((await lookup).model).toBe("claude-sonnet-5-5");
+  expect(events).toEqual(["refresh settled", "lookup"]);
+  await Effect.runPromise(prices.lookup("claude-sonnet-5-5"));
+  expect(refreshes).toBe(1);
+  expect(warnings).toEqual([]);
+});
+
+test("the vendors' prices refresh through their caller's refresh: one fetch, reported by the caller", async () => {
+  let fetches = 0;
+  const released = Promise.withResolvers<void>();
+  const source = await openPriceSource({
+    dataDirectory: await temporaryDirectory(),
+    fetch: async () => {
+      fetches++;
+      await released.promise;
+      return new Response("unavailable", { status: 503 });
+    },
+  });
+  const warnings: string[] = [];
+  const vendors = vendorsPricedBy(source, (warning) => warnings.push(warning), {
+    ICONOGRAPH_GEMINI_API_KEY: "AIzaFAKEFAKEFAKEFAKEFAKE",
+  });
+  const get = () =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        return yield* (yield* ImageModels).get("gemini-nano-banana-2.1");
+      }).pipe(Effect.provide(vendors.imageModels), Effect.result),
+    );
+  try {
+    const refresh = vendors.ensurePricesFresh!();
+    const got = get();
+    released.resolve();
+    await expect(refresh).rejects.toThrow("HTTP 503");
+    expect((await got)._tag).toBe("Success");
+    expect((await get())._tag).toBe("Success");
+    expect(fetches).toBe(1);
+    expect(warnings).toEqual([]);
+  } finally {
+    vendors.close();
+  }
+});
+
+test("the vendors' refresh passes its caller's stop signal on to the fetch", async () => {
+  let fetches = 0;
+  const fetching = Promise.withResolvers<void>();
+  const source = await openPriceSource({
+    dataDirectory: await temporaryDirectory(),
+    // Far past the test's timeout: only the caller's signal can end the fetch.
+    timeoutMs: 600_000,
+    // Like `fetch`: never answers, and an abort rejects with the signal's reason.
+    fetch: (_, init) => {
+      fetches++;
+      fetching.resolve();
+      const answer = Promise.withResolvers<Response>();
+      init?.signal?.addEventListener("abort", () => answer.reject(init.signal?.reason), {
+        once: true,
+      });
+      return answer.promise;
+    },
+  });
+  const vendors = vendorsPricedBy(source, () => {});
+  try {
+    const stop = new AbortController();
+    const refresh = vendors.ensurePricesFresh!({ signal: stop.signal });
+    await fetching.promise;
+    const reason = new Error("server stopping");
+    stop.abort(reason);
+    const error = await refresh.then(
+      () => undefined,
+      (rejection: unknown) => rejection,
+    );
+    expect(error).toBeInstanceOf(PriceFetchError);
+    expect((error as PriceFetchError).cause).toBe(reason);
+    expect(fetches).toBe(1);
+  } finally {
+    vendors.close();
+  }
 });

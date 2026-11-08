@@ -18,8 +18,9 @@ import {
   readCalibrationFolder,
   type SkippedEntry,
 } from "./calibration-folder";
+import { runCommand } from "./command";
 import { resolveDataDirectory } from "./data-directory";
-import { errorLine, errorMessage } from "./errors";
+import { errorMessage } from "./errors";
 import { OnnxFaceEmbedder } from "./face-embedder";
 import { HeldOutFaceEmbedder, OnnxHeldOutFaceEmbedder } from "./held-out-embedder";
 import {
@@ -272,11 +273,4 @@ export async function main(args: string[], dependencies: CalibrateCliDependencie
   stdout(`${JSON.stringify(report)}\n`);
 }
 
-if (import.meta.main) {
-  try {
-    await main(process.argv.slice(2));
-  } catch (error) {
-    process.stderr.write(errorLine(error));
-    process.exitCode = 1;
-  }
-}
+if (import.meta.main) await runCommand(main);

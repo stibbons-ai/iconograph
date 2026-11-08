@@ -68,10 +68,10 @@ too. One-time setup:
    whose `value` field holds the key (fish; `read -s` keeps it off the screen and out of history):
 
    ```fish
-   read -s -P "ANTHROPIC_API_KEY: " value
+   read -s -P "ICONOGRAPH_ANTHROPIC_API_KEY: " value
    op item create --account my.1password.com --vault Iconograph --category "Secure Note" \
-       --title "secretspec/iconograph/default/ANTHROPIC_API_KEY" --tags automated,iconograph \
-       "project[text]=iconograph" "key[text]=ANTHROPIC_API_KEY" "value[concealed]=$value"
+       --title "secretspec/iconograph/default/ICONOGRAPH_ANTHROPIC_API_KEY" --tags automated,iconograph \
+       "project[text]=iconograph" "key[text]=ICONOGRAPH_ANTHROPIC_API_KEY" "value[concealed]=$value"
    set -e value
    ```
 
@@ -82,19 +82,28 @@ too. One-time setup:
    secretspec check --explain
    ```
 
-The keys are `ANTHROPIC_API_KEY` (the default Judge and Optimizer), `OPENAI_API_KEY` (OpenAI
-Lanes, an `openai/` Judge or Optimizer) and `GEMINI_API_KEY` (Gemini Lanes).
-`GOOGLE_GENERATIVE_AI_API_KEY`, read by a `google/` Judge or Optimizer, is derived from
-`GEMINI_API_KEY` and is never stored. All are optional, and a missing or rejected service token
-only warns: the shell still opens, and a Run names the key it is missing.
+The keys are `ICONOGRAPH_ANTHROPIC_API_KEY` (the default Judge and Optimizer),
+`ICONOGRAPH_OPENAI_API_KEY` (OpenAI Lanes, an `openai/` Judge or Optimizer) and
+`ICONOGRAPH_GEMINI_API_KEY` (Gemini Lanes, a `google/` Judge or Optimizer). They carry the
+`ICONOGRAPH_` prefix, and Iconograph reads no other names, so that an AI coding agent started in
+the shell (Claude Code, omp, Codex, Gemini CLI) doesn't find a vendor's standard variable
+(`ANTHROPIC_API_KEY`, …) and bill the API instead of your subscription. All are optional, and a
+missing or rejected service token only warns: the shell still opens, and a Run names the key it
+is missing.
 
 How it works: `enterShell` in `devenv.nix` runs `secretspec export` and exports the result into
 the live shell. The keys are never set through devenv's `env`, which would write them into the
 world-readable Nix store, and devenv's own SecretSpec integration (`secretspec.enable`) stays off:
 it would fetch the keys a second time and refuse to open the shell when the token is missing.
-Every process in the shell, including an AI coding agent started there, sees the keys. To read
-them from another store, set the provider on entry, for example
-`SECRETSPEC_PROVIDER=keyring devenv shell`.
+Every process in the shell, including an AI coding agent started there, sees the keys, under
+names no vendor's tool reads. To read them from another store, set the provider on entry, for
+example `SECRETSPEC_PROVIDER=keyring devenv shell`.
+
+The service account's reads are cached in the macOS Keychain for 30 days (`cache` on
+`onepassword_service` in `secretspec.toml`), so entering a shell normally doesn't contact 1Password
+and many shells or worktrees don't run into its rate limit. A fresh entry is used as is; an expired
+or missing one is read from 1Password again. After rotating a key in 1Password, run
+`secretspec cache clear` (all keys) or `secretspec cache clear <KEY>`, then reload the shell.
 
 ## Commands
 
@@ -106,8 +115,9 @@ validation use plain commands; `check` composes the scripts and finishes with `b
 Outside the shell, set both variables when invoking Bun or Mastra directly instead of the scripts.
 
 ```sh
-# Start a Run (see "Runs" below); needs GEMINI_API_KEY (and OPENAI_API_KEY for an OpenAI Lane) and
-# the Judge's key (ANTHROPIC_API_KEY), which the shell exports (see "Vendor keys").
+# Start a Run (see "Runs" below); needs ICONOGRAPH_GEMINI_API_KEY (and ICONOGRAPH_OPENAI_API_KEY
+# for an OpenAI Lane) and the Judge's key (ICONOGRAPH_ANTHROPIC_API_KEY), which the shell exports
+# (see "Vendor keys").
 bun run run --budget 0.50 me-1.jpg me-2.jpg me-3.jpg
 
 # Print a stored Run again from the database.
@@ -163,8 +173,15 @@ bun run models:export-facenet             # build the held-out FaceNet model (ne
 
 Weights are otherwise downloaded on first use. Missing files stream into a temp file beside the
 destination, are hashed, and are renamed into place only after the SHA-256 matches; present files
-are re-hashed on every use and never downloaded again once verified. **Offline machines**: copy the
-locked files (same names) into `<data dir>/models` by any means; they are verified like downloads.
+are re-hashed on every use and never downloaded again once verified. A download that receives no
+data for 30 s (headers or body) is aborted with an error naming the model and URL; a slow but
+progressing one is never cut off. A download names its temp file with its process id
+(`<file>.<uuid>.<pid>.partial`) and refreshes it every minute; the next download of that model
+removes one only once unmodified for 10 minutes and its process is gone (its own process id counts
+as gone unless it is writing that file, since a restarted container is PID 1 again; machines sharing
+the folder from separate process namespaces rely on the age alone). **Offline
+machines**: copy the locked files (same names) into `<data dir>/models` by any means; they are
+verified like downloads.
 **A checksum mismatch** is a hard error naming the model, path, expected and actual hash, and the
 file is never used. A corrupt present file is left in place: delete it and rerun `models:fetch`.
 
@@ -191,13 +208,16 @@ in this order:
 1. **Manual override**, set per model with the command below.
 2. **LiteLLM's public price data**
    ([`model_prices_and_context_window.json`](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json)
-   on `main`), cached with its fetch time in `<data dir>/prices.db`. The `prices` command refreshes
-   it when 24 h old (or dated in the future); the price source's `ensureFresh` is meant to run at
-   server boot and daily. A failed refresh keeps serving the old cache with its age, marked `stale`
-   once it is 24 h old or dated in the future. An unrelated entry whose price fields are malformed
-   is dropped (that model is unpriced) and listed in `refresh.rejected`. A malformed entry for a
-   default model, a response that isn't JSON, or one that prices no model fails the refresh and
-   leaves the cache untouched.
+   on `main`), cached with its fetch time in `<data dir>/prices.db`, and refetched once 24 h old
+   (or dated in the future). The server checks at boot, without holding up the start, and hourly
+   while it runs, so while LiteLLM is reachable the cache reaches about 25 h at most; a failed
+   refetch is logged as a warning and retried at the next hourly check. A Run CLI refreshes on its
+   first price lookup; the `prices` command checks on every lookup (`--refresh` forces a fetch). A
+   failed refresh keeps serving the old cache with its age, marked `stale` once it is 24 h old or
+   dated in the future. An unrelated entry whose price fields are malformed is dropped (that model
+   is unpriced) and listed in `refresh.rejected`. A default model's entry that is malformed or
+   can't price that model (e.g. a required price field is missing), a response that isn't JSON, or
+   one that prices no model fails the refresh and leaves the cache untouched.
 3. **Bundled snapshot**,
    [`packages/adapters/litellm-prices.snapshot.json`](packages/adapters/litellm-prices.snapshot.json),
    used only offline before the first successful fetch. It never fills gaps in a fetched cache.
@@ -442,8 +462,8 @@ The development shell exports the keys (see "Vendor keys"); any other way of set
 variables works too. A Run needs only the keys of its
 Lanes' vendors, its Judge's vendor and, for more than one Iteration, its Optimizer's vendor. Keys
 are read only from the environment and sent only in request headers; they never enter the
-database, the output or an error. In an OpenAI Lane's
-failure reasons, a masked echo of a key in the usual form (a word with three or more asterisks,
+database, the output or an error. In the failure reasons of an OpenAI Lane and of every Judge
+and Optimizer, a masked echo of a key in the usual form (a word with three or more asterisks,
 such as `sk-proj-****abcd`) is redacted too, and every reason is cut to about 2000 characters. A
 key shorter than 20 characters or with spaces, control or non-ASCII characters (a bad paste) is
 rejected before its price lookup and before any billable call, without echoing it. That check
@@ -481,7 +501,8 @@ Judge's in the Lane's first Iteration with a Scored Candidate.
   with `judge-failed` once the Iteration's calls already made have settled (no image or Optimizer
   call, and no Judge call beyond retries of calls already running; Candidates judged before keep
   their scores, and the best is still reported). Each Lane stops on its own first such call, and
-  the report shows the vendor's reason (the key itself redacted) as the Lane's `stopDetail`.
+  the result and the report show the vendor's reason (the key itself redacted) as the Lane's
+  `stopDetail`, and a warning names it.
   Cancelling the Run stops every Lane not yet stopped with `cancelled`, wherever the cancel
   lands (mid-call, between Iterations, during preparation, or with Lanes still waiting their
   turn; if the process stops before that is recorded, the report still shows them `cancelled`); a
@@ -543,12 +564,12 @@ Judge's in the Lane's first Iteration with a Scored Candidate.
   any `anthropic/`, `openai/` or `google/` vision model as a `vendor/model` id; any other vendor is
   refused before any billable call. `--judge-effort` takes `low`, `medium` or `high`, passed as
   the vendor's reasoning parameter (Anthropic `effort`, OpenAI `reasoningEffort`, Gemini
-  `thinkingConfig.thinkingLevel`). Its key comes from the environment only: `ANTHROPIC_API_KEY`,
-  `OPENAI_API_KEY`, or `GOOGLE_GENERATIVE_AI_API_KEY` (or `GOOGLE_API_KEY`). The Judge is checked
-  first, before any billable call: its key, then (for a Run of more than one Iteration) the
-  Optimizer's key, before any price is looked up; then their prices, then each Lane's Image Model,
-  its key before its own price. The key and the Reference Photos go only to the vendor's own API
-  (`https://api.anthropic.com/v1`, `https://api.openai.com/v1`,
+  `thinkingConfig.thinkingLevel`). Its key comes from the environment only:
+  `ICONOGRAPH_ANTHROPIC_API_KEY`, `ICONOGRAPH_OPENAI_API_KEY`, or `ICONOGRAPH_GEMINI_API_KEY`
+  (`google/`). The Judge is checked first, before any billable call: its key, then (for a Run of
+  more than one Iteration) the Optimizer's key, before any price is looked up; then their prices,
+  then each Lane's Image Model, its key before its own price. The key and the Reference Photos go
+  only to the vendor's own API (`https://api.anthropic.com/v1`, `https://api.openai.com/v1`,
   `https://generativelanguage.googleapis.com/v1beta`), set explicitly: the base-URL variables
   `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL` and `GOOGLE_BASE_URL` have no effect on the Judge. A
   proxy set by `HTTPS_PROXY` (or `ALL_PROXY`) still carries the connection, tunnelled with TLS to
@@ -660,13 +681,14 @@ Judge's in the Lane's first Iteration with a Scored Candidate.
   upper bound: the instructions, Rubric, verdict schema (as sent) and Target Look with ASCII at
   2.5 characters per token (Anthropic's current tokenizer averages about that) and every other
   UTF-16 code unit at 2 tokens (CJK measures about 0.7, emoji and rare CJK up to about 1.5), each
-  image at its model's documented worst case for 1024 px (Anthropic ⌈w/28⌉·⌈h/28⌉ ≤ 1,369; OpenAI
-  patch models ⌈w/32⌉·⌈h/32⌉ × up to 2.46 ≤ 2,520, which also covers its tile models; Gemini 3
-  and later ≤ 1,120), plus a margin for prompts vendors add unseen (structured output and
-  thinking system prompts): 1,000 input tokens or 10%, whichever is more; and the whole output
-  cap, reasoning included: 4,096 tokens at `low` effort, 8,192 at `medium`, 16,384 at `high`. A
-  model with no documented bound (e.g. `openai/gpt-4o-mini`, whose image tiles cost 5,667 tokens
-  each, or a Gemini model before Gemini 3, whose tiles are unbounded for wide images) can't be the
+  image at its model's documented or measured worst case for 1024 px (Anthropic
+  ⌈w/28⌉·⌈h/28⌉ ≤ 1,369; OpenAI patch models ⌈w/32⌉·⌈h/32⌉ × up to 2.46 ≤ 2,520, which also
+  covers its tile models; Gemini 3 and later ≤ 1,120), plus a margin for prompts vendors add
+  unseen (structured output and thinking system prompts): 1,000 input tokens or 10%, whichever
+  is more; and the whole output cap, reasoning included: 4,096 tokens at `low` effort, 8,192 at
+  `medium`, 16,384 at `high`. A model with no documented or measured bound (e.g.
+  `openai/gpt-4o-mini`, whose image tiles cost 5,667 tokens each, or a Gemini model before
+  Gemini 3, whose tiles are unbounded for wide images) can't be the
   Judge. For Sonnet 5.5 with 3 Reference Photos the estimate is
   about $0.059, $0.100 or $0.182 per call. Its actual cost comes from the reported
   input and output tokens (output includes reasoning) at the price recorded for the Judge when the
@@ -740,7 +762,7 @@ starting Prompt at the same Budget? For every Subject and Image Model it runs tw
 each, then scores every generated image of both with judges the loop never sees.
 
 ```sh
-GEMINI_API_KEY=… OPENAI_API_KEY=… ANTHROPIC_API_KEY=… \
+ICONOGRAPH_GEMINI_API_KEY=… ICONOGRAPH_OPENAI_API_KEY=… ICONOGRAPH_ANTHROPIC_API_KEY=… \
   bun run eval --out ~/eval-out --budget 2 --candidates 3 ~/subjects
 ```
 
@@ -893,10 +915,10 @@ data. The volume also holds the Runs database (`iconograph.db`, with Mastra's sn
 content-addressed images (`images/`) and the price cache (`prices.db`). Offline machines can copy
 the locked weights into the volume's `models/` folder first (see "Model weights").
 
-**Keys** come from `.env` only: the Judge's and the Optimizer's vendor (`ANTHROPIC_API_KEY` for
-the default `anthropic/claude-sonnet-5-5`, `OPENAI_API_KEY` for `openai/`,
-`GOOGLE_GENERATIVE_AI_API_KEY` for `google/`) and every Lane's Image Model (`GEMINI_API_KEY`,
-`OPENAI_API_KEY`).
+**Keys** come from `.env` only: the Judge's and the Optimizer's vendor
+(`ICONOGRAPH_ANTHROPIC_API_KEY` for the default `anthropic/claude-sonnet-5-5`,
+`ICONOGRAPH_OPENAI_API_KEY` for `openai/`, `ICONOGRAPH_GEMINI_API_KEY` for `google/`) and every
+Lane's Image Model (`ICONOGRAPH_GEMINI_API_KEY`, `ICONOGRAPH_OPENAI_API_KEY`).
 
 **Only localhost can reach it.** The server listens on `127.0.0.1` by default; outside a
 container `ICONOGRAPH_HOST` and `ICONOGRAPH_PORT` change that, and any non-loopback address logs a

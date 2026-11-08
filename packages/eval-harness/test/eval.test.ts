@@ -17,6 +17,7 @@ import {
 import { readRunReport } from "@iconograph/server";
 import { Effect, Layer } from "effect";
 import { realFaceEmbedder, realHeldOutEmbedder } from "../../adapters/test/face-models";
+import { spawnCli } from "../../adapters/test/spawn-cli";
 import { temporaryDirectories } from "../../adapters/test/temporary-directory";
 import {
   FAKE_ACTUAL_MICROS,
@@ -42,7 +43,6 @@ import {
   vendorAnswer,
   vendorError,
 } from "../../server/test/support/fake-vendors";
-import { spawnWithoutKeys } from "../../server/test/support/spawn-without-keys";
 import { type EvalCliDependencies, main } from "../src/cli";
 import { readSubjectsFolder } from "../src/subjects";
 
@@ -50,8 +50,8 @@ const temporaryDirectory = temporaryDirectories("eval");
 
 /** Fake keys for the real Judges on fake vendor APIs. */
 const KEYS = {
-  ANTHROPIC_API_KEY: "sk-ant-fake-eval-test-key-000001",
-  OPENAI_API_KEY: "sk-fake-eval-test-key-0000000001",
+  ICONOGRAPH_ANTHROPIC_API_KEY: "sk-ant-fake-eval-test-key-000001",
+  ICONOGRAPH_OPENAI_API_KEY: "sk-fake-eval-test-key-0000000001",
 };
 
 /** A Subjects folder with the Subjects `names` (default `biden`), each with two photos and `extra` files. */
@@ -762,7 +762,7 @@ describe("eval harness with fake vendors", () => {
     try {
       const subjects = await subjectsFolder();
       const origins = { anthropic: anthropic.origin, openai: openai.origin };
-      const { ANTHROPIC_API_KEY } = KEYS;
+      const { ICONOGRAPH_ANTHROPIC_API_KEY } = KEYS;
       const empty = await temporaryDirectory();
       const target = await temporaryDirectory();
       const linked = join(await temporaryDirectory(), "linked");
@@ -771,9 +771,9 @@ describe("eval harness with fake vendors", () => {
       for (const out of [fresh, empty, linked]) {
         // No OpenAI key: the second Judge's is checked before any billable call.
         const missing = await evaluate([...common(out), "--max-iterations", "1", subjects], {
-          judges: judgesOnFakeVendors(origins, { ANTHROPIC_API_KEY }),
+          judges: judgesOnFakeVendors(origins, { ICONOGRAPH_ANTHROPIC_API_KEY }),
         });
-        expect((missing.error as Error).message).toContain("OPENAI_API_KEY");
+        expect((missing.error as Error).message).toContain("ICONOGRAPH_OPENAI_API_KEY");
         expect(missing.images.requests).toEqual([]);
       }
       expect(await absent(fresh)).toBe(true);
@@ -1015,9 +1015,9 @@ test("walkthrough: bun run eval prints the comparison, writes the report, and it
       "bob",
     ]);
     const out = join(await temporaryDirectory(), "out");
-    const { stdout, stderr, exitCode } = await spawnWithoutKeys(
-      withFakes,
+    const { stdout, stderr, exitCode } = await spawnCli(
       [
+        withFakes,
         "--out",
         out,
         "--model",
@@ -1033,10 +1033,12 @@ test("walkthrough: bun run eval prints the comparison, writes the report, and it
         subjects,
       ],
       {
-        FAKE_IMAGE_SCRIPT: JSON.stringify(Array(16).fill("same")),
-        FAKE_ANTHROPIC_ORIGIN: anthropic.origin,
-        FAKE_OPENAI_ORIGIN: openai.origin,
-        ...KEYS,
+        env: {
+          FAKE_IMAGE_SCRIPT: JSON.stringify(Array(16).fill("same")),
+          FAKE_ANTHROPIC_ORIGIN: anthropic.origin,
+          FAKE_OPENAI_ORIGIN: openai.origin,
+          ...KEYS,
+        },
       },
     );
     expect(exitCode).toBe(0);
@@ -1070,7 +1072,8 @@ test("walkthrough: bun run eval prints the comparison, writes the report, and it
     ]);
     expect(stdout).toContain(`Warning: ${result.warnings[1].message}\n`);
     for (const run of result.runs) {
-      const read = await spawnWithoutKeys(runCli, [
+      const read = await spawnCli([
+        runCli,
         "read",
         "--db",
         join(out, "runs.db"),

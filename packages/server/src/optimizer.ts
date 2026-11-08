@@ -10,7 +10,10 @@ import {
   OptimizerUnavailable,
 } from "@iconograph/domain";
 import { Effect, Layer } from "effect";
-import { llmCaller, type LlmAgentsOptions, llmModel, llmPrice } from "./llm";
+import { llmCaller, type LlmAgentsOptions, llmModel, llmPrice, type ReadAnswer } from "./llm";
+
+/** An Optimizer call that answered with a Prompt a Lane can send. */
+type Optimized = Extract<OptimizerCallResult, { kind: "optimized" }>;
 
 /**
  * The Optimizers behind Mastra agents on their vendor's AI SDK provider, built
@@ -37,10 +40,7 @@ export const MastraOptimizers = (options: LlmAgentsOptions) =>
         const unavailable = (message: string) => new OptimizerUnavailable({ model, message });
         const llm = yield* llmModel("Optimizer", model, options, unavailable);
         const { price, pricing } = yield* llmPrice(model, recorded, options, unavailable);
-        const caller = llmCaller<
-          OptimizerProposal,
-          Extract<OptimizerCallResult, { kind: "optimized" }>
-        >({
+        const caller = llmCaller<OptimizerProposal, Optimized>({
           role: "Optimizer",
           instructions: OPTIMIZER_INSTRUCTIONS,
           model: llm,
@@ -49,10 +49,10 @@ export const MastraOptimizers = (options: LlmAgentsOptions) =>
           timeoutMs: options.timeoutMs,
           schema: OptimizerProposal,
           schemaName: "its output schema",
-          read: (proposal, cost) => {
+          read: (proposal, cost): ReadAnswer<Optimized> => {
             const checked = checkProposedPrompt(proposal.prompt);
             return checked._tag === "Rejected"
-              ? checked
+              ? { _tag: "Rejected", problem: checked.problem }
               : {
                   _tag: "Accepted",
                   success: { kind: "optimized", prompt: checked.prompt, ...cost },

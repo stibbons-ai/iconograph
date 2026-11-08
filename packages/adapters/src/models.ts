@@ -1,9 +1,9 @@
-import { mkdir } from "node:fs/promises";
+import { lstat, mkdir, readdir, rm, utimes } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { Schema } from "effect";
 import bundledLock from "../models.lock.json";
-import { errorMessage } from "./errors";
-import { writeFileAtomically } from "./files";
+import { attachCleanupError, errorMessage } from "./errors";
+import { isTemporaryFileOf, writeFileAtomically } from "./files";
 
 /**
  * Licences reviewed for locked weights, downloaded or built (ADR-0002,
@@ -99,7 +99,24 @@ export function downloadableModelIds(lock: ModelLock): string[] {
   return lock.models.flatMap((model) => (model.url ? [model.id] : []));
 }
 
-export type Fetch = (url: string) => Promise<Response>;
+/** Global `fetch` fits; `signal` aborts the request when the download stalls. */
+export type Fetch = (url: string, init?: { signal?: AbortSignal }) => Promise<Response>;
+
+/** How long a download may receive nothing (no headers, no body bytes) before it is aborted. */
+export const modelDownloadIdleTimeoutMs = 30_000;
+
+/**
+ * The lower bound on how long a model's `.partial` temp file stays unmodified
+ * before it counts as stale; the threshold is `max(this, 10 × idleTimeoutMs)`,
+ * applied when that model is next downloaded.
+ */
+const staleTempMinimumMs = 10 * 60_000;
+
+/** How often a download refreshes its temp file's mtime, far inside the staleness threshold. */
+const tempHeartbeatMs = staleTempMinimumMs / 10;
+
+/** The longest delay `setTimeout` honours; a longer one fires at once. */
+const maxTimerMs = 2 ** 31 - 1;
 
 export interface EnsureModelsOptions {
   /** Usually `readModelLock()`. */
@@ -109,6 +126,13 @@ export interface EnsureModelsOptions {
   /** Model ids to ensure; defaults to every model in the lock. */
   ids?: readonly string[];
   fetch?: Fetch;
+  /**
+   * A download that receives no data for this long fails; defaults to
+   * `modelDownloadIdleTimeoutMs`. There is no limit on its total duration. Also
+   * scales the stale temp file threshold (10 ×, at least 10 minutes). Throws
+   * unless a positive number of milliseconds `setTimeout` can honour.
+   */
+  idleTimeoutMs?: number;
 }
 
 export interface EnsuredModel {
@@ -124,7 +148,17 @@ export interface EnsuredModel {
  * is only returned after its SHA-256 matches the lock.
  */
 export async function ensureModels(options: EnsureModelsOptions): Promise<EnsuredModel[]> {
-  const { lock, directory, fetch: fetchModel = fetch } = options;
+  const {
+    lock,
+    directory,
+    fetch: fetchModel = fetch,
+    idleTimeoutMs = modelDownloadIdleTimeoutMs,
+  } = options;
+  if (!Number.isFinite(idleTimeoutMs) || idleTimeoutMs <= 0 || idleTimeoutMs > maxTimerMs) {
+    throw new Error(
+      `idleTimeoutMs must be a positive number of milliseconds up to ${maxTimerMs}; got ${idleTimeoutMs}`,
+    );
+  }
   const models = options.ids
     ? options.ids.map((id) => {
         const model = lock.models.find((candidate) => candidate.id === id);
@@ -156,7 +190,19 @@ export async function ensureModels(options: EnsureModelsOptions): Promise<Ensure
           `Model ${model.id} is missing at ${path}; it is never downloaded. Build it with \`${model.build.command}\` (pass the same --data-dir).`,
         );
       }
-      await download(model, path, fetchModel);
+      // A live writer refreshes its temp file's mtime every `tempHeartbeatMs` until it is
+      // renamed or removed, whatever its idle period and however long storing or verifying
+      // takes, and names it with its process id. One unmodified for far longer whose process
+      // is gone was left by a killed process; a suspended one can't refresh, but still runs.
+      // This process's id proves nothing (a restarted container is PID 1 again): its own temp
+      // is live only while it writes it. The `10 * idleTimeoutMs` term stays as the margin
+      // issue #18's triage set.
+      await removeStaleTemps(
+        directory,
+        model.file,
+        Math.max(staleTempMinimumMs, 10 * idleTimeoutMs),
+      );
+      await download(model, path, fetchModel, idleTimeoutMs);
     } else if (present !== model.sha256) {
       throw new ModelWeightError(
         `Model ${model.id} at ${path} failed SHA-256 verification: expected ${model.sha256}, actual ${present}. ${model.build ? `Rebuild it with \`${model.build.command}\`.` : "Delete the file to re-download it."}`,
@@ -182,37 +228,192 @@ export async function hashFile(path: string): Promise<string | undefined> {
   return hasher.digest("hex");
 }
 
+/** Suffix of a download's temp file without an owner, `<file>.<uuid>.partial`, as older versions named it. */
+const partialSuffix = ".partial";
+
+/** Suffix of the temp file a download in process `pid` writes, `<file>.<uuid>.<pid>.partial`. */
+const ownedPartialSuffix = (pid: number | string) => `.${pid}${partialSuffix}`;
+
+/**
+ * How many downloads in this process write each destination path (resolved) now,
+ * counted from before their temp file is opened until it is renamed or removed.
+ */
+const writing = new Map<string, number>();
+
+/**
+ * The owner process id `name` carries if it is a temp file of `file`: null for
+ * one without an owner, undefined for any other name.
+ */
+function tempOwner(name: string, file: string): number | null | undefined {
+  if (isTemporaryFileOf(name, file, partialSuffix)) return null;
+  const stem = name.slice(0, -partialSuffix.length);
+  const pid = stem.slice(stem.lastIndexOf(".") + 1);
+  return /^\d+$/.test(pid) && isTemporaryFileOf(name, file, ownedPartialSuffix(pid))
+    ? Number(pid)
+    : undefined;
+}
+
+/**
+ * Best effort: remove `<file>.<uuid>.<pid>.partial` temp files in `directory` not
+ * modified for `olderThanMs` whose process `pid` no longer runs, and
+ * `<file>.<uuid>.partial` ones (left by versions that named no owner) by age
+ * alone; one naming this process counts as live only while it writes `file`,
+ * otherwise by age alone. Any other file is never touched, and a failure (e.g.
+ * another caller removed it first) is ignored. Hosts sharing the folder from
+ * separate process id namespaces (containers) can't see each other's processes
+ * and rely on the age.
+ */
+async function removeStaleTemps(directory: string, file: string, olderThanMs: number) {
+  const cutoff = Date.now() - olderThanMs;
+  const destination = resolve(directory, file);
+  const names = await readdir(directory).catch(() => []);
+  for (const name of names) {
+    const owner = tempOwner(name, file);
+    if (owner === undefined) continue;
+    // Checked per entry: a download in this process may start while the sweep awaits.
+    const live =
+      owner !== null && (owner === process.pid ? writing.has(destination) : isRunning(owner));
+    if (live) continue;
+    const temp = join(directory, name);
+    try {
+      const stats = await lstat(temp);
+      if (stats.isFile() && stats.mtimeMs < cutoff) await rm(temp);
+    } catch {
+      // Best effort: a temp file that can't be removed never fails the download.
+    }
+  }
+}
+
+/** Whether process `pid` may still run on this host: only ESRCH proves it gone. */
+function isRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+/**
+ * Aborts `signal` with `reason` once `touch` was not called for `ms`; `guard`
+ * makes a promise reject with `reason` too, even when its source ignores the
+ * signal. `stop` clears the timer until the next `touch` and must run on every exit
+ * so no timer outlives the download.
+ */
+function idleWatchdog(ms: number, reason: Error) {
+  const controller = new AbortController();
+  const { signal } = controller;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const stop = () => clearTimeout(timer);
+  return {
+    signal,
+    touch() {
+      stop();
+      timer = setTimeout(() => controller.abort(reason), ms);
+    },
+    stop,
+    // The listener is removed once `source` settles, so nothing keeps its value alive.
+    guard<A>(source: Promise<A>): Promise<A> {
+      const { promise, resolve, reject } = Promise.withResolvers<A>();
+      const onAbort = () => reject(signal.reason);
+      if (signal.aborted) onAbort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+      source.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+      return promise;
+    },
+  };
+}
+
 /**
  * Stream into a temp file in the same directory, capped at the locked size, then
  * hash the stored file and rename only after it verifies, so no caller ever sees
- * a partial or unverified file.
+ * a partial or unverified file. Receiving nothing for `idleTimeoutMs` (headers
+ * or body) aborts the request; time spent storing a chunk does not count.
  */
-async function download(model: DownloadedWeight, path: string, fetchModel: Fetch): Promise<void> {
+async function download(
+  model: DownloadedWeight,
+  path: string,
+  fetchModel: Fetch,
+  idleTimeoutMs: number,
+): Promise<void> {
+  const idle = idleWatchdog(
+    idleTimeoutMs,
+    new ModelWeightError(
+      `Model ${model.id} download from ${model.url} stalled: no data for ${idleTimeoutMs / 1000} s`,
+    ),
+  );
+  // Keeps the temp file younger than any sweep's threshold: through the open handle while
+  // writing and syncing, by path once it is closed for verifying. Best effort: a failed
+  // refresh never fails the download; one other than ENOENT (the file was just renamed)
+  // may mean refreshing never works here, so a failing download carries the first.
+  let refreshTemp: (now: Date) => Promise<void> = async () => undefined;
+  let refreshError: unknown;
+  const heartbeat = setInterval(
+    () =>
+      refreshTemp(new Date()).catch((error: unknown) => {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") refreshError ??= error;
+      }),
+    tempHeartbeatMs,
+  );
+  const destination = resolve(path);
+  writing.set(destination, (writing.get(destination) ?? 0) + 1);
   let size = 0;
   try {
     await writeFileAtomically(
       path,
       async (handle) => {
-        const response = await fetchModel(model.url);
-        if (!response.ok || !response.body) {
-          await response.body?.cancel().catch(() => undefined);
-          throw new ModelWeightError(
-            `Model ${model.id} download failed: HTTP ${response.status} from ${model.url}`,
-          );
-        }
-        for await (const chunk of response.body) {
-          size += chunk.byteLength;
-          if (size > model.size) {
+        refreshTemp = (now) => handle.utimes(now, now);
+        try {
+          idle.touch();
+          const fetching = fetchModel(model.url, { signal: idle.signal });
+          const response = await idle.guard(fetching).catch((error: unknown) => {
+            // A fetch that ignores the signal may still answer: free that connection.
+            fetching.then(
+              (late) => late.body?.cancel().catch(() => undefined),
+              () => undefined,
+            );
+            throw error;
+          });
+          idle.touch();
+          if (!response.ok || !response.body) {
+            // Not awaited: a body whose cancel never settles must not hold up the failure.
+            void response.body?.cancel().catch(() => undefined);
             throw new ModelWeightError(
-              `Model ${model.id} download from ${model.url} exceeded the locked size of ${model.size} bytes`,
+              `Model ${model.id} download failed: HTTP ${response.status} from ${model.url}`,
             );
           }
-          await handle.write(chunk);
+          const reader = response.body.getReader();
+          try {
+            for (;;) {
+              const { done, value: chunk } = await idle.guard(reader.read());
+              if (done) break;
+              // An empty chunk is no data: it must not renew the watchdog.
+              if (chunk.byteLength === 0) continue;
+              // Paused while the chunk is stored: a slow local disk is no network stall.
+              idle.stop();
+              size += chunk.byteLength;
+              if (size > model.size) {
+                throw new ModelWeightError(
+                  `Model ${model.id} download from ${model.url} exceeded the locked size of ${model.size} bytes`,
+                );
+              }
+              await handle.write(chunk);
+              idle.touch();
+            }
+          } catch (error) {
+            // Frees the connection; a fetch that honoured the signal already errored the body.
+            // Not awaited: a cancel that never settles must not hold up the failure.
+            void reader.cancel().catch(() => undefined);
+            throw error;
+          }
+        } finally {
+          idle.stop();
         }
       },
       {
-        suffix: ".partial",
+        suffix: ownedPartialSuffix(process.pid),
         verify: async (temp) => {
+          refreshTemp = (now) => utimes(temp, now, now);
           if (size !== model.size) {
             throw new ModelWeightError(
               `Model ${model.id} download from ${model.url} ended after ${size} of ${model.size} bytes`,
@@ -229,10 +430,21 @@ async function download(model: DownloadedWeight, path: string, fetchModel: Fetch
       },
     );
   } catch (error) {
-    if (error instanceof ModelWeightError) throw error;
-    throw new ModelWeightError(
-      `Model ${model.id} download from ${model.url} to ${path} failed: ${errorMessage(error)}`,
-      { cause: error },
-    );
+    // A stall is the watchdog's reason, a ModelWeightError; the timer is paused while storing,
+    // so a storage failure is never mistaken for one.
+    const failure =
+      error instanceof ModelWeightError
+        ? error
+        : new ModelWeightError(
+            `Model ${model.id} download from ${model.url} to ${path} failed: ${errorMessage(error)}`,
+            { cause: error },
+          );
+    if (refreshError !== undefined) attachCleanupError(failure, refreshError);
+    throw failure;
+  } finally {
+    clearInterval(heartbeat);
+    const writers = writing.get(destination)! - 1;
+    if (writers === 0) writing.delete(destination);
+    else writing.set(destination, writers);
   }
 }

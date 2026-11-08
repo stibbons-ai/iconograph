@@ -32,6 +32,12 @@ const LOOPBACK_HOSTS = ["localhost", "127.0.0.1", "[::1]"];
 /** The first retry of a failed face-model download or verification, doubling up to 5 minutes. */
 const MODELS_RETRY_MS = 5_000;
 const MODELS_RETRY_MAX_MS = 300_000;
+/**
+ * How often the server checks the prices' age; `ensureFresh` refetches them
+ * only once they are `priceRefreshIntervalMs` old, so they reach at most about
+ * 25 h and a failed fetch is retried within the hour.
+ */
+const PRICES_CHECK_MS = 60 * 60 * 1000;
 
 /**
  * The Mastra routes a Run needs (method and path as Mastra declares them):
@@ -106,7 +112,10 @@ export interface ServerDependencies extends Pick<
   fetchModels?: Fetch;
   /** The first delay before retrying failed face models (default 5 s), doubling up to 5 minutes. */
   modelsRetryMs?: number;
-  /** Test seam: waits between face-model attempts; must end when `signal` aborts. */
+  /**
+   * Test seam: waits between face-model attempts and between price checks
+   * (`PRICES_CHECK_MS`, hourly); must end when `signal` aborts.
+   */
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   /** Test seam: wraps `/health`'s database query, e.g. to make it fail. */
   databaseProbe?: (query: () => Promise<void>) => Promise<void>;
@@ -136,9 +145,10 @@ export interface RunningServer {
   booted: Promise<void>;
   /**
    * Stop retrying the face models and abort a download in progress (an injected
-   * `fetchModels` only until its response arrives), start no more restarts,
+   * `fetchModels` that ignores its signal only until its response arrives),
+   * abort a price refresh in progress and wait for it, start no more restarts,
    * stop listening, then close Mastra, the Run database and the Image Models.
-   * Cancelled Runs still unwinding get up to 10 s to record their Lanes
+   * Cancelled Runs still unwinding get up to 5 s to record their Lanes
    * `cancelled` first. Runs already running, or restarted by Mastra's lease
    * timer, are not cancelled: closing storage under them fails them, and
    * Mastra may log that.
@@ -330,19 +340,49 @@ export async function startServer(
   });
 
   const stopping = new AbortController();
-  /** Downloads that stopping the server aborts, so no temp file is left open. */
-  const download: Fetch = async (url) => {
-    stopping.signal.throwIfAborted();
+  /**
+   * Checks the prices now and every `PRICES_CHECK_MS` until the server stops,
+   * refetching them once they are `priceRefreshIntervalMs` old; one check at a
+   * time, never blocking boot. A refetch is logged; a failed one is logged as a
+   * warning, the existing cache (or the bundled snapshot) keeps serving, and the
+   * next check retries it.
+   */
+  const pricesRefreshed = (async () => {
+    const { ensurePricesFresh } = models;
+    if (!ensurePricesFresh) return;
+    while (!stopping.signal.aborted) {
+      try {
+        const { refreshed, fetchedAt } = await ensurePricesFresh({ signal: stopping.signal });
+        if (refreshed)
+          log({ event: "prices-fresh", refreshed, fetchedAt: fetchedAt.toISOString() });
+      } catch (error) {
+        if (stopping.signal.aborted) break;
+        log({ warning: `Price refresh failed, keeping the current prices: ${errorChain(error)}` });
+      }
+      await sleep(PRICES_CHECK_MS, stopping.signal);
+    }
+  })();
+  /** Downloads that stopping the server or a stall aborts, so no temp file is left open. */
+  const download: Fetch = async (url, init) => {
+    const signal = init?.signal ? AbortSignal.any([stopping.signal, init.signal]) : stopping.signal;
+    signal.throwIfAborted();
+    // Settles on either abort, even when an injected `fetchModels` ignores the signal, so
+    // no stalled attempt keeps a listener on the server-lifetime stop signal.
     const { promise: aborted, reject } = Promise.withResolvers<never>();
-    const onAbort = () => reject(stopping.signal.reason);
-    stopping.signal.addEventListener("abort", onAbort, { once: true });
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    const fetching = Promise.try(() => (fetchModels ?? fetch)(url, { signal }));
     try {
-      return await Promise.race([
-        fetchModels ? fetchModels(url) : fetch(url, { signal: stopping.signal }),
-        aborted,
-      ]);
+      return await Promise.race([fetching, aborted]);
+    } catch (error) {
+      // Nobody else sees a response that arrives after the abort: free its connection.
+      fetching.then(
+        (late) => late.body?.cancel().catch(() => undefined),
+        () => undefined,
+      );
+      throw error;
     } finally {
-      stopping.signal.removeEventListener("abort", onAbort);
+      signal.removeEventListener("abort", onAbort);
     }
   };
   /**
@@ -408,6 +448,7 @@ export async function startServer(
       stopping.abort();
       await server.stop(true);
       await modelsReady;
+      await pricesRefreshed;
       await close();
     },
   };

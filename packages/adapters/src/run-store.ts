@@ -9,6 +9,8 @@ import {
   IdentityCeiling,
   type KeptReason,
   LANE_STOPS_WITH_DETAIL,
+  type LaneStop,
+  laneStopFields,
   LaneStopReason,
   type LedgerEntry,
   PriceQuote,
@@ -17,11 +19,11 @@ import {
   SettledCallKind,
   toMicros,
 } from "@iconograph/domain";
-import { type Client, createClient, type InValue, type Row } from "@libsql/client";
+import type { Client, InValue, Row } from "@libsql/client";
 import { Context, Data, Effect, Layer, Schema, Semaphore } from "effect";
 import { codeOf, errorMessage } from "./errors";
+import { openLocalClient } from "./local-database";
 import { ReferencePhotoReport } from "./reference-photos";
-import { localDatabaseUrl } from "./storage";
 
 /** How long one statement waits, synchronously, on a lock held elsewhere. */
 const BUSY_WAIT_MS = 50;
@@ -276,6 +278,7 @@ const decodePhotoReport = Schema.decodeUnknownSync(Schema.fromJsonString(Referen
 const decodePrice = Schema.decodeUnknownSync(Schema.fromJsonString(PriceQuote));
 const decodeReferences = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Array(Schema.Int)));
 const decodeStopReason = Schema.decodeUnknownSync(Schema.NullOr(LaneStopReason));
+const decodeStopDetail = Schema.decodeUnknownSync(Schema.NullOr(Schema.NonEmptyString));
 const decodePromptSource = Schema.decodeUnknownSync(PromptSourceKind);
 const decodeOutcome = Schema.decodeUnknownSync(Schema.fromJsonString(CandidateOutcome));
 const decodeResult = Schema.decodeUnknownSync(Schema.NullOr(SettledCallKind));
@@ -336,14 +339,13 @@ export class RunStore extends Context.Service<
     readonly createLane: (runId: string, lane: NewLane) => Effect.Effect<void, RunStoreError>;
     readonly loadLanes: (runId: string) => Effect.Effect<LaneRecord[], RunStoreError>;
     /**
-     * Stop a Lane with `reason`, unless it already stopped (the first reason
-     * stands). `detail` is required with, and only with, `LANE_STOPS_WITH_DETAIL`.
+     * Stop a Lane, unless it already stopped (the first stop stands); a
+     * reason of `LANE_STOPS_WITH_DETAIL` comes with its detail.
      */
     readonly stopLane: (
       runId: string,
       lane: number,
-      reason: LaneStopReason,
-      detail?: string,
+      stop: LaneStop,
     ) => Effect.Effect<void, RunStoreError>;
     /** Stop every Lane of the Run that hasn't stopped yet with `cancelled`. */
     readonly cancelLanes: (runId: string) => Effect.Effect<void, RunStoreError>;
@@ -505,21 +507,16 @@ export const LibsqlRunStore = (databasePath: string, options: LibsqlRunStoreOpti
               });
               if (!info.isFile()) throw new Error("not a database file");
             }
-            const created = createClient({
-              url: localDatabaseUrl(databasePath),
-              timeout: BUSY_WAIT_MS,
-            });
-            const client = options.wrapClient?.(created) ?? created;
-            try {
-              await retryWhileLocked(client, () => rejectOutdatedTables(client));
-              if (!options.readOnly) {
-                await retryWhileLocked(client, () => client.executeMultiple(schema));
-              }
-            } catch (error) {
-              client.close();
-              throw error;
-            }
-            return client;
+            return openLocalClient(
+              databasePath,
+              async (client) => {
+                await retryWhileLocked(client, () => rejectOutdatedTables(client));
+                if (!options.readOnly) {
+                  await retryWhileLocked(client, () => client.executeMultiple(schema));
+                }
+              },
+              { busyTimeoutMs: BUSY_WAIT_MS, wrapClient: options.wrapClient },
+            );
           },
           catch: (error) =>
             new RunStoreError({
@@ -707,20 +704,22 @@ export const LibsqlRunStore = (databasePath: string, options: LibsqlRunStoreOpti
               price: decodePrice(row.price),
               characterReferences: decodeReferences(row.character_references),
               stopReason: decodeStopReason(row.stop_reason),
-              stopDetail: row.stop_detail === null ? null : String(row.stop_detail),
+              stopDetail: decodeStopDetail(row.stop_detail),
             }));
           }),
 
         // The first stop recorded stands: a later one (e.g. a step finishing after the Run was
         // cancelled) never overwrites it, nor its detail. Every right-hand side reads the old row.
-        stopLane: (runId, lane, reason, detail) =>
-          update(
+        stopLane: (runId, lane, stop) => {
+          const { reason, detail } = laneStopFields(stop);
+          return update(
             `Stopping Lane ${lane} of Run ${runId}`,
             `UPDATE lanes SET stop_reason = COALESCE(stop_reason, ?),
               stop_detail = CASE WHEN stop_reason IS NULL THEN ? ELSE stop_detail END
               WHERE run_id = ? AND lane = ?`,
-            [reason, detail ?? null, runId, lane],
-          ),
+            [reason, detail, runId, lane],
+          );
+        },
 
         cancelLanes: (runId) =>
           execute(

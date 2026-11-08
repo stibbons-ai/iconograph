@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Effect } from "effect";
 import sharp from "sharp";
 import { facenetConfig } from "../src/held-out-embedder";
 import { type HeldOutReport, main } from "../src/heldout-cli";
 import { decodeReferencePhoto } from "../src/reference-photos";
-import { dataVolume, fixture, realHeldOutEmbedder, rightmostFace, spawnCli } from "./face-models";
+import { dataVolume, fixture, realHeldOutEmbedder, rightmostFace } from "./face-models";
+import { spawnCli } from "./spawn-cli";
 import { temporaryDirectories } from "./temporary-directory";
 
 const temporaryDirectory = temporaryDirectories("heldout-cli");
@@ -167,31 +169,36 @@ describe("faces:heldout in-process", () => {
 });
 
 describe("faces:heldout as a process", () => {
-  const spawn = (args: string[]) => spawnCli("heldout-cli.ts", args);
+  const cli = fileURLToPath(new URL("../src/heldout-cli.ts", import.meta.url));
+  const spawn = (args: string[]) => spawnCli([cli, ...args]);
   const heldOutVolume = () => dataVolume(temporaryDirectory, ["yunet", "facenet"]);
 
   test("exits 0 with the report on stdout", async () => {
     const data = await heldOutVolume();
-    const child = spawn(["--data-dir", data, fixture("biden-2021.jpg"), fixture("biden-2013.jpg")]);
-    expect(await child.exited).toBe(0);
-    const report: HeldOutReport = JSON.parse(await new Response(child.stdout).text());
+    const { stdout, exitCode } = await spawn([
+      "--data-dir",
+      data,
+      fixture("biden-2021.jpg"),
+      fixture("biden-2013.jpg"),
+    ]);
+    expect(exitCode).toBe(0);
+    const report: HeldOutReport = JSON.parse(stdout);
     expect(report.pass).toBe(true);
   });
 
   test("exits nonzero with a JSON error for a missing Candidate or an unreadable photo", async () => {
-    const none = spawn([]);
-    expect(await none.exited).toBe(1);
-    expect(JSON.parse(await new Response(none.stderr).text())).toEqual({
+    const none = await spawn([]);
+    expect(none.exitCode).toBe(1);
+    expect(JSON.parse(none.stderr)).toEqual({
       error:
         "Expected a Candidate and 1 to 8 Reference Photo paths, got 0 paths; use --help for usage",
     });
 
     const data = await heldOutVolume();
     const missing = join(data, "missing.jpg");
-    const unreadable = spawn(["--data-dir", data, missing, fixture("biden-2013.jpg")]);
-    expect(await unreadable.exited).toBe(1);
-    const stderr = await new Response(unreadable.stderr).text();
-    expect(stderr).toMatch(/^\{.*\}\n?$/);
-    expect(JSON.parse(stderr)).toMatchObject({ photo: missing });
+    const unreadable = await spawn(["--data-dir", data, missing, fixture("biden-2013.jpg")]);
+    expect(unreadable.exitCode).toBe(1);
+    expect(unreadable.stderr).toMatch(/^\{.*\}\n?$/);
+    expect(JSON.parse(unreadable.stderr)).toMatchObject({ photo: missing });
   });
 });

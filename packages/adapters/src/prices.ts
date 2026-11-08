@@ -1,5 +1,4 @@
 import { mkdir } from "node:fs/promises";
-import { pathToFileURL } from "node:url";
 import {
   DateString,
   needsRefresh,
@@ -11,10 +10,10 @@ import {
   type PriceQuote,
   type Unpriced,
 } from "@iconograph/domain";
-import { createClient } from "@libsql/client";
 import { Data, Effect, Schema } from "effect";
 import bundledSnapshot from "../litellm-prices.snapshot.json";
 import { pricesDatabase } from "./data-directory";
+import { openLocalClient } from "./local-database";
 
 /** LiteLLM's public price data on `main`: deliberately unpinned, so prices stay current. */
 export const litellmPricesUrl =
@@ -26,6 +25,8 @@ const decodeLiteLLMEntry = Schema.decodeUnknownOption(PriceFields);
 export interface LiteLLMPrices {
   /** Price fields keyed by LiteLLM model key, only for entries that carry any. */
   prices: ReadonlyMap<string, PriceFields>;
+  /** Keys whose entry is well-formed but carries no price field we read. */
+  withoutPrices: ReadonlySet<string>;
   /** Keys whose entry or read price fields were malformed; those models stay unpriced. */
   rejected: string[];
 }
@@ -38,6 +39,7 @@ export interface LiteLLMPrices {
  */
 export function decodeLiteLLMPrices(json: unknown): LiteLLMPrices {
   const prices = new Map<string, PriceFields>();
+  const withoutPrices = new Set<string>();
   const rejected: string[] = [];
   for (const [key, entry] of Object.entries(decodeLiteLLMFile(json))) {
     // `sample_spec` documents the format; it is not a model.
@@ -45,9 +47,10 @@ export function decodeLiteLLMPrices(json: unknown): LiteLLMPrices {
     const fields = decodeLiteLLMEntry(entry);
     if (fields._tag === "None") rejected.push(key);
     else if (Object.keys(fields.value).length > 0) prices.set(key, fields.value);
+    else withoutPrices.add(key);
   }
   if (prices.size === 0) throw new Error("No model in the price data has a price");
-  return { prices, rejected };
+  return { prices, withoutPrices, rejected };
 }
 
 /** The committed offline fallback, trimmed to the models Iconograph uses. */
@@ -74,7 +77,10 @@ function storedDate(value: unknown): Date {
   return date;
 }
 
-/** The price data could not be fetched or was invalid; the existing cache is untouched. */
+/**
+ * The price data could not be fetched, was invalid, or can't price a default
+ * model; the existing cache is untouched.
+ */
 export class PriceFetchError extends Error {
   override name = "PriceFetchError";
 }
@@ -127,14 +133,22 @@ CREATE TABLE IF NOT EXISTS price_overrides (
 );
 `;
 
+/**
+ * Aborts the refresh's fetch, including reading its body, leaving the cache
+ * unchanged; an abort after the data is read doesn't stop the write.
+ */
+export interface RefreshOptions {
+  signal?: AbortSignal;
+}
+
 export interface PriceSource {
   /** Fetch LiteLLM's data now and replace the cache; on any failure the cache is unchanged. */
-  refresh(): Promise<Refresh>;
+  refresh(options?: RefreshOptions): Promise<Refresh>;
   /**
    * Refresh only when there is no cache, it is 24 h old or more, or it is dated
    * in the future (the clock moved back).
    */
-  ensureFresh(): Promise<Refresh>;
+  ensureFresh(options?: RefreshOptions): Promise<Refresh>;
   /** Never fetches; call `ensureFresh` first to keep LiteLLM data current. */
   lookup(model: string): Effect.Effect<PriceQuote, Unpriced | PriceStoreError>;
   /**
@@ -162,17 +176,12 @@ export async function openPriceSource(options: PriceSourceOptions): Promise<Pric
   // An injected snapshot is validated like the bundled one.
   const snapshot = decodePriceSnapshot(options.snapshot ?? bundledSnapshot);
   await mkdir(options.dataDirectory, { recursive: true });
-  const client = createClient({
-    url: pathToFileURL(pricesDatabase(options.dataDirectory)).href,
+  const client = await openLocalClient(
+    pricesDatabase(options.dataDirectory),
+    (created) => created.executeMultiple(schema),
     // A server and the CLI may share the file; wait for a lock instead of failing at once.
-    timeout: 5_000,
-  });
-  try {
-    await client.executeMultiple(schema);
-  } catch (error) {
-    client.close();
-    throw error;
-  }
+    { busyTimeoutMs: 5_000 },
+  );
   const snapshotAsOf = new Date(snapshot.fetchedAt);
 
   async function fetchedAt(): Promise<Date | undefined> {
@@ -186,10 +195,13 @@ export async function openPriceSource(options: PriceSourceOptions): Promise<Pric
     });
   };
 
-  async function refresh(): Promise<Refresh> {
+  async function refresh({ signal }: RefreshOptions = {}): Promise<Refresh> {
+    const timeout = AbortSignal.timeout(timeoutMs);
     // Called inside `then`, so an injected fetch that throws synchronously also becomes a PriceFetchError.
     const response = await Promise.resolve()
-      .then(() => fetchPrices(url, { signal: AbortSignal.timeout(timeoutMs) }))
+      .then(() =>
+        fetchPrices(url, { signal: signal ? AbortSignal.any([signal, timeout]) : timeout }),
+      )
       .catch(fetchFailed);
     if (!response.ok) {
       await response.body?.cancel().catch(() => {});
@@ -208,6 +220,21 @@ export async function openPriceSource(options: PriceSourceOptions): Promise<Pric
     if (badDefaults.length > 0) {
       throw new PriceFetchError(
         `LiteLLM price data from ${url} has malformed prices for default model ${badDefaults.join(", ")}; keeping the existing cache`,
+      );
+    }
+    // A default model whose entry is present but can't price it (e.g. a required
+    // field removed upstream) would be unpriced until the next refresh.
+    const unpriceable: string[] = [];
+    for (const [model, { litellmKey }] of Object.entries(pricingSpecs)) {
+      const fields = decoded.prices.get(litellmKey);
+      // An absent default key leaves that model unpriced; it doesn't fail the refresh.
+      if (fields === undefined && !decoded.withoutPrices.has(litellmKey)) continue;
+      const problem = pricingProblem(model, fields ?? {});
+      if (problem !== undefined) unpriceable.push(`${litellmKey} (${problem})`);
+    }
+    if (unpriceable.length > 0) {
+      throw new PriceFetchError(
+        `LiteLLM price data from ${url} can't price default model ${unpriceable.join(", ")}; keeping the existing cache`,
       );
     }
     const fetched = now();
@@ -231,10 +258,10 @@ export async function openPriceSource(options: PriceSourceOptions): Promise<Pric
   return {
     refresh,
 
-    async ensureFresh() {
+    async ensureFresh(options) {
       const fetched = await fetchedAt();
       if (fetched && !needsRefresh(fetched, now())) return { refreshed: false, fetchedAt: fetched };
-      return refresh();
+      return refresh(options);
     },
 
     lookup(model) {

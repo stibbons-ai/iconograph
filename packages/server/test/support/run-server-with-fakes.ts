@@ -13,7 +13,7 @@
  *   downloaded and the data volume must hold the weights.
  */
 import { join } from "node:path";
-import { errorLine, readModelLock } from "@iconograph/adapters";
+import { readModelLock, runCommand } from "@iconograph/adapters";
 import { ImageModels } from "@iconograph/domain";
 import { Effect, Layer } from "effect";
 import { missingWeights } from "../../../adapters/test/face-models";
@@ -40,8 +40,8 @@ const fetchModels = modelsFrom
     }
   : missingWeights;
 
-try {
-  await startServer(serverConfig(), {
+await runCommand(() =>
+  startServer(serverConfig(), {
     vendors: async () => ({
       imageModels: layer,
       judges: fakeJudgesFromEnv(),
@@ -53,8 +53,5 @@ try {
       modelsRetryMs: Number(process.env.FAKE_MODELS_RETRY_MS),
     }),
     retryPolicy: { maxRetries: 2, baseDelayMs: 0 },
-  });
-} catch (error) {
-  process.stderr.write(errorLine(error));
-  process.exitCode = 1;
-}
+  }),
+);

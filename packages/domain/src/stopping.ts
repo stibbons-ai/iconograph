@@ -41,6 +41,26 @@ export const LANE_STOPS_WITH_DETAIL = [
   "optimizer-failed",
   "judge-failed",
 ] as const satisfies readonly LaneStopReason[];
+export type LaneStopDetailReason = (typeof LANE_STOPS_WITH_DETAIL)[number];
+
+/** A stop reason of `LANE_STOPS_WITH_DETAIL`, with the vendor's reason as its detail. */
+export interface LaneStopWithDetail {
+  readonly reason: LaneStopDetailReason;
+  readonly detail: string;
+}
+
+/**
+ * Why a Lane stops, as recorded: a reason of `LANE_STOPS_WITH_DETAIL` with
+ * its detail, any other reason alone.
+ */
+export type LaneStop = Exclude<LaneStopReason, LaneStopDetailReason> | LaneStopWithDetail;
+
+/** A Lane stop as its reason and its detail (null for a reason without one). */
+export const laneStopFields = (stop: LaneStop) =>
+  typeof stop === "string" ? { reason: stop, detail: null } : stop;
+
+const hasDetail = (reason: LaneStopReason): reason is LaneStopDetailReason =>
+  (LANE_STOPS_WITH_DETAIL as readonly LaneStopReason[]).includes(reason);
 
 /** The most Iterations a Run may allow a Lane; the Budget is the practical limit. */
 export const MAX_ITERATIONS = 50;
@@ -188,19 +208,22 @@ export function iterationsWithoutImprovement(
  * The Budget ran out when `budgetExhausted` says so (a call of the last
  * Iteration didn't fit, e.g. one that left no Candidate) or the last
  * Iteration's stored Candidates show it; the Judge failed when they show a
- * Judge call turned away for good. Cancellation and `optimizer-failed` never
- * reach here: a cancelled Lane stops where it is, and the Optimizer is called
- * only once no rule holds, its rejection stopping the Lane at once.
+ * Judge call turned away for good, its reason the stop's detail.
+ * Cancellation and `optimizer-failed` never reach here: a cancelled Lane
+ * stops where it is, and the Optimizer is called only once no rule holds,
+ * its rejection stopping the Lane at once.
  */
 export function laneStopReason(
   history: readonly IterationResult[],
   rules: StopRules,
   budgetExhausted: boolean,
-): LaneStopReason | null {
-  const holds: { readonly [R in LaneStopReason]: () => boolean } = {
+): LaneStop | null {
+  const details: { readonly [R in LaneStopDetailReason]: () => string | null } = {
+    "optimizer-failed": () => null,
+    "judge-failed": () => history.at(-1)?.judgeRejected ?? null,
+  };
+  const holds: { readonly [R in Exclude<LaneStopReason, LaneStopDetailReason>]: () => boolean } = {
     cancelled: () => false,
-    "optimizer-failed": () => false,
-    "judge-failed": () => (history.at(-1)?.judgeRejected ?? null) !== null,
     "target-score": () => history.some(({ best }) => best !== null && best >= rules.targetScore),
     "budget-exhausted": () => budgetExhausted || history.at(-1)?.budgetExhausted === true,
     "repeated-failures": () =>
@@ -208,5 +231,11 @@ export function laneStopReason(
     patience: () => iterationsWithoutImprovement(history, rules.minImprovement) >= rules.patience,
     "iteration-limit": () => history.length >= rules.maxIterations,
   };
-  return LaneStopReason.literals.find((reason) => holds[reason]()) ?? null;
+  for (const reason of LaneStopReason.literals) {
+    if (hasDetail(reason)) {
+      const detail = details[reason]();
+      if (detail !== null) return { reason, detail };
+    } else if (holds[reason]()) return reason;
+  }
+  return null;
 }

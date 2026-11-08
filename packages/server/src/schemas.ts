@@ -25,14 +25,17 @@ export const LaneState = Schema.Struct({
 export type LaneState = typeof LaneState.Type;
 
 /**
- * A stopped Lane: why, how many Iterations it began (each has its Prompt
- * stored), and its best Candidate (null when none was judged): its Iteration
- * (from 1), its index within the Iteration (from 0) and its weighted total.
+ * A stopped Lane: why, with the vendor's reason (`stopDetail`) when the
+ * Optimizer or the Judge was turned away for good, else null; how many
+ * Iterations it began (each has its Prompt stored); and its best Candidate
+ * (null when none was judged): its Iteration (from 1), its index within the
+ * Iteration (from 0) and its weighted total.
  */
 export const LaneResult = Schema.Struct({
   runId: Schema.String,
   lane: Schema.Int,
   stopReason: LaneStopReason,
+  stopDetail: Schema.NullOr(Schema.NonEmptyString),
   iterations: Schema.Int,
   best: Schema.NullOr(
     Schema.Struct({ iteration: Schema.Int, candidate: Schema.Int, score: Schema.Finite }),

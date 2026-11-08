@@ -16,8 +16,10 @@ import {
   type PriceSource,
   type PriceSourceOptions,
 } from "../src";
+import { localDatabaseUrl } from "../src/local-database";
 import { litellmPricesUrl, PriceSnapshot } from "../src/prices";
 import { main } from "../src/prices-cli";
+import { spawnScript } from "./spawn-cli";
 
 // A trimmed excerpt of LiteLLM's model_prices_and_context_window.json, unedited
 // entries: the GPT Image 2.6, gpt-6.1-sol and gemini/gemini-4-argon entries at
@@ -26,6 +28,11 @@ import { main } from "../src/prices-cli";
 const recorded = await readFile(new URL("fixtures/litellm-prices.json", import.meta.url), "utf8");
 const recordedJson = JSON.parse(recorded) as Record<string, Record<string, unknown>>;
 const { "gpt-image-2.6-sunburst": _sunburst, ...withoutSunburst } = recordedJson;
+const {
+  output_cost_per_token: _output,
+  input_cost_per_token: _input,
+  ...sonnetWithoutPrices
+} = recordedJson["claude-sonnet-5-5"]!;
 
 const hits = new Map<string, number>();
 const routes: Record<string, () => Response> = {
@@ -62,6 +69,29 @@ const routes: Record<string, () => Response> = {
         ...recordedJson["claude-sonnet-5-5"],
         input_cost_per_token: "0.000003",
       },
+    }),
+  // A default model's entry well-formed but missing a field its pricing needs.
+  "/partial-default": () =>
+    Response.json({
+      ...recordedJson,
+      "claude-sonnet-5-5": { ...sonnetWithoutPrices, input_cost_per_token: 2e-6 },
+    }),
+  // A default model's entry present without any price field.
+  "/unpriced-default": () =>
+    Response.json({ ...recordedJson, "claude-sonnet-5-5": sonnetWithoutPrices }),
+  // Other entries well-formed but unable to price their model; the refresh must still succeed.
+  "/insufficient-others": () =>
+    Response.json({
+      ...recordedJson,
+      // The Vertex key shares the Gemini default's model id but is not its LiteLLM key.
+      "gemini-nano-banana-2.1": { input_cost_per_token: 1e-6 },
+      "other/input-only": { input_cost_per_token: 1e-6 },
+      "other/image-llm": {
+        input_cost_per_token: 1e-6,
+        output_cost_per_token: 1e-6,
+        output_cost_per_image: 0.1,
+      },
+      "other/no-prices": { mode: "chat" },
     }),
   // Sends the start of a body and never finishes it.
   "/hang": () =>
@@ -113,7 +143,7 @@ const lookupError = (source: PriceSource, model: string) =>
   Effect.runPromise(Effect.flip(source.lookup(model)));
 /** Corrupt the price database behind the price source's back. */
 async function tamper(sql: string) {
-  const raw = createClient({ url: pathToFileURL(pricesDatabase(directory)).href });
+  const raw = createClient({ url: localDatabaseUrl(pricesDatabase(directory)) });
   await raw.execute(sql);
   raw.close();
 }
@@ -170,7 +200,7 @@ describe("LiteLLM fetch and cache", () => {
   });
 
   test("tolerates unknown fields and unpriced entries; skips the format's sample_spec", () => {
-    const { prices, rejected } = decodeLiteLLMPrices(recordedJson);
+    const { prices, withoutPrices, rejected } = decodeLiteLLMPrices(recordedJson);
     expect([...prices.keys()].sort()).toEqual([
       "claude-sonnet-5-5",
       "gemini-nano-banana-2.1",
@@ -180,6 +210,7 @@ describe("LiteLLM fetch and cache", () => {
       "gpt-image-2.6-flare",
       "gpt-image-2.6-sunburst",
     ]);
+    expect(withoutPrices).toEqual(new Set(["assemblyai/best"]));
     expect(rejected).toEqual([]);
     expect(prices.get("claude-sonnet-5-5")).toEqual({
       input_cost_per_token: 2e-6,
@@ -197,6 +228,16 @@ describe("LiteLLM fetch and cache", () => {
     ]);
     expect((await lookup(source, "claude-sonnet-5-5")).source._tag).toBe("litellm");
     expect(await lookupError(source, "junk/null-price")).toMatchObject({ _tag: "Unpriced" });
+  });
+
+  test("unrelated entries that can't price their model don't fail the refresh", async () => {
+    const source = await open({ url: at("/insufficient-others") });
+    expect(await source.refresh()).toEqual({ refreshed: true, fetchedAt: start, rejected: [] });
+    expect((await lookup(source, "gemini-nano-banana-2.1")).source._tag).toBe("litellm");
+    expect((await lookup(source, "claude-sonnet-5-5")).source._tag).toBe("litellm");
+    for (const model of ["other/input-only", "other/image-llm", "other/no-prices"]) {
+      expect(await lookupError(source, model)).toMatchObject({ _tag: "Unpriced", model });
+    }
   });
 
   test("a default model missing from a fetched cache is unpriced, not taken from the snapshot", async () => {
@@ -235,6 +276,16 @@ describe("LiteLLM fetch and cache", () => {
       "a malformed entry for a default model",
       { url: at("/bad-default") },
       `LiteLLM price data from ${at("/bad-default")} has malformed prices for default model claude-sonnet-5-5; keeping the existing cache`,
+    ],
+    [
+      "a default model's entry missing a required field",
+      { url: at("/partial-default") },
+      `LiteLLM price data from ${at("/partial-default")} can't price default model claude-sonnet-5-5 (Llm pricing needs output_cost_per_token); keeping the existing cache`,
+    ],
+    [
+      "a default model's entry without price fields",
+      { url: at("/unpriced-default") },
+      `LiteLLM price data from ${at("/unpriced-default")} can't price default model claude-sonnet-5-5 (Llm pricing needs input_cost_per_token, output_cost_per_token); keeping the existing cache`,
     ],
   ])("%s is an error and leaves the existing cache intact", async (_, options, message) => {
     await (await open()).refresh();
@@ -290,6 +341,31 @@ describe("LiteLLM fetch and cache", () => {
     const failure = source.refresh();
     await expect(failure).rejects.toBeInstanceOf(PriceFetchError);
     await expect(failure).rejects.toThrow("failed: no network in this sandbox");
+  });
+
+  test("aborting the signal ends a hanging refresh with a PriceFetchError, cache intact", async () => {
+    await (await open()).refresh();
+    advanceHours(30);
+    const answered = Promise.withResolvers<void>();
+    const hanging = await open({
+      url: at("/hang"),
+      fetch: async (url, init) => {
+        const response = await fetch(url, init);
+        answered.resolve();
+        return response;
+      },
+    });
+    const abort = new AbortController();
+    const failure = hanging.ensureFresh({ signal: abort.signal });
+    // Mid-body: the headers have arrived and the body never finishes.
+    await answered.promise;
+    abort.abort(new Error("server stopping"));
+    await expect(failure).rejects.toBeInstanceOf(PriceFetchError);
+    await expect(failure).rejects.toThrow("server stopping");
+    expect((await lookup(hanging, "claude-sonnet-5-5")).source).toMatchObject({
+      _tag: "litellm",
+      asOf: start.toISOString(),
+    });
   });
 
   test("a write waits for another process's lock instead of failing at once", async () => {
@@ -549,20 +625,7 @@ describe("prices command", () => {
   });
 
   // The root script, run as an operator would, against the local recorded server.
-  async function script(...args: string[]) {
-    const root = fileURLToPath(new URL("../../../", import.meta.url));
-    const child = Bun.spawn([process.execPath, "run", "--silent", "prices", ...args], {
-      cwd: root,
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-      child.exited,
-    ]);
-    return { stdout, stderr, exitCode };
-  }
+  const script = (...args: string[]) => spawnScript("prices", args);
 
   test("the root script prints a price as JSON and exits zero", async () => {
     const result = await script(

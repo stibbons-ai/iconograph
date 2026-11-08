@@ -195,8 +195,9 @@ export const JUDGE_IMAGE_MAX_SIDE = 1024;
 /**
  * Upper bounds on the input tokens of one image of at most
  * `JUDGE_IMAGE_MAX_SIDE` px, from the vendors' docs (Anthropic checked
- * 2026-11-02; OpenAI, Google 2026-11-08) or, where a model is missing from
- * them, a measurement on that exact model:
+ * 2026-11-02; OpenAI, Google 2026-11-08); gpt-6.1-sol, which the OpenAI page
+ * doesn't list, was measured (below). The OpenAI rule is applied to every
+ * OpenAI id except gpt-4o-mini:
  * - Anthropic: ⌈w/28⌉ × ⌈h/28⌉ tokens on the high-resolution tier (cap 4,784),
  *   so at most 37 × 37 = 1,369.
  * - OpenAI: patch models ⌈w/32⌉ × ⌈h/32⌉ patches × the model's multiplier
@@ -231,7 +232,8 @@ const imageTokenBounds: { readonly [V in LlmVendor]: (id: string) => number | un
 
 /**
  * The input tokens one Judge image can cost at most, for this model id;
- * undefined when no documented bound covers the model (it can't be a Judge).
+ * undefined when no documented or measured bound covers the model (it can't
+ * be a Judge).
  */
 export function judgeImageTokens(model: string): number | undefined {
   const parsed = parseLlmModel(model);

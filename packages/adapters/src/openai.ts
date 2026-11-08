@@ -54,7 +54,7 @@ import {
   type Usage,
 } from "@iconograph/domain";
 import { Effect, Schema } from "effect";
-import { redactKey } from "./api-key";
+import { redactReason } from "./api-key";
 import { errorMessage, field } from "./errors";
 import {
   base64Of,
@@ -96,12 +96,6 @@ const INPUT_TOKENS_PER_REFERENCE = 6144;
  * 823 on purpose: a safety margin, not the smallest image, so don't raise it.
  */
 const MIN_OUTPUT_TOKENS_PER_IMAGE = 16;
-/**
- * Where every reason is cut (vendor text, runtime errors and our own prefix
- * alike). The stored reason can run slightly longer: `… (truncated)` is
- * appended, and `[redacted]` can be longer than the mask it replaces.
- */
-const MAX_REASON_LENGTH = 2000;
 
 /** Error codes of a moderation block; the request is refused, not retried. */
 const MODERATION_CODE = "moderation_blocked";
@@ -284,22 +278,8 @@ function classifyHttpError(status: number, body: unknown): CallResult {
 export function openaiImageModel(options: OpenAIImageModelOptions): ImageModel {
   const { model, apiKey, price, fetch: send = fetch, timeoutMs = 300_000 } = options;
   const { pricing } = price;
-  /**
-   * A reason fit to store: without the key (e.g. quoted by a runtime rejecting
-   * the header value), cut to about `MAX_REASON_LENGTH` characters (every reason),
-   * and without a masked echo of any key: a whitespace-delimited word with three
-   * or more asterisks after at least three characters (trailing punctuation
-   * kept). The key goes before truncating, so a cut can't leave part of it; the
-   * lookbehind starts a match only at a word's start, so the scan stays cheap.
-   */
-  const withoutKey = redactKey(apiKey);
-  const redact = (text: string) => {
-    const keyless = withoutKey(text);
-    const masked = keyless
-      .slice(0, MAX_REASON_LENGTH)
-      .replace(/(?<!\S)\S{3,}\*{3,}\S*?(?=[.,;:!?)"']*(?:\s|$))/g, "[redacted]");
-    return keyless.length > MAX_REASON_LENGTH ? `${masked}… (truncated)` : masked;
-  };
+  /** A reason fit to store (`redactReason`): without the key or a masked echo of one, cut. */
+  const redact = redactReason(apiKey);
 
   const estimate = (request: ImageRequest): CallEstimate => {
     const usage = {

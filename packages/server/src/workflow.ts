@@ -85,22 +85,28 @@ export class CancelRecordings {
   /**
    * Settles once every cancelled Run seen so far has recorded its Lanes, or
    * after `timeoutMs`: a Run whose steps never unwind mustn't hold up a
-   * shutdown (its report still shows the Lanes cancelled).
+   * shutdown (its report still shows the Lanes cancelled). Runs still
+   * unwinding then are named in a warning and no longer awaited, so a later
+   * call doesn't wait for them again.
    */
   async settled(timeoutMs: number) {
-    const pending = [...this.#pending.values()].map(({ promise }) => promise);
+    const pending = [...this.#pending];
     if (pending.length === 0) return;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timedOut = new Promise<"timed out">((resolve) => {
-      timer = setTimeout(() => resolve("timed out"), timeoutMs);
-    });
+    const { promise: timedOut, resolve } = Promise.withResolvers<"timed out">();
+    const timer = setTimeout(() => resolve("timed out"), timeoutMs);
     try {
-      if ((await Promise.race([Promise.all(pending), timedOut])) === "timed out") {
-        this.warn({
-          level: "Warn",
-          warning: `Cancelled Runs were still unwinding after ${timeoutMs / 1000} s; closing without recording their Lanes`,
-        });
-      }
+      const all = Promise.all(pending.map(([, { promise }]) => promise));
+      if ((await Promise.race([all, timedOut])) !== "timed out") return;
+      const runIds = pending
+        .filter(([runId, entry]) => this.#pending.get(runId) === entry)
+        .map(([runId]) => runId);
+      if (runIds.length === 0) return;
+      for (const runId of runIds) this.#pending.delete(runId);
+      this.warn({
+        level: "Warn",
+        warning: `Cancelled Runs ${runIds.join(", ")} were still unwinding after ${timeoutMs / 1000} s; closing without recording their Lanes`,
+        runIds,
+      });
     } finally {
       clearTimeout(timer);
     }

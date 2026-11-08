@@ -1,6 +1,6 @@
 import { parseArgs } from "node:util";
+import { runCommand, runMain } from "./command";
 import { modelsDirectory, resolveDataDirectory } from "./data-directory";
-import { errorLine } from "./errors";
 import { downloadableModelIds, ensureModels, readModelLock, type ModelLock } from "./models";
 
 const help = `Fetch and verify every downloadable locked face-model weight file
@@ -20,14 +20,20 @@ it with the command in its lock entry (bun run models:export-facenet).
 Errors print JSON to stderr and exit nonzero.
 `;
 
-/** Test seam: the shipped lock admits only HTTPS, so tests inject one for a local server. */
+/**
+ * Test seams: the lock (the shipped one admits only HTTPS, so tests inject one for a local
+ * server), the idle period and the output streams.
+ */
 export interface ModelsCliDependencies {
   lock?: ModelLock;
+  /** Test-sized idle period; operators always get the default. */
+  idleTimeoutMs?: number;
   stdout?: (text: string) => void;
+  stderr?: (text: string) => void;
 }
 
 export async function main(args: string[], dependencies: ModelsCliDependencies = {}) {
-  const { stdout = (text) => process.stdout.write(text) } = dependencies;
+  const { stdout = (text) => process.stdout.write(text), idleTimeoutMs } = dependencies;
   const { values, positionals } = parseArgs({
     args,
     allowPositionals: true,
@@ -44,15 +50,21 @@ export async function main(args: string[], dependencies: ModelsCliDependencies =
   if (positionals.length > 0) throw new Error("Unexpected arguments; use --help for usage");
   const directory = modelsDirectory(resolveDataDirectory(values["data-dir"]));
   const lock = dependencies.lock ?? readModelLock();
-  const models = await ensureModels({ lock, directory, ids: downloadableModelIds(lock) });
+  const models = await ensureModels({
+    lock,
+    directory,
+    ids: downloadableModelIds(lock),
+    ...(idleTimeoutMs !== undefined && { idleTimeoutMs }),
+  });
   stdout(`${JSON.stringify({ directory, models })}\n`);
 }
 
-if (import.meta.main) {
-  try {
-    await main(process.argv.slice(2));
-  } catch (error) {
-    process.stderr.write(errorLine(error));
-    process.exitCode = 1;
-  }
+/**
+ * `main` through `runMain` with injectable seams: what `runCommand(main)` does
+ * for the script, returning the exit code instead of setting it.
+ */
+export function run(args: string[], dependencies: ModelsCliDependencies = {}): Promise<0 | 1> {
+  return runMain((input) => main(input, dependencies), args, { stderr: dependencies.stderr });
 }
+
+if (import.meta.main) await runCommand(main);

@@ -3,7 +3,7 @@
  * API at the origin in argv[2], beside a plain fetch to the same server: for
  * the idle-timeout test, which runs this with a low
  * BUN_CONFIG_HTTP_IDLE_TIMEOUT (Bun reads it only when it starts) and
- * ANTHROPIC_API_KEY set. Prints the Judge's result kind and how the plain
+ * ICONOGRAPH_ANTHROPIC_API_KEY set. Prints the Judge's result kind and how the plain
  * fetch ended, as JSON.
  */
 import { DEFAULT_TARGET_LOOK, Judges } from "@iconograph/domain";

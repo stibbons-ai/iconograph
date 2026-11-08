@@ -1,6 +1,5 @@
 import { parseArgs } from "node:util";
 import {
-  errorLine,
   errorMessage,
   faceChoiceMap,
   laneImageModel,
@@ -9,6 +8,7 @@ import {
   readJsonFile,
   resolveDataDirectory,
   RUN_SETTING_OPTIONS,
+  runCommand,
   runSettingsInput,
   withCleanup,
 } from "@iconograph/adapters";
@@ -99,11 +99,11 @@ Options:
   --run-id ID         With read: the Run to print.
   --help, -h          Show this help.
 
-Gemini: Google's Interactions API, 2K, store=false; needs GEMINI_API_KEY.
-At most 4 character references are sent to Google.
+Gemini: Google's Interactions API, 2K, store=false; needs
+ICONOGRAPH_GEMINI_API_KEY. At most 4 character references are sent to Google.
 OpenAI: the Images API edits endpoint, 1024x1024 at high quality; needs
-OPENAI_API_KEY. Up to 16 character references are sent to OpenAI, which
-keeps API inputs and outputs up to 30 days for abuse monitoring.
+ICONOGRAPH_OPENAI_API_KEY. Up to 16 character references are sent to OpenAI,
+which keeps API inputs and outputs up to 30 days for abuse monitoring.
 Keys are read from the environment only, never stored or logged. Each Lane
 sends only its chosen character references (stripped of metadata) and its
 Prompt to its vendor.
@@ -113,13 +113,13 @@ Rubric v2 with the default weights. Between Iterations the Optimizer writes the
 Lane's next Prompt from that Lane's recent Prompts, scores, Judge issues and
 fixes, refusals and failures; it rephrases the Target Look, never changes it.
 The Judge and the Optimizer need their vendor's key in the environment:
-ANTHROPIC_API_KEY, OPENAI_API_KEY, or GOOGLE_GENERATIVE_AI_API_KEY (or
-GOOGLE_API_KEY); a Run of one Iteration (--max-iterations 1) never calls the
-Optimizer and needs neither its key nor its price. Keys must be set before any
-billable call and are never stored or logged. Only the Rubric, at most 3
-Reference Photos (stripped), the Candidate and the Target Look are sent to the
-Judge's vendor; only the Target Look and the Lane's recent Prompts, outcomes and
-Judge notes (text, no photos) to the Optimizer's.
+ICONOGRAPH_ANTHROPIC_API_KEY, ICONOGRAPH_OPENAI_API_KEY, or (google/)
+ICONOGRAPH_GEMINI_API_KEY; a Run of one Iteration (--max-iterations 1) never
+calls the Optimizer and needs neither its key nor its price. Keys must be set
+before any billable call and are never stored or logged. Only the Rubric, at
+most 3 Reference Photos (stripped), the Candidate and the Target Look are sent
+to the Judge's vendor; only the Target Look and the Lane's recent Prompts,
+outcomes and Judge notes (text, no photos) to the Optimizer's.
 
 A Lane stops with the first of: "cancelled"; "optimizer-failed" or
 "judge-failed" (the vendor rejected the Optimizer's or Judge's call with HTTP
@@ -306,11 +306,4 @@ export async function main(args: string[], dependencies: RunCliDependencies = {}
   );
 }
 
-if (import.meta.main) {
-  try {
-    await main(process.argv.slice(2));
-  } catch (error) {
-    process.stderr.write(errorLine(error));
-    process.exitCode = 1;
-  }
-}
+if (import.meta.main) await runCommand(main);
