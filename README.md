@@ -99,6 +99,12 @@ Every process in the shell, including an AI coding agent started there, sees the
 names no vendor's tool reads. To read them from another store, set the provider on entry, for
 example `SECRETSPEC_PROVIDER=keyring devenv shell`.
 
+The service account's reads are cached in the macOS Keychain for 30 days (`cache` on
+`onepassword_service` in `secretspec.toml`), so entering a shell normally doesn't contact 1Password
+and many shells or worktrees don't run into its rate limit. A fresh entry is used as is; an expired
+or missing one is read from 1Password again. After rotating a key in 1Password, run
+`secretspec cache clear` (all keys) or `secretspec cache clear <KEY>`, then reload the shell.
+
 ## Commands
 
 The development shell supplies both telemetry opt-out variables to tooling through environment
