@@ -25,7 +25,6 @@ import {
 } from "node:fs/promises";
 import { uptime } from "node:os";
 import { basename, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import type { CleanupErrors } from "../src/errors";
 import {
   ensureModels,
@@ -43,6 +42,7 @@ import {
 } from "../src/models";
 import { main, run } from "../src/models-cli";
 import { sha256 } from "./sha256";
+import { spawnScript } from "./spawn-cli";
 import { temporaryDirectories } from "./temporary-directory";
 import { until } from "./until";
 
@@ -1117,20 +1117,7 @@ describe("models:fetch", () => {
   });
 
   // The root script, run as an operator would; neither case can reach the network.
-  async function script(...args: string[]) {
-    const root = fileURLToPath(new URL("../../../", import.meta.url));
-    const child = Bun.spawn([process.execPath, "run", "--silent", "models:fetch", ...args], {
-      cwd: root,
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-      child.exited,
-    ]);
-    return { stdout, stderr, exitCode };
-  }
+  const script = (...args: string[]) => spawnScript("models:fetch", args);
 
   test("the root script prints help", async () => {
     const result = await script("--help");

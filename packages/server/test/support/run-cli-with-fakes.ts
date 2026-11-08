@@ -10,7 +10,7 @@
  * FAKE_RELEASE_WARNING set, releasing the face backend logs that text as a
  * warning, as a failing release would.
  */
-import { errorLine } from "@iconograph/adapters";
+import { runCommand } from "@iconograph/adapters";
 import { Effect, Layer } from "effect";
 import { realFaceEmbedder } from "../../../adapters/test/face-models";
 import { main } from "../../src/cli";
@@ -25,8 +25,8 @@ const optimizerScript: FakeOptimizerResponse[] = JSON.parse(
 );
 const releaseWarning = process.env.FAKE_RELEASE_WARNING;
 
-try {
-  await main(process.argv.slice(2), {
+await runCommand((args) =>
+  main(args, {
     vendors: async () => ({
       imageModels: fakeImageModels(script).layer,
       judges: fakeJudgesFromEnv(judgeScript),
@@ -41,8 +41,5 @@ try {
           )
         : realFaceEmbedder(),
     retryPolicy: { maxRetries: 2, baseDelayMs: 0 },
-  });
-} catch (error) {
-  process.stderr.write(errorLine(error));
-  process.exitCode = 1;
-}
+  }),
+);

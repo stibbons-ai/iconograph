@@ -17,6 +17,7 @@ export {
   type RunSettingValues,
   runSettingsInput,
 } from "./cli-options";
+export { runCommand } from "./command";
 export {
   attachCleanupError,
   codeOf,

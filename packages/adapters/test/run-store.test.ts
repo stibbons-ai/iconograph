@@ -19,13 +19,13 @@ import {
 } from "@iconograph/domain";
 import { type Client, createClient } from "@libsql/client";
 import { Effect, Fiber, type Layer, ManagedRuntime } from "effect";
+import { localDatabaseUrl } from "../src/local-database";
 import {
   LibsqlRunStore,
   type LibsqlRunStoreOptions,
   RunStore,
   type RunPhotoReport,
 } from "../src/run-store";
-import { localDatabaseUrl } from "../src/storage";
 import { tamper } from "./tamper";
 import { temporaryDirectories } from "./temporary-directory";
 

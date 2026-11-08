@@ -1,8 +1,8 @@
 import { parseArgs } from "node:util";
 import { type FaceEmbedder, type FaceModelError, MAX_REFERENCE_PHOTOS } from "@iconograph/domain";
 import { Effect, type Layer, Logger } from "effect";
+import { runCommand } from "./command";
 import { resolveDataDirectory } from "./data-directory";
-import { errorLine } from "./errors";
 import { OnnxFaceEmbedder } from "./face-embedder";
 import { faceChoiceMap, validateReferencePhotos } from "./reference-photos";
 
@@ -77,11 +77,4 @@ export async function main(args: string[], dependencies: PhotosCliDependencies =
   stdout(`${JSON.stringify(report)}\n`);
 }
 
-if (import.meta.main) {
-  try {
-    await main(process.argv.slice(2));
-  } catch (error) {
-    process.stderr.write(errorLine(error));
-    process.exitCode = 1;
-  }
-}
+if (import.meta.main) await runCommand(main);

@@ -12,9 +12,9 @@ import {
   fixture,
   realFaceEmbedder,
   rightmostFace,
-  spawnCli,
 } from "./face-models";
 import { expectStripped } from "./metadata";
+import { spawnCli } from "./spawn-cli";
 import { temporaryDirectories } from "./temporary-directory";
 
 const temporaryDirectory = temporaryDirectories("cli");
@@ -126,39 +126,47 @@ describe("photos:validate in-process", () => {
 });
 
 describe("photos:validate as a process", () => {
-  const spawn = (args: string[]) => spawnCli("photos-cli.ts", args);
+  const cli = fileURLToPath(new URL("../src/photos-cli.ts", import.meta.url));
+  const spawn = (args: string[]) => spawnCli([cli, ...args]);
   const sfaceVolume = () => dataVolume(temporaryDirectory, ["yunet", "sface"]);
 
   test("exits 0 with the report on stdout", async () => {
-    const child = spawn(["--data-dir", await sfaceVolume(), fixture("biden-2021.jpg")]);
-    expect(await child.exited).toBe(0);
-    const report: ReferencePhotoReport = JSON.parse(await new Response(child.stdout).text());
+    const { stdout, exitCode } = await spawn([
+      "--data-dir",
+      await sfaceVolume(),
+      fixture("biden-2021.jpg"),
+    ]);
+    expect(exitCode).toBe(0);
+    const report: ReferencePhotoReport = JSON.parse(stdout);
     expect(report.photos[0]?.verdict).toBe("accepted");
   });
 
   test("exits nonzero with a JSON error for no photos or an unreadable one", async () => {
-    const none = spawn([]);
-    expect(await none.exited).toBe(1);
-    expect(JSON.parse(await new Response(none.stderr).text())).toEqual({
+    const none = await spawn([]);
+    expect(none.exitCode).toBe(1);
+    expect(JSON.parse(none.stderr)).toEqual({
       error: "Expected 1 to 8 photo paths, got 0; use --help for usage",
     });
 
     const notAnImage = fileURLToPath(new URL("../package.json", import.meta.url));
-    const unreadable = spawn(["--data-dir", await sfaceVolume(), notAnImage]);
-    expect(await unreadable.exited).toBe(1);
+    const unreadable = await spawn(["--data-dir", await sfaceVolume(), notAnImage]);
+    expect(unreadable.exitCode).toBe(1);
     // Compare the raw text first so a stray line (e.g. a native library's log) shows in the diff.
-    const stderr = await new Response(unreadable.stderr).text();
-    expect(stderr).toMatch(/^\{.*\}\n?$/);
-    expect(JSON.parse(stderr)).toMatchObject({ photo: notAnImage });
+    expect(unreadable.stderr).toMatch(/^\{.*\}\n?$/);
+    expect(JSON.parse(unreadable.stderr)).toMatchObject({ photo: notAnImage });
   });
 
   test("exits nonzero with a JSON error when a weight file is corrupt", async () => {
     const data = await temporaryDirectory();
     await corruptAllWeights(data);
-    const child = spawn(["--data-dir", data, fixture("biden-2021.jpg")]);
-    expect(await child.exited).toBe(1);
-    expect(await new Response(child.stdout).text()).toBe("");
-    const { error } = JSON.parse(await new Response(child.stderr).text());
+    const { stdout, stderr, exitCode } = await spawn([
+      "--data-dir",
+      data,
+      fixture("biden-2021.jpg"),
+    ]);
+    expect(exitCode).toBe(1);
+    expect(stdout).toBe("");
+    const { error } = JSON.parse(stderr);
     expect(error).toStartWith("Verifying face-model weights failed:");
     expect(error).toContain("failed SHA-256 verification");
   });

@@ -5,13 +5,13 @@ import { parseArgs } from "node:util";
 import {
   attachCleanupError,
   decodeOption,
-  errorLine,
   errorMessage,
   LANE_IMAGE_MODELS,
   laneImageModel,
   OnnxFaceEmbedder,
   resolveDataDirectory,
   RUN_SETTING_OPTIONS,
+  runCommand,
   runSettingsInput,
 } from "@iconograph/adapters";
 import { type HeldOutFaceEmbedder, OnnxHeldOutFaceEmbedder } from "@iconograph/adapters/held-out";
@@ -411,11 +411,4 @@ export async function main(args: string[], dependencies: EvalCliDependencies = {
   if (afterwards.length > 0) throw afterwards[0];
 }
 
-if (import.meta.main) {
-  try {
-    await main(process.argv.slice(2));
-  } catch (error) {
-    process.stderr.write(errorLine(error));
-    process.exitCode = 1;
-  }
-}
+if (import.meta.main) await runCommand(main);

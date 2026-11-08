@@ -16,8 +16,10 @@ import {
   type PriceSource,
   type PriceSourceOptions,
 } from "../src";
+import { localDatabaseUrl } from "../src/local-database";
 import { litellmPricesUrl, PriceSnapshot } from "../src/prices";
 import { main } from "../src/prices-cli";
+import { spawnScript } from "./spawn-cli";
 
 // A trimmed excerpt of LiteLLM's model_prices_and_context_window.json at
 // commit a1c5829f6b7664135974e902bdee2419c53ef825 (2026-11-01), unedited entries.
@@ -139,7 +141,7 @@ const lookupError = (source: PriceSource, model: string) =>
   Effect.runPromise(Effect.flip(source.lookup(model)));
 /** Corrupt the price database behind the price source's back. */
 async function tamper(sql: string) {
-  const raw = createClient({ url: pathToFileURL(pricesDatabase(directory)).href });
+  const raw = createClient({ url: localDatabaseUrl(pricesDatabase(directory)) });
   await raw.execute(sql);
   raw.close();
 }
@@ -594,20 +596,7 @@ describe("prices command", () => {
   });
 
   // The root script, run as an operator would, against the local recorded server.
-  async function script(...args: string[]) {
-    const root = fileURLToPath(new URL("../../../", import.meta.url));
-    const child = Bun.spawn([process.execPath, "run", "--silent", "prices", ...args], {
-      cwd: root,
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-      child.exited,
-    ]);
-    return { stdout, stderr, exitCode };
-  }
+  const script = (...args: string[]) => spawnScript("prices", args);
 
   test("the root script prints a price as JSON and exits zero", async () => {
     const result = await script(

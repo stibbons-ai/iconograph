@@ -3,11 +3,11 @@ import { mkdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { verifiedModelsDirectory } from "../../adapters/test/face-models";
+import { spawnCli } from "../../adapters/test/spawn-cli";
 import { temporaryDirectories } from "../../adapters/test/temporary-directory";
 import { faceFixture, type FakeScript, subjectPhotos } from "./support/fake-image-models";
 import { FAKE_VERDICT, levels } from "./support/fake-judges";
 import { fakeVendorServer, vendorAnswer, vendorError } from "./support/fake-vendors";
-import { spawnWithoutKeys } from "./support/spawn-without-keys";
 
 const cli = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const withFakes = fileURLToPath(new URL("./support/run-cli-with-fakes.ts", import.meta.url));
@@ -19,9 +19,8 @@ async function invoke(
   script: FakeScript = [],
   extraEnv: Record<string, string> = {},
 ) {
-  const { stdout, stderr, exitCode } = await spawnWithoutKeys(entry, args, {
-    FAKE_IMAGE_SCRIPT: JSON.stringify(script),
-    ...extraEnv,
+  const { stdout, stderr, exitCode } = await spawnCli([entry, ...args], {
+    env: { FAKE_IMAGE_SCRIPT: JSON.stringify(script), ...extraEnv },
   });
   const lines = stderr.trim().split("\n").filter(Boolean);
   return { stdout, lines, exitCode };

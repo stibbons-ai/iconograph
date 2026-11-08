@@ -1,6 +1,7 @@
 import { parseArgs } from "node:util";
 import { Unpriced } from "@iconograph/domain";
 import { Effect } from "effect";
+import { runCommand } from "./command";
 import { resolveDataDirectory } from "./data-directory";
 import { openPriceSource, PriceFetchError, type PriceSourceOptions } from "./prices";
 
@@ -126,11 +127,4 @@ function errorReport(error: unknown): Record<string, unknown> {
   return { error: error instanceof Error ? error.message : String(error) };
 }
 
-if (import.meta.main) {
-  try {
-    await main(process.argv.slice(2));
-  } catch (error) {
-    process.stderr.write(`${JSON.stringify(errorReport(error))}\n`);
-    process.exitCode = 1;
-  }
-}
+if (import.meta.main) await runCommand(main, (error) => `${JSON.stringify(errorReport(error))}\n`);

@@ -1,6 +1,5 @@
 import { parseArgs } from "node:util";
 import {
-  errorLine,
   errorMessage,
   faceChoiceMap,
   laneImageModel,
@@ -9,6 +8,7 @@ import {
   readJsonFile,
   resolveDataDirectory,
   RUN_SETTING_OPTIONS,
+  runCommand,
   runSettingsInput,
   withCleanup,
 } from "@iconograph/adapters";
@@ -306,11 +306,4 @@ export async function main(args: string[], dependencies: RunCliDependencies = {}
   );
 }
 
-if (import.meta.main) {
-  try {
-    await main(process.argv.slice(2));
-  } catch (error) {
-    process.stderr.write(errorLine(error));
-    process.exitCode = 1;
-  }
-}
+if (import.meta.main) await runCommand(main);

@@ -1,20 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import { copyFile, mkdir, readdir, realpath } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { calibrationRules } from "@iconograph/domain";
 import { Layer } from "effect";
 import sharp from "sharp";
 import { type CalibrationReport, main } from "../src/calibrate-cli";
 import { sfaceConfig } from "../src/face-embedder";
 import { facenetConfig } from "../src/held-out-embedder";
-import {
-  dataVolume,
-  fixture,
-  realFaceEmbedder,
-  realHeldOutEmbedder,
-  spawnCli,
-} from "./face-models";
+import { dataVolume, fixture, realFaceEmbedder, realHeldOutEmbedder } from "./face-models";
 import { git, isolateGitEnvironment, repository, withEnvironment } from "./git-environment";
+import { spawnCli } from "./spawn-cli";
 import { temporaryDirectories } from "./temporary-directory";
 
 const temporaryDirectory = temporaryDirectories("calibrate-cli");
@@ -255,16 +251,17 @@ describe("faces:calibrate in-process", () => {
 });
 
 describe("faces:calibrate as a process", () => {
-  const spawn = (args: string[]) => spawnCli("calibrate-cli.ts", args);
+  const cli = fileURLToPath(new URL("../src/calibrate-cli.ts", import.meta.url));
+  const spawn = (args: string[]) => spawnCli([cli, ...args]);
 
   test("exits 0 with the report on stdout and nothing on stderr, storing nothing", async () => {
     const data = await dataVolume(temporaryDirectory, ["yunet", "sface", "facenet"]);
     const root = await fixtureFolder();
     const before = (await readdir(root, { recursive: true })).sort();
-    const child = spawn(["--data-dir", data, root]);
-    expect(await child.exited).toBe(0);
-    expect(await new Response(child.stderr).text()).toBe("");
-    const report: CalibrationReport = JSON.parse(await new Response(child.stdout).text());
+    const { stdout, stderr, exitCode } = await spawn(["--data-dir", data, root]);
+    expect(exitCode).toBe(0);
+    expect(stderr).toBe("");
+    const report: CalibrationReport = JSON.parse(stdout);
     expect(report.models.sface.real.same?.count).toBe(3);
     expect(await readdir(data)).toEqual(["models"]);
     expect((await readdir(root, { recursive: true })).sort()).toEqual(before);
@@ -275,20 +272,20 @@ describe("faces:calibrate as a process", () => {
     const bare = join(await temporaryDirectory(), "dotfiles.git");
     git(await temporaryDirectory(), "init", "--quiet", "--bare", bare);
     const root = await fixtureFolder();
-    const child = await withEnvironment({ GIT_DIR: bare, GIT_WORK_TREE: dirname(root) }, async () =>
-      spawn([root]),
+    const { stderr, exitCode } = await withEnvironment(
+      { GIT_DIR: bare, GIT_WORK_TREE: dirname(root) },
+      async () => spawn([root]),
     );
-    expect(await child.exited).toBe(1);
-    expect(JSON.parse(await new Response(child.stderr).text()).error).toStartWith(
+    expect(exitCode).toBe(1);
+    expect(JSON.parse(stderr).error).toStartWith(
       `The calibration folder ${root}: git (with your GIT_* settings) doesn't ignore its files`,
     );
   });
 
   test("exits nonzero with a JSON error for a missing folder", async () => {
     const missing = join(await temporaryDirectory(), "missing");
-    const child = spawn([missing]);
-    expect(await child.exited).toBe(1);
-    const stderr = await new Response(child.stderr).text();
+    const { stderr, exitCode } = await spawn([missing]);
+    expect(exitCode).toBe(1);
     expect(stderr).toMatch(/^\{.*\}\n$/);
     expect(JSON.parse(stderr).error).toStartWith(
       `The calibration folder ${missing} could not be read`,
