@@ -55,7 +55,16 @@ import {
 } from "./report";
 import { FACES_FILE, LOOK_FILE, PROMPT_FILE, readSubjectsFolder } from "./subjects";
 
-/** The second Judge by default: the first of these from another vendor than the loop's Judge. */
+/**
+ * The second Judge by default: the first of these from another vendor than the
+ * loop's Judge. The OpenAI and Google choices accept every `Effort` level
+ * (`low`/`medium`/`high`; checked 2026-11-08): gpt-6.1-sol's
+ * `reasoning.effort` takes `low`, `medium`, `high`, `xhigh` and `max`, no
+ * `none` (https://developers.openai.com/api/docs/models/gpt-6.1-sol);
+ * gemini-4-argon thinks at `low`, `medium` or `high`
+ * (https://aistudio.google.com/docs/models/gemini-4-argon). The Anthropic
+ * choice is unchanged in #52.
+ */
 const EVAL_JUDGE_CHOICES = [
   "openai/gpt-6.1-sol",
   "google/gemini-4-argon",

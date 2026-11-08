@@ -638,19 +638,20 @@ Judge's in the Lane's first Iteration with a Scored Candidate.
   price and 4000 tokens of text and thinking. OpenAI's assumes the Prompt (3 characters per token),
   6144 image tokens per reference (OpenAI doesn't document GPT Image 2.6's input tokenization; this
   is 1.5× the 32 px patches covering a 2048 px square, not yet calibrated) and the 1756 output
-  image tokens OpenAI's GPT Image 2.6 calculator gives for a high-quality 1024x1024 image. The actual cost comes
-  from the response's usage at the price recorded for the Lane when the Run started (stdout shows
-  its source, age and whether the LiteLLM data was stale). Gemini's HTTP errors are booked at $0
-  (Google's billing page: failed 400 and 500 requests aren't charged); OpenAI doesn't document
-  whether errors are billed, and a moderation block can come after the image was generated, so
-  every OpenAI HTTP error counts at its estimate. A response without complete usage data (Gemini:
-  input, output and thought totals, an output split by modality that adds up, and an image-token
-  count whenever the response holds an image; OpenAI: input total with a text/image split that adds
-  up, and the output total), or a call interrupted mid-flight, counts at its estimate. A
-  reservation is booked at $0 when the engine knows its call wasn't sent; otherwise a call whose
-  result couldn't be recorded stays unsettled (`settled: false`) and counts at its estimate,
-  usually with a `{"warning": …}` line on stderr naming the Run, Lane, Iteration and Candidate.
-  A process killed mid-call leaves the call unsettled without a warning; `read` still shows it.
+  image tokens OpenAI's GPT Image 2.6 calculator gives for a high-quality 1024x1024 image. The
+  actual cost comes from the response's usage at the price recorded for the Lane when the Run
+  started (stdout shows its source, age and whether the LiteLLM data was stale). Gemini's HTTP
+  errors are booked at $0 (Google's billing page: failed 400 and 500 requests aren't charged);
+  OpenAI doesn't document whether errors are billed, and a moderation block can come after the
+  image was generated, so every OpenAI HTTP error counts at its estimate. A response without
+  complete usage data (Gemini: input, output and thought totals, an output split by modality that
+  adds up, and an image-token count whenever the response holds an image; OpenAI: input total
+  with a text/image split that adds up, and the output total), or a call interrupted mid-flight,
+  counts at its estimate. A reservation is booked at $0 when the engine knows its call wasn't
+  sent; otherwise a call whose result couldn't be recorded stays unsettled (`settled: false`) and
+  counts at its estimate, usually with a `{"warning": …}` line on stderr naming the Run, Lane,
+  Iteration and Candidate. A process killed mid-call leaves the call unsettled without a warning;
+  `read` still shows it.
   A call can cost more than its estimate, so the actual total can exceed the Budget by at most
   that difference on calls already in flight. Judge calls count against the same Budget: each
   Lane's Judge calls are reserved in Candidate order after its Candidates are scored; one that

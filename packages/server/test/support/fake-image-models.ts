@@ -94,8 +94,10 @@ export interface FakeOptions {
   actualMicros?: number;
   /**
    * The price of a model given no recorded one, e.g. for a model id no longer
-   * in the price table; undefined (or no option) falls back to
-   * `FAKE_OPENAI_PRICE` for an OpenAI model id, `FAKE_PRICE` for any other.
+   * in the price table; undefined (or no option) falls back by the price
+   * table's mode: `FAKE_OPENAI_PRICE` for an id it maps as `OpenAIImage`,
+   * `FAKE_PRICE` (GeminiImage, with Gemini capabilities) for any other,
+   * including an OpenAI id no longer in the table.
    */
   price?: (id: string) => PriceQuote | undefined;
   /** Each call's estimate (default `FAKE_ESTIMATE_MICROS`). */

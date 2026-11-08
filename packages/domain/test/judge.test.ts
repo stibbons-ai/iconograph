@@ -128,8 +128,12 @@ describe("a Judge call's estimate", () => {
     expect(judgeImageTokens("openai/gpt-5.6-sol")).toBeGreaterThanOrEqual(
       Math.ceil(Math.ceil(side / 32) ** 2 * 2.46),
     );
-    // Measured on gpt-6.1-sol 2026-11-08: 1,229 tokens for a 1024×1024 image.
-    expect(judgeImageTokens("openai/gpt-6.1-sol")).toBeGreaterThanOrEqual(1_229);
+    // Measured on gpt-6.1-sol 2026-11-08 at 1024 px only (1,229 tokens): the patch rule × 1.2.
+    // A larger Judge side needs a new measurement.
+    expect(side).toBe(1024);
+    expect(judgeImageTokens("openai/gpt-6.1-sol")).toBeGreaterThanOrEqual(
+      Math.ceil(Math.ceil(side / 32) ** 2 * 1.2),
+    );
     expect(judgeImageTokens("google/gemini-4-argon")).toBeGreaterThanOrEqual(1_120);
     // An explicit older Judge (#50 reruns gemini-3.1-pro-preview on purpose) keeps its bound.
     expect(judgeImageTokens("google/gemini-3.1-pro-preview")).toBeGreaterThanOrEqual(1_120);

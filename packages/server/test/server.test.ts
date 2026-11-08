@@ -17,6 +17,7 @@ import {
   type ImageModels,
   type Judges,
   type Optimizers,
+  type PriceQuote,
   type RunRequest,
   toUsd,
 } from "@iconograph/domain";
@@ -991,12 +992,18 @@ describe("HTTP server Runs", () => {
   }, 60_000);
 
   test("a Run stored with since-replaced model ids still reads, with its recorded prices and warnings", async () => {
-    // GPT Image 2.5 and gpt-5.5 left the price table in #52; the Run recorded their prices.
+    // GPT Image 2.5 left the price table in #52; gpt-5.5 was the previous second-Judge default.
     const OLD_OPENAI = "gpt-image-2.5-sunburst";
+    // A date no other fake price carries, so the report shows which price it read.
+    const recorded: PriceQuote = {
+      ...FAKE_OPENAI_PRICE,
+      model: OLD_OPENAI,
+      source: { ...FAKE_OPENAI_PRICE.source, asOf: "2026-10-15T00:00:00.000Z" },
+    };
     const data = await volumeWithPhotos();
     const fake = fakeImageModels(
       { "gemini-nano-banana-2.1": ["same"], [OLD_OPENAI]: ["same"] },
-      { price: (id) => (id === OLD_OPENAI ? { ...FAKE_OPENAI_PRICE, model: id } : undefined) },
+      { price: (id) => (id === OLD_OPENAI ? recorded : undefined) },
     );
     const judges = fakeJudges();
     const { server } = await serve(data, fake.layer, { judges: judges.layer });
@@ -1014,7 +1021,7 @@ describe("HTTP server Runs", () => {
     expect(report.judge.model).toBe("openai/gpt-5.5");
     expect(report.lanes.map(({ model }) => model)).toEqual(["gemini-nano-banana-2.1", OLD_OPENAI]);
     expect(report.lanes[1]).toMatchObject({
-      price: { source: FAKE_OPENAI_PRICE.source._tag },
+      price: { source: recorded.source._tag, asOf: recorded.source.asOf },
       candidates: [{ outcome: "Scored", actualUsd: toUsd(FAKE_ACTUAL_MICROS) }],
     });
     // The recorded OpenAI image price still names the Lane the OpenAI Judge may favour.

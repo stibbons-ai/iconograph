@@ -554,4 +554,30 @@ describe("OpenAI Image Model selection", () => {
       reason: "priced as GeminiImage, not as an OpenAI image model",
     });
   });
+
+  test("a retired id resumes on its recorded OpenAI price; unrecorded, it has no adapter", async () => {
+    // GPT Image 2.5 left the price table in #52; a Run stored before then recorded its price.
+    const old = "gpt-image-2.5-sunburst";
+    const recorded = { ...price, model: old };
+    const { fetch, sent } = scriptedFetch([reply(200, "image-with-usage.json")]);
+    const layer = NativeImageModels({
+      prices: { lookup: () => Effect.die("a recorded price needs no lookup") },
+      env: { OPENAI_API_KEY: API_KEY },
+      openaiFetch: fetch,
+    });
+    const resumed = await Effect.runPromise(
+      Effect.gen(function* () {
+        return yield* (yield* ImageModels).get(old, recorded);
+      }).pipe(Effect.provide(layer)),
+    );
+    expect(resumed.price).toEqual(recorded);
+    await Effect.runPromise(resumed.call(request));
+    expect(JSON.parse(String(sent[0]!.init.body)).model).toBe(old);
+
+    const error = await Effect.runPromise(Effect.flip(get(layer, old)));
+    expect(error).toMatchObject({
+      _tag: "ImageModelUnavailable",
+      message: `No Image Model adapter for ${old}`,
+    });
+  });
 });

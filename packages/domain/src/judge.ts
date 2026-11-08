@@ -48,17 +48,12 @@ export const DEFAULT_JUDGE: JudgeConfig = {
   weights: DEFAULT_WEIGHTS,
 };
 
-/** The vendor of an Image Model billed in this pricing mode; undefined for an LLM. */
-function imageModelVendor(mode: PricingMode): LlmVendor | undefined {
-  switch (mode) {
-    case "GeminiImage":
-      return "google";
-    case "OpenAIImage":
-      return "openai";
-    case "Llm":
-      return undefined;
-  }
-}
+/** The vendor of an Image Model billed in each pricing mode; undefined for an LLM. */
+const imageModelVendor: Record<PricingMode, LlmVendor | undefined> = {
+  GeminiImage: "google",
+  OpenAIImage: "openai",
+  Llm: undefined,
+};
 
 /**
  * The Lanes (by index) whose Image Model comes from the Judge's vendor, from
@@ -69,7 +64,7 @@ function imageModelVendor(mode: PricingMode): LlmVendor | undefined {
 export function sameVendorLanes(judgeModel: string, laneModes: readonly PricingMode[]): number[] {
   const vendor = llmVendor(judgeModel);
   if (vendor === undefined) return [];
-  return laneModes.flatMap((mode, lane) => (imageModelVendor(mode) === vendor ? [lane] : []));
+  return laneModes.flatMap((mode, lane) => (imageModelVendor[mode] === vendor ? [lane] : []));
 }
 
 /** The Judge sees at most this many Reference Photos. */
@@ -199,8 +194,9 @@ export const JUDGE_IMAGE_MAX_SIDE = 1024;
 
 /**
  * Upper bounds on the input tokens of one image of at most
- * `JUDGE_IMAGE_MAX_SIDE` px, from the vendors' docs (2026-11-02) or, where a
- * model is missing from them, a measurement on that exact model:
+ * `JUDGE_IMAGE_MAX_SIDE` px, from the vendors' docs (Anthropic checked
+ * 2026-11-02; OpenAI, Google 2026-11-08) or, where a model is missing from
+ * them, a measurement on that exact model:
  * - Anthropic: ⌈w/28⌉ × ⌈h/28⌉ tokens on the high-resolution tier (cap 4,784),
  *   so at most 37 × 37 = 1,369.
  * - OpenAI: patch models ⌈w/32⌉ × ⌈h/32⌉ patches × the model's multiplier
@@ -209,16 +205,17 @@ export const JUDGE_IMAGE_MAX_SIDE = 1024;
  *   gpt-4o-mini's tiles (5,667 tokens each) are not covered: no bound.
  *   https://developers.openai.com/api/docs/guides/images-vision#patch-based-image-tokenization
  *   doesn't list gpt-6.1-sol (checked 2026-11-08); measured on it 2026-11-08
- *   (issue #52): Responses API, `usage.input_tokens` minus a 13-token
- *   text-only baseline, synthetic PNGs without a `detail` field (as the Judge
- *   sends them) and with `detail: "high"`, gpt-5.6-sol as the documented
- *   control. It follows the patch rule × 1.2 rounded up, like gpt-5.6-sol:
+ *   (https://github.com/stibbons-ai/iconograph/issues/52): Responses API,
+ *   `usage.input_tokens` minus a 13-token text-only baseline, synthetic PNGs
+ *   without a `detail` field (as the Judge sends them) and with
+ *   `detail: "high"`, gpt-5.6-sol as the documented control. It follows the
+ *   patch rule × 1.2 rounded up, like gpt-5.6-sol:
  *   1024×1024 → 1,229 (both detail settings), 1024×576 → 692, 512×512 → 308,
  *   4 × 1024×1024 → 4 × 1,229, no fixed per-image cost. So the 2,520 bound
  *   covers it.
  * - Google: Gemini 3 and later take at most 1,120 tokens per image at the
  *   default (`high`) media resolution; the media-resolution page gives 1,120
- *   for Gemini 4 and Gemini 3 (https://ai.google.dev/gemini-api/docs/media-resolution,
+ *   for Gemini 4 and Gemini 3 (https://aistudio.google.com/docs/media-resolution,
  *   checked 2026-11-08), so gemini-4-argon falls under it. Older Gemini models
  *   tile by the short side (258 tokens per tile), unbounded for wide images:
  *   no bound.

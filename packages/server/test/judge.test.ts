@@ -212,6 +212,14 @@ describe("Mastra Judge", () => {
       { model: "gpt-6.1-sol", reasoning: { effort: "medium" } },
     ],
     [
+      "openai/gpt-6.1-sol",
+      "low",
+      "OPENAI_BASE_URL",
+      "https://api.openai.com/v1/responses",
+      ["authorization", `Bearer ${KEY}`],
+      { model: "gpt-6.1-sol", reasoning: { effort: "low" } },
+    ],
+    [
       "google/gemini-4-argon",
       "high",
       "GOOGLE_BASE_URL",
