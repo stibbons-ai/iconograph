@@ -12,6 +12,7 @@ import {
   type Judgement,
   llmVendor,
   type PriceQuote,
+  type PricingMode,
   remainingMicros,
   sameVendorLanes,
   toUsd,
@@ -92,10 +93,11 @@ function judgementView(judgement: Judgement | null) {
 /**
  * The Run's coded warnings; branch on `code`, never the message.
  * `judge-same-vendor`: the Judge comes from the vendor of the listed Lanes'
- * Image Model, and may favour its images.
+ * Image Model (by the pricing mode recorded at Run start), and may favour its
+ * images.
  */
-function runWarnings(judgeModel: string, laneModels: readonly string[]) {
-  const lanes = sameVendorLanes(judgeModel, laneModels);
+function runWarnings(judgeModel: string, laneModes: readonly PricingMode[]) {
+  const lanes = sameVendorLanes(judgeModel, laneModes);
   return lanes.length === 0
     ? []
     : [
@@ -159,7 +161,7 @@ export const runReport = (storage: MastraCompositeStore, runId: string) =>
       stopRules: run.request.stopRules,
       warnings: runWarnings(
         run.request.judge.model,
-        lanes.map(({ model }) => model),
+        lanes.map(({ price }) => price.pricing._tag),
       ),
       referencePhotos: {
         photos: run.photoReport.photos.map((photo) => ({

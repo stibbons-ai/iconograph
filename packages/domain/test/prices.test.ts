@@ -120,7 +120,7 @@ describe("pricing modes", () => {
   });
 
   test("OpenAI image models: text input, image input and image output tokens", () => {
-    for (const model of ["gpt-image-2.5-sunburst", "gpt-image-2.5-flare"]) {
+    for (const model of ["gpt-image-2.6-sunburst", "gpt-image-2.6-flare"]) {
       expect(
         derive(model, {
           input_cost_per_token: 5e-6,
@@ -147,9 +147,9 @@ describe("pricing modes", () => {
   });
 
   test("an OpenAI image model without image-token prices is unpriced", () => {
-    const error = Effect.runSync(Effect.flip(derivePricing("gpt-image-2.5-flare", llm(1, 2))));
+    const error = Effect.runSync(Effect.flip(derivePricing("gpt-image-2.6-flare", llm(1, 2))));
     expect(error.message).toBe(
-      "No price for model gpt-image-2.5-flare: OpenAIImage pricing needs input_cost_per_image_token, output_cost_per_image_token",
+      "No price for model gpt-image-2.6-flare: OpenAIImage pricing needs input_cost_per_image_token, output_cost_per_image_token",
     );
   });
 

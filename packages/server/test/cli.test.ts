@@ -261,7 +261,7 @@ test("the stopping rules and the Optimizer are taken from the command line", asy
       "--max-iterations",
       "1",
       "--optimizer-model",
-      "openai/gpt-5.5",
+      "openai/gpt-6.1-sol",
       "--optimizer-effort",
       "low",
       ...subjectPhotos,
@@ -276,7 +276,7 @@ test("the stopping rules and the Optimizer are taken from the command line", asy
     minImprovement: 0.4,
     maxIterations: 1,
   });
-  expect(report.optimizer).toMatchObject({ model: "openai/gpt-5.5", effort: "low" });
+  expect(report.optimizer).toMatchObject({ model: "openai/gpt-6.1-sol", effort: "low" });
 }, 60_000);
 
 test("engine warnings, even while shutting down, are JSON lines on stderr; stdout stays the report", async () => {
@@ -315,7 +315,7 @@ test("--lane runs a Gemini and an OpenAI Lane, each with its photos and Prompt; 
       `openai:flare,photos=2,prompt=${prompt}`,
       ...subjectPhotos,
     ],
-    { "gemini-nano-banana-2.1": ["same"], "gpt-image-2.5-flare": ["different"] },
+    { "gemini-nano-banana-2.1": ["same"], "gpt-image-2.6-flare": ["different"] },
   );
   expect(exitCode).toBe(0);
   expect(lines.map((line) => JSON.parse(line))).toEqual([
@@ -326,7 +326,7 @@ test("--lane runs a Gemini and an OpenAI Lane, each with its photos and Prompt; 
       judge: expect.objectContaining({ calls: 2 }),
       lanes: [
         expect.objectContaining({ lane: 0, model: "gemini-nano-banana-2.1", candidates: 1 }),
-        expect.objectContaining({ lane: 1, model: "gpt-image-2.5-flare", candidates: 1 }),
+        expect.objectContaining({ lane: 1, model: "gpt-image-2.6-flare", candidates: 1 }),
       ],
     }),
   ]);
@@ -340,7 +340,7 @@ test("--lane runs a Gemini and an OpenAI Lane, each with its photos and Prompt; 
   });
   expect(report.lanes[0].prompts[0].prompt).toContain("headshot");
   expect(report.lanes[1]).toMatchObject({
-    model: "gpt-image-2.5-flare",
+    model: "gpt-image-2.6-flare",
     stopReason: "iteration-limit",
     prompts: [
       expect.objectContaining({
@@ -372,13 +372,13 @@ test("--lane openai and openai:sunburst drive Sunburst; a prompt path may hold c
       "openai:sunburst",
       ...subjectPhotos,
     ],
-    { "gpt-image-2.5-sunburst": ["same", "same"] },
+    { "gpt-image-2.6-sunburst": ["same", "same"] },
   );
   expect(exitCode).toBe(0);
   const report = JSON.parse(stdout);
   expect(report.lanes.map(({ model }: { model: string }) => model)).toEqual([
-    "gpt-image-2.5-sunburst",
-    "gpt-image-2.5-sunburst",
+    "gpt-image-2.6-sunburst",
+    "gpt-image-2.6-sunburst",
   ]);
   expect(report.lanes[0]).toMatchObject({
     prompts: [expect.objectContaining({ prompt: "A bright studio headshot." })],
@@ -398,7 +398,7 @@ test("the Judge's model and effort are taken from the command line", async () =>
       "--max-iterations",
       "1",
       "--judge-model",
-      "google/gemini-3.1-pro-preview",
+      "google/gemini-4-argon",
       "--judge-effort",
       "high",
       ...subjectPhotos,
@@ -407,7 +407,7 @@ test("the Judge's model and effort are taken from the command line", async () =>
   );
   expect(exitCode).toBe(0);
   const report = JSON.parse(stdout);
-  expect(report.judge).toMatchObject({ model: "google/gemini-3.1-pro-preview", effort: "high" });
+  expect(report.judge).toMatchObject({ model: "google/gemini-4-argon", effort: "high" });
   expect(report.warnings.map(({ code }: { code: string }) => code)).toEqual(["judge-same-vendor"]);
 }, 60_000);
 
@@ -481,7 +481,7 @@ test("errors are one JSON line on stderr with a nonzero exit and nothing on stdo
     [withFakes, [...common, "--judge-model", "sonnet", ...subjectPhotos], "vendor/model id"],
     [
       cli,
-      ["read", ...common, "--run-id", "x", "--judge-model", "openai/gpt-5.5"],
+      ["read", ...common, "--run-id", "x", "--judge-model", "openai/gpt-6.1-sol"],
       "read takes only",
     ],
     // The real CLI, with every key cleared: the Judge's key is checked first, before any call

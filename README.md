@@ -512,8 +512,8 @@ Judge's in the Lane's first Iteration with a Scored Candidate.
   even if a call of that Iteration didn't fit. The rules are frozen with the Run's request
   (`stopRules`).
 - **Lanes:** each `--lane NAME[,photos=N+N...][,prompt=FILE]` adds one Lane. `NAME` is `gemini`
-  (`gemini-nano-banana-2.1`), `openai` or `openai:sunburst` (`gpt-image-2.5-sunburst`), or
-  `openai:flare` (`gpt-image-2.5-flare`). `photos=1+3` limits the Lane to those Reference Photos
+  (`gemini-nano-banana-2.1`), `openai` or `openai:sunburst` (`gpt-image-2.6-sunburst`), or
+  `openai:flare` (`gpt-image-2.6-flare`). `photos=1+3` limits the Lane to those Reference Photos
   (numbered from 1; default all); a Lane none of whose photos is accepted fails the Run before any
   call. `prompt=FILE` replaces the Lane's initial Prompt (default: built from the Target Look) with
   the file's text, trimmed, up to 32,000 characters; it comes last, and everything after `prompt=`
@@ -657,21 +657,22 @@ Judge's in the Lane's first Iteration with a Scored Candidate.
   against the same Budget, so together they can't overspend it either. Gemini's estimate assumes
   1120 input tokens per reference plus the Prompt (about 3 characters per token), the 2K image
   price and 4000 tokens of text and thinking. OpenAI's assumes the Prompt (3 characters per token),
-  6144 image tokens per reference (OpenAI doesn't document GPT Image 2.5's input tokenization; this
+  6144 image tokens per reference (OpenAI doesn't document GPT Image 2.6's input tokenization; this
   is 1.5× the 32 px patches covering a 2048 px square, not yet calibrated) and the 1756 output
-  image tokens OpenAI's calculator gives for a high-quality 1024x1024 image. The actual cost comes
-  from the response's usage at the price recorded for the Lane when the Run started (stdout shows
-  its source, age and whether the LiteLLM data was stale). Gemini's HTTP errors are booked at $0
-  (Google's billing page: failed 400 and 500 requests aren't charged); OpenAI doesn't document
-  whether errors are billed, and a moderation block can come after the image was generated, so
-  every OpenAI HTTP error counts at its estimate. A response without complete usage data (Gemini:
-  input, output and thought totals, an output split by modality that adds up, and an image-token
-  count whenever the response holds an image; OpenAI: input total with a text/image split that adds
-  up, and the output total), or a call interrupted mid-flight, counts at its estimate. A
-  reservation is booked at $0 when the engine knows its call wasn't sent; otherwise a call whose
-  result couldn't be recorded stays unsettled (`settled: false`) and counts at its estimate,
-  usually with a `{"warning": …}` line on stderr naming the Run, Lane, Iteration and Candidate.
-  A process killed mid-call leaves the call unsettled without a warning; `read` still shows it.
+  image tokens OpenAI's GPT Image 2.6 calculator gives for a high-quality 1024x1024 image. The
+  actual cost comes from the response's usage at the price recorded for the Lane when the Run
+  started (stdout shows its source, age and whether the LiteLLM data was stale). Gemini's HTTP
+  errors are booked at $0 (Google's billing page: failed 400 and 500 requests aren't charged);
+  OpenAI doesn't document whether errors are billed, and a moderation block can come after the
+  image was generated, so every OpenAI HTTP error counts at its estimate. A response without
+  complete usage data (Gemini: input, output and thought totals, an output split by modality that
+  adds up, and an image-token count whenever the response holds an image; OpenAI: input total
+  with a text/image split that adds up, and the output total), or a call interrupted mid-flight,
+  counts at its estimate. A reservation is booked at $0 when the engine knows its call wasn't
+  sent; otherwise a call whose result couldn't be recorded stays unsettled (`settled: false`) and
+  counts at its estimate, usually with a `{"warning": …}` line on stderr naming the Run, Lane,
+  Iteration and Candidate. A process killed mid-call leaves the call unsettled without a warning;
+  `read` still shows it.
   A call can cost more than its estimate, so the actual total can exceed the Budget by at most
   that difference on calls already in flight. Judge calls count against the same Budget: each
   Lane's Judge calls are reserved in Candidate order after its Candidates are scored; one that
@@ -680,17 +681,18 @@ Judge's in the Lane's first Iteration with a Scored Candidate.
   upper bound: the instructions, Rubric, verdict schema (as sent) and Target Look with ASCII at
   2.5 characters per token (Anthropic's current tokenizer averages about that) and every other
   UTF-16 code unit at 2 tokens (CJK measures about 0.7, emoji and rare CJK up to about 1.5), each
-  image at its model's documented worst case for 1024 px (Anthropic ⌈w/28⌉·⌈h/28⌉ ≤ 1,369; OpenAI
-  patch models ⌈w/32⌉·⌈h/32⌉ × up to 2.46 ≤ 2,520, which also covers its tile models; Gemini 3
-  and later ≤ 1,120), plus a margin for prompts vendors add unseen (structured output and
-  thinking system prompts): 1,000 input tokens or 10%, whichever is more; and the whole output
-  cap, reasoning included: 4,096 tokens at `low` effort, 8,192 at `medium`, 16,384 at `high`. A
-  model with no documented bound (e.g. `openai/gpt-4o-mini`, whose image tiles cost 5,667 tokens
-  each, or a Gemini model before Gemini 3, whose tiles are unbounded for wide images) can't be the
+  image at its model's documented or measured worst case for 1024 px (Anthropic
+  ⌈w/28⌉·⌈h/28⌉ ≤ 1,369; OpenAI patch models ⌈w/32⌉·⌈h/32⌉ × up to 2.46 ≤ 2,520, which also
+  covers its tile models; Gemini 3 and later ≤ 1,120), plus a margin for prompts vendors add
+  unseen (structured output and thinking system prompts): 1,000 input tokens or 10%, whichever
+  is more; and the whole output cap, reasoning included: 4,096 tokens at `low` effort, 8,192 at
+  `medium`, 16,384 at `high`. A model with no documented or measured bound (e.g.
+  `openai/gpt-4o-mini`, whose image tiles cost 5,667 tokens each, or a Gemini model before
+  Gemini 3, whose tiles are unbounded for wide images) can't be the
   Judge. For Sonnet 5.5 with 3 Reference Photos the estimate is
   about $0.059, $0.100 or $0.182 per call. Its actual cost comes from the reported
   input and output tokens (output includes reasoning) at the price recorded for the Judge when the
-  Run started, looked up under LiteLLM's key (`claude-sonnet-5-5`, `gpt-5.5`, `gemini/gemini-…`).
+  Run started, looked up under LiteLLM's key (`claude-sonnet-5-5`, `gpt-6.1-sol`, `gemini/gemini-…`).
   HTTP errors (400 and up) and network errors that show nothing was sent (ENOTFOUND, EAI_AGAIN,
   connection refused) are booked at $0; any other network failure or a timeout has an unknown cost, so it counts at
   its estimate against the Budget and as $0 in `actualUsd` (`unknownCostCalls`). A Run with an
@@ -808,8 +810,8 @@ ICONOGRAPH_GEMINI_API_KEY=… ICONOGRAPH_OPENAI_API_KEY=… ICONOGRAPH_ANTHROPIC
   repository. `--model NAME` (repeatable: `gemini`, `openai`, `openai:sunburst`, `openai:flare`;
   default `gemini` and `openai`), `--budget`, `--candidates`, the loop's `--judge-*` and
   `--optimizer-*` and the stopping rules as for `bun run run` (`--patience` for the Optimizer Arm
-  only); `--eval-judge-model ID` and `--eval-judge-effort LEVEL` (default: `openai/gpt-5.5`, or
-  `google/gemini-3.1-pro-preview` when the loop's Judge is OpenAI's, at low effort); `--data-dir`
+  only); `--eval-judge-model ID` and `--eval-judge-effort LEVEL` (default: `openai/gpt-6.1-sol`, or
+  `google/gemini-4-argon` when the loop's Judge is OpenAI's, at low effort); `--data-dir`
   holds the face-model weights (FaceNet built with `models:export-facenet`).
 - **Held-out scores:** every Candidate with an image is scored by FaceNet (its best face's cosine
   similarity to the held-out anchor of the Subject's accepted Reference Photos, and whether it
@@ -972,7 +974,7 @@ curl -X POST http://127.0.0.1:4111/api/workflows/run/start-async \
     "budgetUsd": 0.5, "candidates": 2,
     "lanes": [
       {"model": "gemini-nano-banana-2.1"},
-      {"model": "gpt-image-2.5-sunburst", "photos": [2], "prompt": "A head-and-shoulders portrait …"}],
+      {"model": "gpt-image-2.6-sunburst", "photos": [2], "prompt": "A head-and-shoulders portrait …"}],
     "judge": {"model": "anthropic/claude-sonnet-5-5", "effort": "low", "weights": {
       "likeness": 0.3, "resemblance": 0.15, "realism": 0.15, "pose": 0.1, "background": 0.08,
       "lighting": 0.08, "hairstyle": 0.07, "clothing": 0.05, "framing": 0.02}},

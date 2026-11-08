@@ -119,15 +119,23 @@ describe("a Judge call's estimate", () => {
   const request = { references: 3, targetLook: DEFAULT_TARGET_LOOK };
   const side = JUDGE_IMAGE_MAX_SIDE;
 
-  test("covers each vendor's documented worst case for an image of the Judge's size", () => {
+  test("covers each vendor's documented or measured worst case for an image of the Judge's size", () => {
     // Anthropic high-resolution tier: ⌈w/28⌉·⌈h/28⌉ (cap 4,784); OpenAI patch models:
-    // ⌈w/32⌉·⌈h/32⌉ × up to 2.46; Gemini 3: 1,120 per image.
+    // ⌈w/32⌉·⌈h/32⌉ × up to 2.46; Gemini 3 and 4: 1,120 per image.
     expect(judgeImageTokens("anthropic/claude-sonnet-5-5")).toBeGreaterThanOrEqual(
       Math.min(Math.ceil(side / 28) ** 2, 4_784),
     );
-    expect(judgeImageTokens("openai/gpt-5.5")).toBeGreaterThanOrEqual(
+    expect(judgeImageTokens("openai/gpt-5.6-sol")).toBeGreaterThanOrEqual(
       Math.ceil(Math.ceil(side / 32) ** 2 * 2.46),
     );
+    // Measured on gpt-6.1-sol 2026-11-08 at 1024 px only (1,229 tokens): the patch rule × 1.2.
+    // A larger Judge side needs a new measurement.
+    expect(side).toBe(1024);
+    expect(judgeImageTokens("openai/gpt-6.1-sol")).toBeGreaterThanOrEqual(
+      Math.ceil(Math.ceil(side / 32) ** 2 * 1.2),
+    );
+    expect(judgeImageTokens("google/gemini-4-argon")).toBeGreaterThanOrEqual(1_120);
+    // An explicit older Judge (#50 reruns gemini-3.1-pro-preview on purpose) keeps its bound.
     expect(judgeImageTokens("google/gemini-3.1-pro-preview")).toBeGreaterThanOrEqual(1_120);
   });
 
@@ -201,7 +209,7 @@ describe("a Judge call's estimate", () => {
 
   test("adds 10% for hidden prompts once that is more than 1,000 tokens", () => {
     // OpenAI-bounded images alone count 10,080 input tokens, so 10% is over 1,000.
-    const imageTokens = judgeImageTokens("openai/gpt-5.5")!;
+    const imageTokens = judgeImageTokens("openai/gpt-6.1-sol")!;
     const { usage } = estimateJudgeCall({ effort: "low", imageTokens }, pricing, prompt, {
       references: 3,
       targetLook: DEFAULT_TARGET_LOOK,
@@ -212,7 +220,7 @@ describe("a Judge call's estimate", () => {
   });
 
   test("grows by the image bound for each further Reference Photo", () => {
-    const judge = { effort: "low", imageTokens: judgeImageTokens("openai/gpt-5.5")! } as const;
+    const judge = { effort: "low", imageTokens: judgeImageTokens("openai/gpt-6.1-sol")! } as const;
     const three = estimateJudgeCall(judge, pricing, "instructions", request);
     const one = estimateJudgeCall(judge, pricing, "instructions", { ...request, references: 1 });
     expect(three.usage.inputTokens! - one.usage.inputTokens!).toBeGreaterThanOrEqual(
@@ -304,28 +312,30 @@ test("Target Look text stays quoted on its own line, whatever it contains", () =
 
 describe("vendors", () => {
   test("every image model in the price table maps to a vendor, so the warning can't vanish", () => {
-    const imageModels = Object.entries(pricingSpecs).filter(([, spec]) => spec.mode !== "Llm");
-    expect(imageModels.length).toBeGreaterThan(0);
-    for (const [model] of imageModels) {
+    const imageModes = Object.values(pricingSpecs)
+      .map(({ mode }) => mode)
+      .filter((mode) => mode !== "Llm");
+    expect(imageModes.length).toBeGreaterThan(0);
+    for (const mode of imageModes) {
       const vendors = ["anthropic", "openai", "google"].filter(
-        (vendor) => sameVendorLanes(`${vendor}/judge`, [model]).length === 1,
+        (vendor) => sameVendorLanes(`${vendor}/judge`, [mode]).length === 1,
       );
       expect(vendors).toHaveLength(1);
     }
   });
 
-  test("a Judge from a Lane's Image Model vendor names that Lane", () => {
-    const lanes = ["gemini-nano-banana-2.1", "gpt-image-2.5-sunburst"];
+  test("a Judge from a Lane's Image Model vendor names that Lane, by the Lane's pricing mode", () => {
+    const lanes = ["GeminiImage", "OpenAIImage"] as const;
     expect(sameVendorLanes(DEFAULT_JUDGE.model, lanes)).toEqual([]);
-    expect(sameVendorLanes("google/gemini-3.1-pro-preview", lanes)).toEqual([0]);
-    expect(sameVendorLanes("openai/gpt-5.5", lanes)).toEqual([1]);
-    expect(sameVendorLanes("openai/gpt-5.5", ["unknown-image-model"])).toEqual([]);
+    expect(sameVendorLanes("google/gemini-4-argon", lanes)).toEqual([0]);
+    expect(sameVendorLanes("openai/gpt-6.1-sol", lanes)).toEqual([1]);
+    expect(sameVendorLanes("openai/gpt-6.1-sol", ["Llm"])).toEqual([]);
   });
 
   test("a Judge or Optimizer is priced under LiteLLM's key for its model", () => {
     expect(llmPriceModel("anthropic/claude-sonnet-5-5")).toBe("claude-sonnet-5-5");
-    expect(llmPriceModel("openai/gpt-5.5")).toBe("gpt-5.5");
-    expect(llmPriceModel("google/gemini-3.1-pro-preview")).toBe("gemini/gemini-3.1-pro-preview");
+    expect(llmPriceModel("openai/gpt-6.1-sol")).toBe("gpt-6.1-sol");
+    expect(llmPriceModel("google/gemini-4-argon")).toBe("gemini/gemini-4-argon");
     expect(llmPriceModel("xai/grok-5")).toBe("xai/grok-5");
   });
 });

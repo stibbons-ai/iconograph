@@ -1,7 +1,7 @@
 {
-  "source": "https://raw.githubusercontent.com/BerriAI/litellm/a1c5829f6b7664135974e902bdee2419c53ef825/model_prices_and_context_window.json",
-  "commit": "a1c5829f6b7664135974e902bdee2419c53ef825",
-  "fetchedAt": "2026-11-01T13:49:08.529Z",
+  "source": "https://raw.githubusercontent.com/BerriAI/litellm/e58354f0554cb11b0ce2f042ff625957cded398f/model_prices_and_context_window.json",
+  "commit": "e58354f0554cb11b0ce2f042ff625957cded398f",
+  "fetchedAt": "2026-11-08T10:32:43.078Z",
   "models": {
     "gemini/gemini-nano-banana-2.1": {
       "input_cost_per_token": 0.0000015,
@@ -9,17 +9,25 @@
       "output_cost_per_image_token": 0.00003,
       "output_cost_per_image": 0.0336
     },
-    "gpt-image-2.5-sunburst": {
+    "gpt-image-2.6-sunburst": {
       "input_cost_per_token": 0.000005,
       "input_cost_per_image_token": 0.000008,
       "output_cost_per_image_token": 0.00003
     },
-    "gpt-image-2.5-flare": {
+    "gpt-image-2.6-flare": {
       "input_cost_per_token": 0.000005,
       "input_cost_per_image_token": 0.000008,
       "output_cost_per_image_token": 0.00003
     },
     "claude-sonnet-5-5": {
+      "input_cost_per_token": 0.000002,
+      "output_cost_per_token": 0.00001
+    },
+    "gpt-6.1-sol": {
+      "input_cost_per_token": 0.000002,
+      "output_cost_per_token": 0.00001
+    },
+    "gemini/gemini-4-argon": {
       "input_cost_per_token": 0.000002,
       "output_cost_per_token": 0.00001
     }

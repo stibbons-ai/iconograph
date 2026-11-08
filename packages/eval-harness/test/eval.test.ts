@@ -195,7 +195,7 @@ describe("eval harness with fake vendors", () => {
     });
     // The second Judge is another vendor's model than the loop's.
     expect(result.settings.judge.model).toBe("anthropic/claude-sonnet-5-5");
-    expect(result.settings.evalJudge.model).toBe("openai/gpt-5.5");
+    expect(result.settings.evalJudge.model).toBe("openai/gpt-6.1-sol");
 
     // Both stored Runs: the same Budget; patience 3 for the Optimizer Arm, off (3 > 2) for Resample.
     const optimizerStored = await stored(out, optimizerRun.runId);
@@ -653,7 +653,7 @@ describe("eval harness with fake vendors", () => {
 
   test.each([
     ["anthropic/claude-sonnet-5-5", "anthropic/claude-opus-5"],
-    ["openai/gpt-5.5", "openai/gpt-5.4"],
+    ["openai/gpt-6.1-sol", "openai/gpt-6-astra"],
   ])(
     "a second Judge from the loop Judge's vendor is refused before anything runs (%s, %s)",
     async (judge, evalJudge) => {
@@ -678,11 +678,11 @@ describe("eval harness with fake vendors", () => {
     const subjects = await subjectsFolder();
     const out = join(await temporaryDirectory(), "out");
     await evaluate(
-      [...common(out), "--max-iterations", "1", "--judge-model", "openai/gpt-5.5", subjects],
+      [...common(out), "--max-iterations", "1", "--judge-model", "openai/gpt-6.1-sol", subjects],
       { script: ["same", "same"] },
     );
     const google = await report(out);
-    expect(google.settings.evalJudge.model).toBe("google/gemini-3.1-pro-preview");
+    expect(google.settings.evalJudge.model).toBe("google/gemini-4-argon");
     // Gemini comes from Google, the second Judge's vendor.
     expect(google.warnings).toEqual([
       expect.objectContaining({
@@ -709,6 +709,24 @@ describe("eval harness with fake vendors", () => {
     expect((await report(openaiOut)).warnings.map(({ code }: { code: string }) => code)).toEqual([
       "eval-judge-same-vendor",
     ]);
+  }, 120_000);
+
+  test("an explicit older second Judge is still accepted (#50 reruns gemini-3.1-pro-preview)", async () => {
+    const out = join(await temporaryDirectory(), "out");
+    const subjects = await subjectsFolder();
+    const result = await evaluate(
+      [
+        ...common(out),
+        "--max-iterations",
+        "1",
+        "--eval-judge-model",
+        "google/gemini-3.1-pro-preview",
+        subjects,
+      ],
+      { script: ["same", "same"] },
+    );
+    expect(result.error).toBeUndefined();
+    expect((await report(out)).settings.evalJudge.model).toBe("google/gemini-3.1-pro-preview");
   }, 120_000);
 
   test("an output folder or Subjects folder inside the repository is refused before anything is read or written", async () => {
@@ -859,7 +877,7 @@ describe("eval harness with fake vendors", () => {
     expect(flatWarnings).toHaveLength(1);
     const [warning] = flatWarnings;
     expect(warning).toMatchObject({
-      judge: "openai/gpt-5.5",
+      judge: "openai/gpt-6.1-sol",
       imageModel: null,
       share: 1,
       images: 10,
@@ -1049,7 +1067,7 @@ test("walkthrough: bun run eval prints the comparison, writes the report, and it
     expect(result.arms.resample.evalJudge.subjectMean).toBeCloseTo(expected, 9);
     // Its second Judge gives every image the same score: overall only, each Image Model has 8 images.
     expect(result.warnings).toEqual([
-      expect.objectContaining({ code: "eval-judge-same-vendor", models: ["gpt-image-2.5-flare"] }),
+      expect.objectContaining({ code: "eval-judge-same-vendor", models: ["gpt-image-2.6-flare"] }),
       expect.objectContaining({ code: "eval-judge-flat", imageModel: null, share: 1, images: 16 }),
     ]);
     expect(stdout).toContain(`Warning: ${result.warnings[1].message}\n`);

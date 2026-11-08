@@ -88,7 +88,9 @@ export const NativeImageModels = (options: NativeImageModelsOptions) => {
           new Unpriced({ model, reason: `the recorded price is for ${price.model}` }),
         );
       }
-      switch (pricingSpec(model).mode) {
+      // A recorded price outranks the table: a Run stored before an id left
+      // the table (say GPT Image 2.5, #52) still resumes on its own adapter.
+      switch (price?.pricing._tag ?? pricingSpec(model).mode) {
         case "GeminiImage":
           return gemini(model, price);
         case "OpenAIImage":

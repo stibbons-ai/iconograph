@@ -85,16 +85,16 @@ describe("Mastra Optimizer", () => {
       { model: "claude-sonnet-5-5", output_config: { effort: "medium" } },
     ],
     [
-      "openai/gpt-5.5",
+      "openai/gpt-6.1-sol",
       "high",
       "https://api.openai.com/v1/responses",
       ["authorization", `Bearer ${KEY}`],
-      { model: "gpt-5.5", reasoning: { effort: "high" } },
+      { model: "gpt-6.1-sol", reasoning: { effort: "high" } },
     ],
     [
-      "google/gemini-3.1-pro-preview",
+      "google/gemini-4-argon",
       "low",
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent",
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-4-argon:generateContent",
       ["x-goog-api-key", KEY],
       { generationConfig: { thinkingConfig: { thinkingLevel: "low" } } },
     ],
@@ -155,7 +155,7 @@ describe("Mastra Optimizer", () => {
   });
 
   test("an answer cut off at the output cap fails the call at its cost", async () => {
-    const model = "openai/gpt-5.5";
+    const model = "openai/gpt-6.1-sol";
     const optimizer = await getOptimizer(answering(model, '{"prompt": "A be', true), model);
     expect(await call(optimizer)).toMatchObject({
       kind: "failed",
@@ -218,7 +218,7 @@ describe("Mastra Optimizer", () => {
     const optimizer = await getOptimizer(layer, undefined, undefined, recorded);
     expect(optimizer.price).toEqual(recorded);
     expect(lookups).toEqual([]);
-    await expect(getOptimizer(layer, "openai/gpt-5.5", undefined, recorded)).rejects.toThrow(
+    await expect(getOptimizer(layer, "openai/gpt-6.1-sol", undefined, recorded)).rejects.toThrow(
       "the recorded price is for claude-sonnet-5-5",
     );
   });

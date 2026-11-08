@@ -20,8 +20,10 @@ import {
   type ImageModels,
   type Judges,
   type Optimizers,
+  type PriceQuote,
   priceRefreshIntervalMs,
   type RunRequest,
+  toUsd,
 } from "@iconograph/domain";
 import { Effect, type Layer } from "effect";
 import {
@@ -44,7 +46,13 @@ import {
   startServer,
 } from "../src/server";
 import { MastraJudges } from "../src/judge";
-import { faceFixture, fakeImageModels, subjectPhotos } from "./support/fake-image-models";
+import {
+  FAKE_ACTUAL_MICROS,
+  FAKE_OPENAI_PRICE,
+  faceFixture,
+  fakeImageModels,
+  subjectPhotos,
+} from "./support/fake-image-models";
 import { FAKE_VERDICT, fakeJudges } from "./support/fake-judges";
 import { fakeOptimizers } from "./support/fake-optimizers";
 import { fakeVendorServer, vendorAnswer } from "./support/fake-vendors";
@@ -1320,12 +1328,12 @@ describe("HTTP server Runs", () => {
     const data = await volumeWithPhotos();
     const fake = fakeImageModels({
       "gemini-nano-banana-2.1": ["same"],
-      "gpt-image-2.5-sunburst": ["same"],
+      "gpt-image-2.6-sunburst": ["same"],
     });
     const judges = fakeJudges();
     const { server } = await serve(data, fake.layer, { judges: judges.layer });
     await server.booted;
-    const judge = { ...DEFAULT_JUDGE, model: "openai/gpt-5.5", effort: "medium" as const };
+    const judge = { ...DEFAULT_JUDGE, model: "openai/gpt-6.1-sol", effort: "medium" as const };
     const result = await startRun(
       server.url,
       runInput({
@@ -1333,7 +1341,7 @@ describe("HTTP server Runs", () => {
         lanes: [
           { model: "gemini-nano-banana-2.1", photos: [1] },
           {
-            model: "gpt-image-2.5-sunburst",
+            model: "gpt-image-2.6-sunburst",
             photos: [2],
             prompt: "A portrait in soft window light",
           },
@@ -1345,12 +1353,12 @@ describe("HTTP server Runs", () => {
     const report = await readRunReport(runsDatabase(data), data, result.result!.runId);
     expect(report.lanes.map(({ model }) => model)).toEqual([
       "gemini-nano-banana-2.1",
-      "gpt-image-2.5-sunburst",
+      "gpt-image-2.6-sunburst",
     ]);
     for (const lane of report.lanes) {
       expect(lane.candidates.map(({ outcome }) => outcome)).toEqual(["Scored"]);
     }
-    expect(fake.requests.find(({ model }) => model === "gpt-image-2.5-sunburst")!.prompt).toBe(
+    expect(fake.requests.find(({ model }) => model === "gpt-image-2.6-sunburst")!.prompt).toBe(
       "A portrait in soft window light",
     );
     // Every Judge the engine got was the body's.
@@ -1362,6 +1370,45 @@ describe("HTTP server Runs", () => {
       });
     }
     expect(judges.requests).toHaveLength(2);
+  }, 60_000);
+
+  test("a Run stored with since-replaced model ids still reads, with its recorded prices and warnings", async () => {
+    // GPT Image 2.5 left the price table in #52; gpt-5.5 was the previous second-Judge default.
+    const OLD_OPENAI = "gpt-image-2.5-sunburst";
+    // A date no other fake price carries, so the report shows which price it read.
+    const recorded: PriceQuote = {
+      ...FAKE_OPENAI_PRICE,
+      model: OLD_OPENAI,
+      source: { ...FAKE_OPENAI_PRICE.source, asOf: "2026-10-15T00:00:00.000Z" },
+    };
+    const data = await volumeWithPhotos();
+    const fake = fakeImageModels(
+      { "gemini-nano-banana-2.1": ["same"], [OLD_OPENAI]: ["same"] },
+      { price: (id) => (id === OLD_OPENAI ? recorded : undefined) },
+    );
+    const judges = fakeJudges();
+    const { server } = await serve(data, fake.layer, { judges: judges.layer });
+    await server.booted;
+    const result = await startRun(
+      server.url,
+      runInput({
+        candidates: 1,
+        lanes: [{ model: "gemini-nano-banana-2.1" }, { model: OLD_OPENAI }],
+        judge: { ...DEFAULT_JUDGE, model: "openai/gpt-5.5" },
+      }),
+    );
+    expect(result.status).toBe("success");
+    const report = await readRunReport(runsDatabase(data), data, result.result!.runId);
+    expect(report.judge.model).toBe("openai/gpt-5.5");
+    expect(report.lanes.map(({ model }) => model)).toEqual(["gemini-nano-banana-2.1", OLD_OPENAI]);
+    expect(report.lanes[1]).toMatchObject({
+      price: { source: recorded.source._tag, asOf: recorded.source.asOf },
+      candidates: [{ outcome: "Scored", actualUsd: toUsd(FAKE_ACTUAL_MICROS) }],
+    });
+    // The recorded OpenAI image price still names the Lane the OpenAI Judge may favour.
+    expect(report.warnings).toEqual([
+      expect.objectContaining({ code: "judge-same-vendor", lanes: [1] }),
+    ]);
   }, 60_000);
 
   test("the API input keeps the request's own checks: a Lane photo outside the Run's is refused", async () => {
@@ -1456,7 +1503,7 @@ test("a Run without a vendor key fails cleanly before any billable call or price
   // Then every Lane's key, in Lane order.
   const { server } = await serve(data, layer);
   await server.booted;
-  const lanes = [{ model: "gpt-image-2.5-sunburst" }, { model: "gemini-nano-banana-2.1" }];
+  const lanes = [{ model: "gpt-image-2.6-sunburst" }, { model: "gemini-nano-banana-2.1" }];
   const result = await startRun(server.url, runInput({ lanes }));
   expect(result.status).toBe("failed");
   expect(result.error!.message).toContain("ICONOGRAPH_OPENAI_API_KEY is not set");

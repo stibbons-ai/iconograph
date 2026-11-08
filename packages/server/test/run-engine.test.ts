@@ -778,7 +778,7 @@ const fivePhotos = {
 
 describe("Run engine with two Lanes", () => {
   const GEMINI = "gemini-nano-banana-2.1";
-  const OPENAI = "gpt-image-2.5-sunburst";
+  const OPENAI = "gpt-image-2.6-sunburst";
 
   test("Gemini and OpenAI Lanes run concurrently, each with its own photos, Prompt and reference limit", async () => {
     // Every call waits until both Lanes have a call in flight: Lanes run one after the
@@ -1082,7 +1082,7 @@ describe("Run engine with two Lanes", () => {
         request({
           candidates: 1,
           lanes: [{ model: GEMINI }, { model: OPENAI }],
-          judge: { ...DEFAULT_JUDGE, model: "openai/gpt-5.5" },
+          judge: { ...DEFAULT_JUDGE, model: "openai/gpt-6.1-sol" },
         }),
       );
       const report = await application.report(runId);
@@ -1527,7 +1527,7 @@ describe("Run engine with a fake Judge", () => {
       const { runId } = await application.start(
         request({
           candidates: 1,
-          judge: { ...DEFAULT_JUDGE, model: "google/gemini-3.1-pro-preview" },
+          judge: { ...DEFAULT_JUDGE, model: "google/gemini-4-argon" },
         }),
       );
       const report = await application.report(runId);
@@ -1956,7 +1956,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
 
   test("each Lane keeps its own Prompt history: an Optimizer call never sees another Lane's Prompts", async () => {
     const GEMINI = "gemini-nano-banana-2.1";
-    const OPENAI = "gpt-image-2.5-sunburst";
+    const OPENAI = "gpt-image-2.6-sunburst";
     const { application, fake, optimizer } = await setup(["same", "same", "same", "same"]);
     try {
       const { runId } = await application.start(
@@ -2664,7 +2664,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
   const turnedAway = (status: number, key: string) =>
     vendorError(status, "authentication_error", `invalid x-api-key ${key}`);
 
-  const GOOGLE_MODEL = "google/gemini-3.1-pro-preview";
+  const GOOGLE_MODEL = "google/gemini-4-argon";
   /** Google's answer to a bad key, both details as it sends them, quoting the key it was sent. */
   const googleRejectsKey = (key: string) =>
     Response.json(googleBadKeyBody(`API key ${key} not valid. Please pass a valid API key.`), {
@@ -2874,14 +2874,14 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
       reason: "judge-failed",
       judges: (origin: string) => judgesOnFakeVendor(origin, "openai"),
       optimizers: () => fakeOptimizers().layer,
-      request: { judge: { ...DEFAULT_JUDGE, model: "openai/gpt-5.5" } },
+      request: { judge: { ...DEFAULT_JUDGE, model: "openai/gpt-6.1-sol" } },
     },
     {
       role: "Optimizer",
       reason: "optimizer-failed",
       judges: () => fakeJudges().layer,
       optimizers: (origin: string) => optimizersOnFakeVendor(origin, "openai"),
-      request: { optimizer: { ...DEFAULT_OPTIMIZER, model: "openai/gpt-5.5" } },
+      request: { optimizer: { ...DEFAULT_OPTIMIZER, model: "openai/gpt-6.1-sol" } },
     },
   ])(
     "an OpenAI $role turned away with a masked key echo stops the Lane with the reason scrubbed and cut, stored, returned, reported and warned",
@@ -3165,7 +3165,7 @@ describe("Run engine loop: Iterations, the Optimizer and stopping rules", () => 
     try {
       const { runId, lanes } = await application.start(
         loop({
-          judge: { ...DEFAULT_JUDGE, model: "openai/gpt-5.5" },
+          judge: { ...DEFAULT_JUDGE, model: "openai/gpt-6.1-sol" },
           ...rules({ maxIterations: 1 }),
         }),
       );

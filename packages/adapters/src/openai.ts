@@ -1,32 +1,36 @@
 /**
  * OpenAI image generation through the native Images API edits endpoint
  * (ADR-0004), not the AI SDK. Request and response shapes were checked against
- * OpenAI's docs on 2026-11-02:
+ * OpenAI's docs for GPT Image 2.6 on 2026-11-08:
  *
  * - API reference, `POST /v1/images/edits`: https://developers.openai.com/api/reference/resources/images/methods/edit.
  *   JSON body (`application/json`) with `images: [{ image_url }]` (a base64
  *   data URL; up to 16 images for GPT Image models), `prompt` (up to 32,000
- *   characters), `quality` (`high`), `size` (`1024x1024` is the standard
- *   square), `n` (default 1), `output_format` (`jpeg`). The response holds
- *   `data[].b64_json` and `usage` (`input_tokens`,
+ *   characters), `quality` (`high`), `size` (`1024x1024` is a standard size
+ *   every GPT Image model supports), `n` (default 1), `output_format`
+ *   (`jpeg`). `gpt-image-2.6-sunburst` and `gpt-image-2.6-flare` are listed
+ *   models. `complexity` (`low`, `medium`, `high`) is left unset, so 2.6 uses
+ *   its default (`high`, no separate fee, per the image generation guide). The
+ *   response holds `data[].b64_json` and `usage` (`input_tokens`,
  *   `input_tokens_details.{text_tokens,image_tokens}`, `output_tokens`,
- *   optionally `output_tokens_details`). The reference describes `usage` as
- *   "for `gpt-image-1` only", while the image generation guide says to use the
- *   response's usage; a response without it costs as unknown.
+ *   optionally `output_tokens_details`), "token usage information for image
+ *   generation with GPT Image models"; a response without it costs as unknown.
  * - Image generation guide: https://developers.openai.com/api/docs/guides/image-generation.
  *   Moderation blocks are errors with `error.code` `moderation_blocked` (type
  *   `image_generation_user_error`, optional `moderation_details` with
  *   `moderation_stage` and `categories`); user errors aren't to be retried.
- *   Its token calculator (`GptImageTokenCalculator`, GPT Image 2.5 at `high`
- *   with base 48) gives 1756 output image tokens for a 1024x1024 image.
+ *   Its token calculator (`GptImageTokenCalculator`, GPT Image 2.6 at `high`
+ *   with base 48 and multiplier 1) gives 1756 output image tokens for a
+ *   1024x1024 image.
  * - Error codes: https://developers.openai.com/api/docs/guides/error-codes.
  *   Retry 429 rate limits and 500/503 with backoff; never quota, credit or
  *   spend-limit 429s (`insufficient_quota`, `credit_balance_exhausted`,
  *   `*_spend_limit_exceeded`, `organization_usage_limit_exceeded`).
  * - Pricing: https://developers.openai.com/api/docs/pricing#image-generation
- *   and the model page https://developers.openai.com/api/docs/models/gpt-image-2.5-sunburst:
- *   text input, image input and image output tokens; "Text output is not
- *   billed because this model outputs images".
+ *   and the model pages https://developers.openai.com/api/docs/models/gpt-image-2.6-sunburst
+ *   and https://developers.openai.com/api/docs/models/gpt-image-2.6-flare:
+ *   text input ($5), image input ($8) and image output ($30) tokens per 1M,
+ *   the same for both; the models output images only, so no text output.
  * - Billing of failed requests: none of those pages, nor the help center,
  *   says whether an HTTP error is billed. A moderation block may come after
  *   the image was generated (`moderation_stage: output`), so an HTTP error's
@@ -73,11 +77,11 @@ export const openaiCapabilities: ImageModelCapabilities = {
   qualities: ["high"],
 };
 
-/** Output image tokens of a high-quality 1024x1024 image (OpenAI's GPT Image 2.5 calculator). */
+/** Output image tokens of a high-quality 1024x1024 image (OpenAI's GPT Image 2.6 calculator). */
 const OUTPUT_TOKENS_PER_IMAGE = 1756;
 /**
  * Input image tokens the estimate allows per reference. OpenAI doesn't
- * document how GPT Image 2.5 tokenizes input images. A reference is sent at
+ * document how GPT Image 2.6 tokenizes input images. A reference is sent at
  * most 2048 px on its longest side, which 32 px patches cover with at most
  * 64 × 64 = 4096 patches (the vision guide's patch rule); 1.5× that allows for
  * a per-model multiplier. Deliberately generous, since an estimate below the
@@ -85,11 +89,11 @@ const OUTPUT_TOKENS_PER_IMAGE = 1756;
  */
 const INPUT_TOKENS_PER_REFERENCE = 6144;
 /**
- * Fewer output tokens than this can't be a real image: the calculator's
- * smallest (low quality, 1024x1024) takes 196, and ours are high quality. A
- * report below it is implausible, so the image's cost is unknown, not tiny.
- * The floor is the calculator's low-quality base of 16, far below 196 on
- * purpose: a safety margin, not the smallest image, so don't raise it to 196.
+ * Fewer output tokens than this can't be a real image: the GPT Image 2.6
+ * calculator's smallest (low quality, 1024x1024) takes 823, and ours are high
+ * quality. A report below it is implausible, so the image's cost is unknown,
+ * not tiny. The floor is the calculator's low-quality base of 16, far below
+ * 823 on purpose: a safety margin, not the smallest image, so don't raise it.
  */
 const MIN_OUTPUT_TOKENS_PER_IMAGE = 16;
 

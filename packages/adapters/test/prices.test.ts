@@ -21,11 +21,13 @@ import { litellmPricesUrl, PriceSnapshot } from "../src/prices";
 import { main } from "../src/prices-cli";
 import { spawnScript } from "./spawn-cli";
 
-// A trimmed excerpt of LiteLLM's model_prices_and_context_window.json at
-// commit a1c5829f6b7664135974e902bdee2419c53ef825 (2026-11-01), unedited entries.
+// A trimmed excerpt of LiteLLM's model_prices_and_context_window.json, unedited
+// entries: the GPT Image 2.6, gpt-6.1-sol and gemini/gemini-4-argon entries at
+// commit e58354f0554cb11b0ce2f042ff625957cded398f (2026-11-08), the others at
+// commit a1c5829f6b7664135974e902bdee2419c53ef825 (2026-11-01).
 const recorded = await readFile(new URL("fixtures/litellm-prices.json", import.meta.url), "utf8");
 const recordedJson = JSON.parse(recorded) as Record<string, Record<string, unknown>>;
-const { "gpt-image-2.5-sunburst": _sunburst, ...withoutSunburst } = recordedJson;
+const { "gpt-image-2.6-sunburst": _sunburst, ...withoutSunburst } = recordedJson;
 const {
   output_cost_per_token: _output,
   input_cost_per_token: _input,
@@ -161,8 +163,8 @@ describe("LiteLLM fetch and cache", () => {
     const source = await open();
     expect(await source.refresh()).toEqual({ refreshed: true, fetchedAt: start, rejected: [] });
     advanceHours(1);
-    expect(await lookup(source, "gpt-image-2.5-sunburst")).toEqual({
-      model: "gpt-image-2.5-sunburst",
+    expect(await lookup(source, "gpt-image-2.6-sunburst")).toEqual({
+      model: "gpt-image-2.6-sunburst",
       pricing: {
         _tag: "OpenAIImage",
         inputPerToken: 5e-6,
@@ -202,9 +204,11 @@ describe("LiteLLM fetch and cache", () => {
     expect([...prices.keys()].sort()).toEqual([
       "claude-sonnet-5-5",
       "gemini-nano-banana-2.1",
+      "gemini/gemini-4-argon",
       "gemini/gemini-nano-banana-2.1",
-      "gpt-image-2.5-flare",
-      "gpt-image-2.5-sunburst",
+      "gpt-6.1-sol",
+      "gpt-image-2.6-flare",
+      "gpt-image-2.6-sunburst",
     ]);
     expect(withoutPrices).toEqual(new Set(["assemblyai/best"]));
     expect(rejected).toEqual([]);
@@ -239,10 +243,10 @@ describe("LiteLLM fetch and cache", () => {
   test("a default model missing from a fetched cache is unpriced, not taken from the snapshot", async () => {
     const source = await open({ url: at("/partial") });
     await source.refresh();
-    const error = await lookupError(source, "gpt-image-2.5-sunburst");
-    expect(error).toMatchObject({ _tag: "Unpriced", model: "gpt-image-2.5-sunburst" });
+    const error = await lookupError(source, "gpt-image-2.6-sunburst");
+    expect(error).toMatchObject({ _tag: "Unpriced", model: "gpt-image-2.6-sunburst" });
     expect(error.message).toBe(
-      `No price for model gpt-image-2.5-sunburst: not in the LiteLLM price data fetched ${start.toISOString()}`,
+      `No price for model gpt-image-2.6-sunburst: not in the LiteLLM price data fetched ${start.toISOString()}`,
     );
   });
 
@@ -432,6 +436,31 @@ describe("snapshot and overrides", () => {
     }
   });
 
+  test("GPT Image 2.6 and the second-Judge choices price from the snapshot and from fresh LiteLLM data", async () => {
+    const image = {
+      _tag: "OpenAIImage",
+      inputPerToken: 5e-6,
+      inputPerImageToken: 8e-6,
+      outputPerImageToken: 3e-5,
+    };
+    const llm = { _tag: "Llm", inputPerToken: 2e-6, outputPerToken: 1e-5 };
+    const expected = {
+      "gpt-image-2.6-sunburst": image,
+      "gpt-image-2.6-flare": image,
+      "gpt-6.1-sol": llm,
+      "gemini/gemini-4-argon": llm,
+    };
+    const source = await open();
+    // No fetch yet: the bundled snapshot answers.
+    for (const [model, pricing] of Object.entries(expected)) {
+      expect(await lookup(source, model)).toMatchObject({ pricing, source: { _tag: "snapshot" } });
+    }
+    await source.refresh();
+    for (const [model, pricing] of Object.entries(expected)) {
+      expect(await lookup(source, model)).toMatchObject({ pricing, source: { _tag: "litellm" } });
+    }
+  });
+
   test.each(["soon", "1", "Nov 1 2026", "2026-11-01"])(
     "a snapshot dated %p is rejected, injected or bundled",
     async (fetchedAt) => {
@@ -473,19 +502,19 @@ describe("snapshot and overrides", () => {
 
   test.each([
     [
-      "gpt-image-2.5-flare",
+      "gpt-image-2.6-flare",
       "a misspelt field",
       { input_cost_per_tokn: 1, output_cost_per_token: 1 },
       "excess property",
     ],
     [
-      "gpt-image-2.5-flare",
+      "gpt-image-2.6-flare",
       "a negative price",
       { input_cost_per_token: -1, output_cost_per_token: 1 },
       "greater than",
     ],
     [
-      "gpt-image-2.5-flare",
+      "gpt-image-2.6-flare",
       "a field the pricing mode needs",
       { input_cost_per_token: 1, output_cost_per_token: 1 },
       "needs input_cost_per_image_token, output_cost_per_image_token",
@@ -562,7 +591,7 @@ describe("prices command", () => {
   });
 
   test("an implicit refresh that fails is reported while the snapshot answers", async () => {
-    const quote = await capture(["gpt-image-2.5-flare", "--url", at("/unavailable")]);
+    const quote = await capture(["gpt-image-2.6-flare", "--url", at("/unavailable")]);
     expect(quote.source._tag).toBe("snapshot");
     expect(quote.refresh).toEqual({
       refreshed: false,
